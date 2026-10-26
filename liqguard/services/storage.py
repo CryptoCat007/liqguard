@@ -14,6 +14,14 @@ from liqguard.models import ExchangeBinding, User, UserThreshold
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_KEY_FILE = Path.home() / ".liqguard" / "encryption.key"
+
+
+class EncryptionKeyError(Exception):
+    """Raised when encryption key is missing or invalid for secret operations."""
+
+    pass
+
 
 class EncryptedStorage:
     """
@@ -32,7 +40,8 @@ class EncryptedStorage:
     def __init__(
         self,
         db_path: str = "liqguard.db",
-        encryption_key: Optional[str] = None
+        encryption_key: Optional[str] = None,
+        key_file_path: Optional[Path] = None,
     ):
         """
         Initialize encrypted storage.
@@ -41,21 +50,78 @@ class EncryptedStorage:
             db_path: Path to SQLite database
             encryption_key: Base64-encoded Fernet key. If not provided,
                            reads from LIQGUARD_ENCRYPTION_KEY env var.
-                           If still not found, generates a new one (dev mode).
+                           If still not found, loads or creates a key file.
+            key_file_path: Path to key file (default: ~/.liqguard/encryption.key)
         """
         self.db_path = Path(db_path)
+        self._key_file_path = key_file_path or DEFAULT_KEY_FILE
+        self._key_source: str = "unknown"
 
         key = encryption_key or os.environ.get("LIQGUARD_ENCRYPTION_KEY")
+
         if key:
             self.fernet = Fernet(key.encode() if isinstance(key, str) else key)
+            self._key_source = "env" if not encryption_key else "provided"
         else:
-            logger.warning(
-                "No encryption key provided. Generating ephemeral key. "
-                "Set LIQGUARD_ENCRYPTION_KEY for production use."
-            )
-            self.fernet = Fernet(Fernet.generate_key())
+            key, self._key_source = self._load_or_create_key_file()
+            self.fernet = Fernet(key.encode() if isinstance(key, str) else key)
 
         self._initialized = False
+
+    def _load_or_create_key_file(self) -> tuple[str, str]:
+        """
+        Load encryption key from file, or create a new one.
+
+        Returns:
+            Tuple of (key, source) where source is 'file' or 'file_created'
+        """
+        if self._key_file_path.exists():
+            try:
+                key = self._key_file_path.read_text().strip()
+                Fernet(key.encode())
+                logger.info(f"Loaded encryption key from {self._key_file_path}")
+                return key, "file"
+            except Exception as e:
+                logger.error(f"Invalid key file {self._key_file_path}: {e}")
+                raise EncryptionKeyError(
+                    f"Invalid encryption key in {self._key_file_path}. "
+                    "Delete the file and restart, or set LIQGUARD_ENCRYPTION_KEY."
+                ) from e
+
+        self._key_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        key = Fernet.generate_key().decode()
+        self._key_file_path.write_text(key)
+
+        try:
+            self._key_file_path.chmod(0o600)
+        except OSError:
+            pass
+
+        logger.warning(
+            f"No LIQGUARD_ENCRYPTION_KEY set. "
+            f"Generated and saved encryption key to {self._key_file_path}\n"
+            f"⚠️  Keep this file safe! API secrets are encrypted with this key.\n"
+            f"⚠️  If lost, you will need to re-bind your exchange accounts.\n"
+            f"For production, set LIQGUARD_ENCRYPTION_KEY environment variable instead."
+        )
+
+        return key, "file_created"
+
+    @property
+    def key_source(self) -> str:
+        """
+        Return the source of the encryption key.
+
+        Returns:
+            One of: 'env', 'provided', 'file', 'file_created'
+        """
+        return self._key_source
+
+    @property
+    def is_key_persistent(self) -> bool:
+        """Check if the encryption key is persistent (not ephemeral)."""
+        return self._key_source in ("env", "provided", "file", "file_created")
 
     @staticmethod
     def generate_key() -> str:

@@ -71,6 +71,9 @@ venv.bak/
 *.sqlite
 *.sqlite3
 
+# Logs
+*.log
+
 # Secrets (never commit these!)
 *.pem
 *.key

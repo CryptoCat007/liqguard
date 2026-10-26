@@ -28,7 +28,7 @@ dev = [
 ]
 
 [project.scripts]
-liqguard = "liqguard.main:main"
+liqguard = "liqguard.main:main_sync"
 
 [build-system]
 requires = ["hatchling"]

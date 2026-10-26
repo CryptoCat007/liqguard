@@ -47,8 +47,10 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 # Optional - enables AI risk explanations and screenshot parsing
 META_API_KEY=your_meta_api_key
 
-# Optional - for persistent encrypted storage (generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-LIQGUARD_ENCRYPTION_KEY=your_fernet_key
+# Recommended - for encrypted storage of API secrets
+# Generate with: python -c "from liqguard.services import EncryptedStorage; print(EncryptedStorage.generate_key())"
+# If not set, a key is auto-generated and saved to ~/.liqguard/encryption.key
+LIQGUARD_ENCRYPTION_KEY=
 
 # Optional - database path
 LIQGUARD_DB_PATH=liqguard.db
@@ -56,6 +58,20 @@ LIQGUARD_DB_PATH=liqguard.db
 # Optional - position check interval in seconds (default: 30)
 LIQGUARD_POLL_INTERVAL=30
 ```
+
+#### Encryption Key
+
+API secrets (like Binance API keys) are encrypted before storage. The encryption key is sourced in this order:
+
+1. `LIQGUARD_ENCRYPTION_KEY` environment variable (recommended for production)
+2. Key file at `~/.liqguard/encryption.key` (auto-created if missing)
+
+To generate a new key:
+```bash
+python -c "from liqguard.services import EncryptedStorage; print(EncryptedStorage.generate_key())"
+```
+
+**Warning**: If you lose the encryption key, all stored API secrets become unreadable and you'll need to re-bind your exchange accounts.
 
 ### Running the Bot
 
@@ -264,7 +280,7 @@ ruff format liqguard/
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram Bot API token |
 | `META_API_KEY` | No | Meta AI API key for LLM features |
-| `LIQGUARD_ENCRYPTION_KEY` | No | Fernet key for secret encryption |
+| `LIQGUARD_ENCRYPTION_KEY` | Recommended | Fernet key for secret encryption. If not set, auto-generated and saved to `~/.liqguard/encryption.key` |
 | `LIQGUARD_DB_PATH` | No | SQLite database path (default: liqguard.db) |
 | `LIQGUARD_POLL_INTERVAL` | No | Position check interval in seconds (default: 30) |
 
