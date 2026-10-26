@@ -1,0 +1,127 @@
+"""Alert models for liquidation warnings."""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Optional
+
+
+def _utcnow():
+    """Get current UTC time in timezone-aware format."""
+    return datetime.now(timezone.utc)
+
+
+class AlertSeverity(str, Enum):
+    """Alert severity levels."""
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    EMERGENCY = "emergency"
+
+
+class AlertType(str, Enum):
+    """Types of alerts."""
+    DISTANCE_THRESHOLD = "distance_threshold"
+    MARGIN_RATIO = "margin_ratio"
+    RAPID_MOVEMENT = "rapid_movement"
+    POSITION_OPENED = "position_opened"
+    POSITION_CLOSED = "position_closed"
+
+
+@dataclass
+class Alert:
+    """Alert for a position risk event."""
+
+    alert_type: AlertType
+    severity: AlertSeverity
+    symbol: str
+    venue: str
+    message: str
+    distance_to_liquidation_pct: float
+    margin_to_add_for_safety: float
+    timestamp: datetime = field(default_factory=_utcnow)
+
+    position_side: Optional[str] = None
+    position_size: Optional[float] = None
+    mark_price: Optional[float] = None
+    liquidation_price: Optional[float] = None
+    leverage: Optional[float] = None
+
+    llm_explanation: Optional[str] = None
+    llm_explanation_zh: Optional[str] = None
+    actions: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "alert_type": self.alert_type.value,
+            "severity": self.severity.value,
+            "symbol": self.symbol,
+            "venue": self.venue,
+            "message": self.message,
+            "distance_to_liquidation_pct": self.distance_to_liquidation_pct,
+            "margin_to_add_for_safety": self.margin_to_add_for_safety,
+            "timestamp": self.timestamp.isoformat(),
+            "position_side": self.position_side,
+            "position_size": self.position_size,
+            "mark_price": self.mark_price,
+            "liquidation_price": self.liquidation_price,
+            "leverage": self.leverage,
+            "llm_explanation": self.llm_explanation,
+            "llm_explanation_zh": self.llm_explanation_zh,
+            "actions": self.actions,
+        }
+
+
+@dataclass
+class UserThreshold:
+    """User-configurable alert thresholds."""
+
+    warning_distance_pct: float = 20.0
+    critical_distance_pct: float = 10.0
+    emergency_distance_pct: float = 5.0
+
+    margin_ratio_warning: float = 50.0
+    margin_ratio_critical: float = 30.0
+    margin_ratio_emergency: float = 15.0
+
+    safety_target_pct: float = 30.0
+
+    cooldown_seconds: int = 300
+
+    def get_severity_for_distance(self, distance_pct: float) -> Optional[AlertSeverity]:
+        """Get alert severity based on distance to liquidation."""
+        if distance_pct <= self.emergency_distance_pct:
+            return AlertSeverity.EMERGENCY
+        elif distance_pct <= self.critical_distance_pct:
+            return AlertSeverity.CRITICAL
+        elif distance_pct <= self.warning_distance_pct:
+            return AlertSeverity.WARNING
+        return None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "warning_distance_pct": self.warning_distance_pct,
+            "critical_distance_pct": self.critical_distance_pct,
+            "emergency_distance_pct": self.emergency_distance_pct,
+            "margin_ratio_warning": self.margin_ratio_warning,
+            "margin_ratio_critical": self.margin_ratio_critical,
+            "margin_ratio_emergency": self.margin_ratio_emergency,
+            "safety_target_pct": self.safety_target_pct,
+            "cooldown_seconds": self.cooldown_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "UserThreshold":
+        """Create from dictionary."""
+        return cls(
+            warning_distance_pct=data.get("warning_distance_pct", 20.0),
+            critical_distance_pct=data.get("critical_distance_pct", 10.0),
+            emergency_distance_pct=data.get("emergency_distance_pct", 5.0),
+            margin_ratio_warning=data.get("margin_ratio_warning", 50.0),
+            margin_ratio_critical=data.get("margin_ratio_critical", 30.0),
+            margin_ratio_emergency=data.get("margin_ratio_emergency", 15.0),
+            safety_target_pct=data.get("safety_target_pct", 30.0),
+            cooldown_seconds=data.get("cooldown_seconds", 300),
+        )
