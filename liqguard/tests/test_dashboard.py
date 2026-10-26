@@ -1,266 +1,126 @@
-"""Tests for the web dashboard."""
-
-import asyncio
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+"""Tests for the read-only web dashboard."""
 
 import pytest
+from fastapi.testclient import TestClient
 
-from liqguard.dashboard.server import (
-    AlertEvent,
-    DashboardState,
-    PricePoint,
-    create_app,
-    get_state,
-)
-from liqguard.models import Position, Side, Venue
+from liqguard.dashboard import create_app
+from liqguard.llm import MetaLLMClient
+from liqguard.services.simulation import MarketSimulation
+
+SECRET = "meta-key-that-must-never-leak"
 
 
 @pytest.fixture
-def sample_position():
-    """Create a sample position for testing."""
-    return Position(
-        venue=Venue.DEMO,
-        symbol="BTCUSDT",
-        side=Side.LONG,
-        size=0.5,
-        entry_price=65000.0,
-        mark_price=60000.0,
-        liquidation_price=58500.0,
-        margin=3250.0,
-        leverage=10,
-        unrealized_pnl=-2500.0,
-    )
+def sim():
+    return MarketSimulation(MetaLLMClient(api_key=SECRET, use_mock=True), tick_interval=0)
 
 
 @pytest.fixture
-def dashboard_state():
-    """Create fresh dashboard state for testing."""
-    return DashboardState()
+def client(sim):
+    with TestClient(create_app(simulation=sim)) as c:
+        yield c
 
 
-class TestPricePoint:
-    """Tests for PricePoint dataclass."""
-    
-    def test_to_dict(self):
-        point = PricePoint(
-            timestamp=datetime(2026, 10, 26, 12, 0, 0, tzinfo=timezone.utc),
-            symbol="BTCUSDT",
-            price=65000.50,
-            liquidation_price=58500.25,
-        )
-        
-        result = point.to_dict()
-        
-        assert result["symbol"] == "BTCUSDT"
-        assert result["price"] == 65000.5
-        assert result["liquidation_price"] == 58500.25
-        assert "timestamp" in result
+def run_to_end(client: TestClient, sim: MarketSimulation) -> None:
+    assert client.post("/api/simulate").json()["status"] == "started"
+    client.portal.call(sim.wait)
 
 
-class TestAlertEvent:
-    """Tests for AlertEvent dataclass."""
-    
-    def test_to_dict(self):
-        event = AlertEvent(
-            timestamp=datetime(2026, 10, 26, 12, 0, 0, tzinfo=timezone.utc),
-            level="critical",
-            symbol="BTCUSDT",
-            distance=8.5,
-            message="Test alert",
-            advice={"action": "add_margin"},
-        )
-        
-        result = event.to_dict()
-        
-        assert result["level"] == "critical"
-        assert result["symbol"] == "BTCUSDT"
-        assert result["distance"] == 8.5
-        assert result["message"] == "Test alert"
-        assert result["advice"] == {"action": "add_margin"}
+class TestPages:
+    def test_index_served_with_security_headers(self, client):
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "LiqGuard" in r.text
+        assert "Simulate market" in r.text
+        assert "default-src 'self'" in r.headers["content-security-policy"]
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+    @pytest.mark.parametrize("path", ["/static/app.js", "/static/app.css"])
+    def test_static_assets(self, client, path):
+        assert client.get(path).status_code == 200
+
+    def test_health(self, client):
+        body = client.get("/api/health").json()
+        assert body == {"status": "ok", "demo": True, "muse_mode": "mock", "state": "idle"}
 
 
-class TestDashboardState:
-    """Tests for DashboardState."""
-    
-    def test_add_price_point(self, dashboard_state):
-        point = dashboard_state.add_price_point("BTCUSDT", 65000.0, 58500.0)
-        
-        assert point.symbol == "BTCUSDT"
-        assert point.price == 65000.0
-        assert point.liquidation_price == 58500.0
-        assert "BTCUSDT" in dashboard_state.price_history
-        assert len(dashboard_state.price_history["BTCUSDT"]) == 1
-    
-    def test_price_history_limit(self, dashboard_state):
-        dashboard_state._max_history_points = 10
-        
-        for i in range(15):
-            dashboard_state.add_price_point("BTCUSDT", 65000.0 + i, 58500.0)
-        
-        assert len(dashboard_state.price_history["BTCUSDT"]) == 10
-    
-    def test_add_alert(self, dashboard_state, sample_position):
-        event = dashboard_state.add_alert("critical", sample_position, 8.5)
-        
-        assert event.level == "critical"
-        assert event.symbol == "BTCUSDT"
-        assert event.distance == 8.5
-        assert len(dashboard_state.alert_timeline) == 1
-    
-    def test_alert_timeline_limit(self, dashboard_state, sample_position):
-        for i in range(60):
-            dashboard_state.add_alert("warning", sample_position, 15.0)
-        
-        assert len(dashboard_state.alert_timeline) == 50
-    
-    async def test_get_portfolio_overview(self, dashboard_state):
-        overview = await dashboard_state.get_portfolio_overview()
-        
-        assert overview.total_positions == 3
-        assert overview.venues == ["demo"]
-    
-    async def test_broadcast_no_clients(self, dashboard_state):
-        await dashboard_state.broadcast({"type": "test"})
-    
-    async def test_broadcast_with_clients(self, dashboard_state):
-        mock_ws = AsyncMock()
-        dashboard_state.connected_clients.add(mock_ws)
-        
-        await dashboard_state.broadcast({"type": "test", "data": "hello"})
-        
-        mock_ws.send_text.assert_called_once()
-    
-    async def test_broadcast_removes_disconnected(self, dashboard_state):
-        mock_ws = AsyncMock()
-        mock_ws.send_text.side_effect = Exception("disconnected")
-        dashboard_state.connected_clients.add(mock_ws)
-        
-        await dashboard_state.broadcast({"type": "test"})
-        
-        assert mock_ws not in dashboard_state.connected_clients
+class TestReadEndpoints:
+    def test_snapshot_initial_state(self, client):
+        snap = client.get("/api/snapshot").json()
+        assert snap["state"] == "idle"
+        assert snap["demo"] is True
+        assert snap["thresholds"] == {"warning": 20.0, "critical": 10.0, "emergency": 5.0}
+        assert set(snap["history"]) == {"BTCUSDT", "ETH", "SOLUSDT"}
+        assert snap["summary"]["riskiest_symbol"] in snap["history"]
+        assert "web" in snap["channels"]
+
+    def test_portfolio_aggregates_both_venues(self, client):
+        body = client.get("/api/portfolio").json()
+        ov = body["overview"]
+        assert ov["venues"] == ["binance", "hyperliquid"]
+        assert ov["summary"]["total_positions"] == 3
+        notional = sum(p["notional_value"] for p in ov["positions"])
+        assert ov["summary"]["total_notional_value"] == pytest.approx(notional, abs=0.05)
+        assert body["summary"]["headline"]
+
+    def test_full_run_populates_timeline_advice_audit(self, client, sim):
+        run_to_end(client, sim)
+
+        alerts = client.get("/api/alerts").json()
+        advice = client.get("/api/advice").json()
+        audit = client.get("/api/audit").json()
+
+        assert {a["level"] for a in alerts} == {"warning", "critical", "emergency"}
+        assert len(advice) == len(alerts)
+        events = [e["event"] for e in audit]
+        assert events[0] == "simulation_started"
+        assert "advice_generated" in events
+        assert events[-1] in ("simulation_finished", "advice_generated")
+
+    def test_no_secret_in_any_response(self, client, sim):
+        run_to_end(client, sim)
+        for path in ["/", "/static/app.js", "/api/health", "/api/snapshot", "/api/portfolio",
+                     "/api/alerts", "/api/advice", "/api/audit"]:
+            assert SECRET not in client.get(path).text, path
 
 
-class TestCreateApp:
-    """Tests for FastAPI app creation."""
-    
-    def test_creates_app(self):
-        app = create_app()
-        
-        assert app.title == "LiqGuard Dashboard"
-        assert app.version == "0.1.0"
-    
-    def test_creates_app_with_llm_client(self):
-        mock_llm = MagicMock()
-        app = create_app(llm_client=mock_llm)
-        
-        state = get_state()
-        assert state.llm_client == mock_llm
+class TestControls:
+    def test_simulate_twice_reports_running(self, client):
+        slow = MarketSimulation(None, tick_interval=0.2)
+        with TestClient(create_app(simulation=slow)) as c:
+            assert c.post("/api/simulate").json()["status"] == "started"
+            assert c.post("/api/simulate").json()["status"] == "already_running"
+            assert c.post("/api/simulate/stop").json()["status"] == "stopped"
+            assert c.get("/api/health").json()["state"] == "stopped"
+
+    def test_reset_clears_state(self, client, sim):
+        run_to_end(client, sim)
+        assert client.post("/api/simulate/reset").json()["status"] == "reset"
+        assert client.get("/api/alerts").json() == []
+        assert client.get("/api/health").json()["state"] == "idle"
+
+    def test_no_execution_endpoints(self, client):
+        paths = {r.path for r in client.app.routes}
+        for forbidden in ("/api/actions", "/api/execute", "/api/confirm", "/api/bind"):
+            assert forbidden not in paths
+        posts = {r.path for r in client.app.routes if "POST" in getattr(r, "methods", set())}
+        assert posts == {"/api/simulate", "/api/simulate/stop", "/api/simulate/reset"}
 
 
-class TestDashboardEndpoints:
-    """Tests for dashboard API endpoints."""
-    
-    @pytest.fixture
-    def client(self):
-        """Create test client."""
-        from fastapi.testclient import TestClient
-        app = create_app()
-        return TestClient(app)
-    
-    def test_index_returns_html(self, client):
-        response = client.get("/")
-        
-        assert response.status_code == 200
-        assert "text/html" in response.headers["content-type"]
-        assert "LiqGuard Dashboard" in response.text
-    
-    def test_portfolio_endpoint(self, client):
-        response = client.get("/api/portfolio")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert "summary" in data
-        assert "risk_metrics" in data
-        assert "positions" in data
-    
-    def test_positions_endpoint(self, client):
-        response = client.get("/api/positions")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert isinstance(data, list)
-    
-    def test_price_history_endpoint(self, client):
-        response = client.get("/api/price-history")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert isinstance(data, dict)
-    
-    def test_alerts_endpoint(self, client):
-        response = client.get("/api/alerts")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert isinstance(data, list)
-    
-    def test_advice_endpoint(self, client):
-        response = client.get("/api/advice")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert isinstance(data, list)
-    
-    def test_simulate_endpoint(self, client):
-        response = client.post("/api/simulate")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] in ["started", "already_running"]
-        
-        client.post("/api/stop-simulation")
-    
-    def test_stop_simulation_endpoint(self, client):
-        response = client.post("/api/stop-simulation")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "stopped"
-    
-    def test_reset_endpoint(self, client):
-        response = client.post("/api/reset")
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "reset"
+class TestWebSocket:
+    def test_snapshot_then_live_events(self, client, sim):
+        with client.websocket_connect("/ws") as ws:
+            first = ws.receive_json()
+            assert first["type"] == "snapshot"
+            assert first["data"]["state"] == "idle"
 
+            client.post("/api/simulate")
+            seen = set()
+            while not {"tick", "alert", "advice", "audit"} <= seen:
+                seen.add(ws.receive_json()["type"])
 
-class TestSimulation:
-    """Tests for market simulation."""
-    
-    async def test_start_stop_simulation(self, dashboard_state):
-        await dashboard_state.start_simulation()
-        
-        assert dashboard_state._running is True
-        
-        await asyncio.sleep(0.1)
-        
-        dashboard_state.stop_simulation()
-        
-        assert dashboard_state._running is False
-    
-    async def test_simulation_updates_prices(self, dashboard_state):
-        await dashboard_state.start_simulation()
-        
-        await asyncio.sleep(2.5)
-        
-        dashboard_state.stop_simulation()
-        
-        assert len(dashboard_state.price_history) > 0
-    
-    async def test_double_start_ignored(self, dashboard_state):
-        await dashboard_state.start_simulation()
-        await dashboard_state.start_simulation()
-        
-        dashboard_state.stop_simulation()
+    def test_ping(self, client):
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()
+            ws.send_text("ping")
+            assert ws.receive_json() == {"type": "pong"}

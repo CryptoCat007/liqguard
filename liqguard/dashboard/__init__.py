@@ -1,5 +1,5 @@
 """Web dashboard for LiqGuard."""
 
-from .server import DashboardServer, create_app
+from .server import DashboardServer, WebSocketHub, create_app
 
-__all__ = ["DashboardServer", "create_app"]
+__all__ = ["DashboardServer", "WebSocketHub", "create_app"]

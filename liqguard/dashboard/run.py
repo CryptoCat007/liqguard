@@ -1,63 +1,43 @@
 """
-Standalone dashboard runner.
+Standalone dashboard runner (web only, demo data).
 
-Run with: python -m liqguard.dashboard.run
-Or: liqguard-dashboard (console script)
+    liqguard-dashboard --port 8765
+    python -m liqguard.dashboard.run --port 8765
+
+To get alerts on Telegram at the same time, run the bot with `liqguard --dashboard`.
 """
 
 import argparse
-import asyncio
 import logging
-import os
 import sys
 
+import uvicorn
 from dotenv import load_dotenv
 
 from liqguard.llm import MetaLLMClient
 
-from .server import DashboardServer, get_state
+from .server import create_app
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-
 logger = logging.getLogger(__name__)
 
 
-async def main(host: str, port: int) -> None:
-    """Run dashboard server."""
-    load_dotenv()
-    
-    meta_api_key = os.environ.get("META_API_KEY")
-    llm_client = MetaLLMClient(api_key=meta_api_key)
-    
-    logger.info(f"Starting LiqGuard Dashboard...")
-    logger.info(f"Meta AI: {'mock mode (demo)' if llm_client.is_mock else 'live API'}")
-    
-    server = DashboardServer(host=host, port=port, llm_client=llm_client)
-    
-    try:
-        await server.start()
-        
-        while True:
-            await asyncio.sleep(1)
-            
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        await server.stop()
-
-
 def run_dashboard() -> None:
-    """Console script entry point."""
-    parser = argparse.ArgumentParser(description="LiqGuard Web Dashboard")
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8765, help="Port to bind to")
+    parser = argparse.ArgumentParser(description="LiqGuard web dashboard (read-only, demo data)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
     args = parser.parse_args()
-    
-    asyncio.run(main(args.host, args.port))
+
+    load_dotenv()
+    llm_client = MetaLLMClient()
+    logger.info(f"Muse: {'mock mode' if llm_client.is_mock else 'live API'}")
+    logger.info(f"Dashboard: http://{args.host}:{args.port}")
+
+    uvicorn.run(create_app(llm_client=llm_client), host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
