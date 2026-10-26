@@ -1,9 +1,11 @@
 """Main entry point for LiqGuard Telegram bot."""
 
+import argparse
 import asyncio
 import logging
 import os
 import sys
+from typing import Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -39,6 +41,8 @@ def load_config() -> dict:
         "encryption_key": os.environ.get("LIQGUARD_ENCRYPTION_KEY"),
         "db_path": os.environ.get("LIQGUARD_DB_PATH", "liqguard.db"),
         "poll_interval": int(os.environ.get("LIQGUARD_POLL_INTERVAL", "30")),
+        "dashboard_enabled": os.environ.get("LIQGUARD_DASHBOARD", "false").lower() == "true",
+        "dashboard_port": int(os.environ.get("LIQGUARD_DASHBOARD_PORT", "8765")),
     }
 
     if not config["telegram_token"]:
@@ -60,11 +64,14 @@ def load_config() -> dict:
     return config
 
 
-async def main() -> None:
+async def main(dashboard: bool = False, dashboard_port: int = 8765) -> None:
     """Main entry point."""
     logger.info("Starting LiqGuard...")
 
     config = load_config()
+    
+    enable_dashboard = dashboard or config["dashboard_enabled"]
+    port = dashboard_port if dashboard else config["dashboard_port"]
 
     storage = EncryptedStorage(
         db_path=config["db_path"],
@@ -99,6 +106,18 @@ async def main() -> None:
         poll_interval=config["poll_interval"],
     )
 
+    dashboard_server: Optional["DashboardServer"] = None
+    
+    if enable_dashboard:
+        from liqguard.dashboard import DashboardServer
+        dashboard_server = DashboardServer(
+            host="127.0.0.1",
+            port=port,
+            llm_client=llm_client,
+        )
+        await dashboard_server.start()
+        logger.info(f"Dashboard: http://127.0.0.1:{port}")
+
     logger.info("LiqGuard started successfully!")
     logger.info(f"Meta AI: {'mock mode (demo/tests)' if llm_client.is_mock else 'live API'}")
     logger.info(f"Database: {config['db_path']}")
@@ -112,12 +131,28 @@ async def main() -> None:
         await monitor.stop()
         await storage.close()
         await bot.session.close()
+        if dashboard_server:
+            await dashboard_server.stop()
 
 
 def main_sync() -> None:
     """Synchronous entry point for console script."""
+    parser = argparse.ArgumentParser(description="LiqGuard Telegram Bot")
+    parser.add_argument(
+        "--dashboard", 
+        action="store_true",
+        help="Enable web dashboard"
+    )
+    parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8765,
+        help="Dashboard port (default: 8765)"
+    )
+    args = parser.parse_args()
+    
     try:
-        asyncio.run(main())
+        asyncio.run(main(dashboard=args.dashboard, dashboard_port=args.dashboard_port))
     except KeyboardInterrupt:
         logger.info("Shutting down...")
 

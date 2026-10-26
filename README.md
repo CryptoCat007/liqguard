@@ -144,7 +144,10 @@ liqguard/
 ├── telegram/            # Bot interface
 │   ├── handlers.py     # Command handlers
 │   └── monitor.py      # Background position monitor
-└── main.py             # Entry point
+├── dashboard/           # Web dashboard
+│   ├── server.py       # FastAPI + WebSocket server
+│   └── run.py          # Standalone runner
+└── main.py             # Entry point (bot + optional dashboard)
 ```
 
 ### Data Layer API
@@ -230,10 +233,75 @@ export LIQGUARD_ENCRYPTION_KEY="your-key-here"
 # Or auto-generated and saved to ~/.liqguard/encryption.key
 ```
 
+## Web Dashboard
+
+A single-page web dashboard for demo/hackathon judges. Shows real-time risk monitoring with the same data as the Telegram bot.
+
+### Running the Dashboard
+
+```bash
+# Standalone dashboard (demo mode only)
+liqguard-dashboard --port 8765
+
+# Or with Python
+python -m liqguard.dashboard.run --port 8765
+
+# Combined with Telegram bot
+liqguard --dashboard --dashboard-port 8765
+
+# Via environment variable
+LIQGUARD_DASHBOARD=true liqguard
+```
+
+Then open http://127.0.0.1:8765 in your browser.
+
+### Dashboard Features
+
+| Feature | Description |
+|---------|-------------|
+| **📊 Portfolio Overview** | Total positions, notional value, margin, risk level |
+| **📈 Price vs Liquidation Chart** | Real-time Chart.js graph for each position |
+| **⚡ Position Risk Levels** | Distance-to-liquidation bars for each position |
+| **🔔 Alert Timeline** | Three-tier alerts (warning/critical/emergency) |
+| **💡 AI Advice Cards** | Muse explanations with exact action recommendations |
+| **📋 Audit Log** | Action history (when protective actions enabled) |
+| **▶️ Simulate Market** | Triggers the same demo path as `/demo` in Telegram |
+
+### How It Works
+
+1. Click **Simulate Market** to start the liquidation path simulation
+2. Prices move toward liquidation over ~30 seconds
+3. Alerts fire at 20%, 10%, 5% thresholds
+4. AI advice cards appear for each alert
+5. Charts update in real-time via WebSocket
+
+### API Endpoints
+
+The dashboard exposes a REST API at the same port:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/portfolio` | GET | Current portfolio overview (JSON) |
+| `/api/positions` | GET | All positions |
+| `/api/price-history` | GET | Price history for charts |
+| `/api/alerts` | GET | Alert timeline |
+| `/api/advice` | GET | AI advice cards |
+| `/api/simulate` | POST | Start simulation |
+| `/api/stop-simulation` | POST | Stop simulation |
+| `/api/reset` | POST | Reset all state |
+| `/ws` | WebSocket | Real-time updates |
+
+### Security
+
+- **Read-only**: No execution capability from web interface
+- **No secrets exposed**: API keys never sent to browser
+- **Demo data by default**: Real exchange data only with bound accounts
+- **Local only**: Binds to 127.0.0.1 by default
+
 ## Testing
 
 ```bash
-# Run all tests (67 tests)
+# Run all tests (91 tests)
 python3 -m pytest liqguard/tests/ -v
 
 # Run with coverage
@@ -250,6 +318,7 @@ python3 -m pytest liqguard/tests/test_portfolio.py -v
 - `test_portfolio.py`: Portfolio analysis and metrics
 - `test_llm.py`: Mock mode and severity levels
 - `test_storage.py`: Encryption key handling
+- `test_dashboard.py`: Dashboard server, WebSocket, simulation
 
 ## Environment Variables
 
@@ -261,40 +330,46 @@ python3 -m pytest liqguard/tests/test_portfolio.py -v
 | `LIQGUARD_ENCRYPTION_KEY` | Recommended | Fernet key for secrets (auto-generated if not set) |
 | `LIQGUARD_DB_PATH` | No | SQLite database path (default: liqguard.db) |
 | `LIQGUARD_POLL_INTERVAL` | No | Position check interval in seconds (default: 30) |
+| `LIQGUARD_DASHBOARD` | No | Enable web dashboard (default: false) |
+| `LIQGUARD_DASHBOARD_PORT` | No | Dashboard port (default: 8765) |
 
 ## Demo Video Script
 
 For the hackathon demo (~3 minutes):
 
-### Scene 1: Introduction (30s)
+### Scene 1: Introduction (20s)
 1. Show the bot in Telegram
 2. Send `/start` - show welcome message
 3. "Liquidations happen fast. LiqGuard warns you in time."
 
-### Scene 2: Demo Mode + Simulation (60s)
-1. `/demo` → Select "Liquidation Simulation"
-2. Watch prices move, alerts fire at each tier
-3. Show actionable advice with exact numbers
-4. Tap an action button
+### Scene 2: Web Dashboard + Simulation (60s)
+1. Open web dashboard at http://127.0.0.1:8765
+2. Click "Simulate Market" button
+3. Watch the price chart move toward liquidation
+4. Show alerts appearing in timeline (warning → critical → emergency)
+5. Show AI advice cards with exact numbers
+6. Meanwhile, show Telegram receiving the same alerts
 
-### Scene 3: Portfolio Overview (30s)
-1. `/risk` → Show portfolio risk overview
-2. Highlight risk metrics, exposure analysis
-3. Show riskiest position
+### Scene 3: Telegram Bot Commands (40s)
+1. `/risk` → Show portfolio risk overview in Telegram
+2. `/positions` → Show all positions with actionable advice
+3. `/ask What's my riskiest position?` → AI analysis
 
-### Scene 4: AI Features (30s)
-1. `/ask What's my riskiest position?`
-2. Show AI-powered analysis with exact numbers
-3. Toggle to Chinese with `/language`
-
-### Scene 5: Screenshot Import (20s)
-1. Send a position screenshot
-2. Show parsed data
+### Scene 4: Screenshot Import (30s)
+1. Send a position screenshot to the bot
+2. Show Muse parsing the image
 3. Confirm to add to monitoring
+4. See it appear in `/positions`
 
-### Scene 6: Security (10s)
-1. Mention testnet-only execution
-2. Show kill switch: `/killswitch`
+### Scene 5: Protective Actions (20s)
+1. Show action button on alert
+2. Mention testnet-only execution
+3. Demo `/killswitch` for emergency stop
+
+### Scene 6: Security Wrap-up (10s)
+1. Read-only API keys
+2. Encrypted storage
+3. No secrets in dashboard
 
 ## Roadmap
 
@@ -303,10 +378,10 @@ For the hackathon demo (~3 minutes):
 - [x] Mock mode for demo/testing
 - [x] Portfolio risk overview
 - [x] Protective actions Tier 1
+- [x] Web dashboard for demo/judges
 - [ ] OKX and Bybit support
 - [ ] Tier 2: Rules-based automation
 - [ ] Tier 3: Full AI automation
-- [ ] Web dashboard (separate project)
 - [ ] Voice questions via Muse Voice
 
 ## License
