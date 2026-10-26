@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from liqguard.models import Position
 from liqguard.services.advice import ActionableAdvice, ActionType
@@ -146,10 +146,21 @@ class AuditLogger:
     def __init__(self, log_path: str = "audit.log"):
         self.log_path = Path(log_path)
         self._entries: list[AuditLogEntry] = []
+        self._listeners: list[Callable[[AuditLogEntry], None]] = []
+    
+    def add_listener(self, listener: Callable[[AuditLogEntry], None]) -> None:
+        """Register a synchronous callback invoked for every logged entry."""
+        self._listeners.append(listener)
     
     def log(self, entry: AuditLogEntry) -> None:
         """Log an audit entry."""
         self._entries.append(entry)
+        
+        for listener in self._listeners:
+            try:
+                listener(entry)
+            except Exception as e:
+                logger.error(f"Audit listener failed: {e}")
         
         try:
             with open(self.log_path, "a") as f:

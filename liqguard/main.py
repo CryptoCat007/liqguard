@@ -14,8 +14,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 from liqguard.llm import MetaLLMClient
-from liqguard.services import AlertManager, EncryptedStorage, RiskEngine
-from liqguard.telegram import BotHandlers, PositionMonitor
+from liqguard.services import (
+    AlertManager,
+    EncryptedStorage,
+    MarketSimulation,
+    ProtectiveActionsManager,
+    RiskEngine,
+)
+from liqguard.telegram import BotHandlers, PositionMonitor, TelegramSimulationBridge, parse_chat_ids
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +49,8 @@ def load_config() -> dict:
         "poll_interval": int(os.environ.get("LIQGUARD_POLL_INTERVAL", "30")),
         "dashboard_enabled": os.environ.get("LIQGUARD_DASHBOARD", "false").lower() == "true",
         "dashboard_port": int(os.environ.get("LIQGUARD_DASHBOARD_PORT", "8765")),
+        "dashboard_host": os.environ.get("LIQGUARD_DASHBOARD_HOST", "127.0.0.1"),
+        "demo_chat_ids": os.environ.get("LIQGUARD_DEMO_CHAT_IDS", ""),
     }
 
     if not config["telegram_token"]:
@@ -90,11 +98,18 @@ async def main(dashboard: bool = False, dashboard_port: int = 8765) -> None:
 
     dp = Dispatcher(storage=MemoryStorage())
 
+    actions_manager = ProtectiveActionsManager()
+    simulation = MarketSimulation(llm_client=llm_client, actions_manager=actions_manager)
+    sim_bridge = TelegramSimulationBridge(bot, simulation, parse_chat_ids(config["demo_chat_ids"]))
+
     handlers = BotHandlers(
         storage=storage,
         risk_engine=risk_engine,
         alert_manager=alert_manager,
         llm_client=llm_client,
+        actions_manager=actions_manager,
+        simulation=simulation,
+        sim_bridge=sim_bridge,
     )
     handlers.register(dp, bot)
 
@@ -110,13 +125,13 @@ async def main(dashboard: bool = False, dashboard_port: int = 8765) -> None:
     
     if enable_dashboard:
         from liqguard.dashboard import DashboardServer
-        dashboard_server = DashboardServer(
-            host="127.0.0.1",
-            port=port,
-            llm_client=llm_client,
-        )
+        dashboard_server = DashboardServer(host=config["dashboard_host"], port=port, simulation=simulation)
         await dashboard_server.start()
-        logger.info(f"Dashboard: http://127.0.0.1:{port}")
+        logger.info(f"Dashboard: http://{config['dashboard_host']}:{port}")
+        logger.info(
+            f"Simulation alerts go to {len(sim_bridge.chat_ids)} preset Telegram chat(s) "
+            "plus anyone who enables /demo"
+        )
 
     logger.info("LiqGuard started successfully!")
     logger.info(f"Meta AI: {'mock mode (demo/tests)' if llm_client.is_mock else 'live API'}")
@@ -128,6 +143,7 @@ async def main(dashboard: bool = False, dashboard_port: int = 8765) -> None:
 
         await dp.start_polling(bot)
     finally:
+        await simulation.stop(source="shutdown")
         await monitor.stop()
         await storage.close()
         await bot.session.close()

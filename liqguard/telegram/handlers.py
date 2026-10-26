@@ -24,6 +24,8 @@ from liqguard.services.protective_actions import (
     ProtectiveActionConfig,
     ProtectiveActionsManager,
 )
+from liqguard.services.simulation import MarketSimulation
+from liqguard.telegram.sim_bridge import TelegramSimulationBridge
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +61,16 @@ class BotHandlers:
         alert_manager: AlertManager,
         llm_client: MetaLLMClient,
         actions_manager: Optional[ProtectiveActionsManager] = None,
+        simulation: Optional[MarketSimulation] = None,
+        sim_bridge: Optional[TelegramSimulationBridge] = None,
     ):
         self.storage = storage
         self.risk_engine = risk_engine
         self.alert_manager = alert_manager
         self.llm = llm_client
         self.actions_manager = actions_manager or ProtectiveActionsManager()
+        self.simulation = simulation
+        self.sim_bridge = sim_bridge
 
         self._demo_connectors: dict[int, DemoConnector] = {}
         self._temp_binance_key: dict[int, str] = {}
@@ -420,6 +426,8 @@ Type /help for more options.
     async def _get_positions_for_user(self, user: User) -> tuple[list[Position], str]:
         """Get positions for a user (demo or live)."""
         if user.is_demo_mode:
+            if self._uses_shared_simulation(user.telegram_id) and self.simulation.state != "idle":
+                return list(self.simulation.positions), "📊 Demo Mode · market simulation"
             connector = self.get_demo_connector(user.telegram_id)
             positions = await connector.get_positions()
             return positions, "📊 Demo Mode"
@@ -664,6 +672,8 @@ Type /help for more options.
 
         await self.storage.set_demo_mode(user_id, True)
         self._demo_connectors[user_id] = DemoConnector(scenario)
+        if self.sim_bridge is not None:
+            self.sim_bridge.add_chat(user_id)
 
         await callback.message.edit_text(
             f"🎮 Demo mode **enabled** with **{scenario}** scenario.\n\n"
@@ -672,9 +682,27 @@ Type /help for more options.
         )
         await callback.answer()
 
+    def _uses_shared_simulation(self, user_id: int) -> bool:
+        return self.simulation is not None and self.sim_bridge is not None and self.sim_bridge.has_chat(user_id)
+
     async def _start_liquidation_simulation(self, user_id: int, message: Message) -> None:
         """Start a liquidation price simulation."""
         await self.storage.set_demo_mode(user_id, True)
+
+        if self.simulation is not None and self.sim_bridge is not None:
+            self.sim_bridge.add_chat(user_id)
+            started = await self.simulation.start(source="telegram")
+            await message.edit_text(
+                "🎬 **Liquidation Simulation**\n\n"
+                + ("Started. " if started else "Already running — you're subscribed. ")
+                + "The same price path drives the web dashboard, so alerts appear in both places.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⏹ Stop Simulation", callback_data="democtl:stop")],
+                ]),
+                parse_mode="Markdown"
+            )
+            return
+
         connector = DemoConnector("liquidation_path")
         self._demo_connectors[user_id] = connector
 
@@ -739,6 +767,8 @@ Type /help for more options.
         user_id = callback.from_user.id
 
         if action == "stop":
+            if self._uses_shared_simulation(user_id):
+                await self.simulation.stop(source="telegram")
             if user_id in self._demo_simulations:
                 self._demo_simulations[user_id].cancel()
                 del self._demo_simulations[user_id]
@@ -848,6 +878,11 @@ Type /help for more options.
 
         await message.answer(status_text, parse_mode="Markdown")
 
+    async def _risk_overview_text(self, overview, language: str) -> str:
+        summary = await self.llm.summarize_portfolio(overview, language)
+        tag = "Muse (mock)" if summary.get("mock") else "Muse"
+        return f"🧠 _{tag}:_ {summary['headline']}\n\n" + format_portfolio_overview_text(overview, language)
+
     async def cmd_risk(self, message: Message) -> None:
         """Handle /risk command - portfolio risk overview."""
         user = await self.get_or_create_user(message)
@@ -867,7 +902,7 @@ Type /help for more options.
         analyzer = PortfolioAnalyzer(user.threshold)
         overview = analyzer.analyze_portfolio(positions)
         
-        text = format_portfolio_overview_text(overview, user.language)
+        text = await self._risk_overview_text(overview, user.language)
         
         buttons = []
         if overview.riskiest_position and overview.riskiest_position.margin_advice:
@@ -1024,7 +1059,7 @@ Type /help for more options.
             
             analyzer = PortfolioAnalyzer(user.threshold)
             overview = analyzer.analyze_portfolio(positions)
-            text = format_portfolio_overview_text(overview, user.language)
+            text = await self._risk_overview_text(overview, user.language)
             
             buttons = []
             if overview.riskiest_position and overview.riskiest_position.margin_advice:

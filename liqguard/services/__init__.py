@@ -20,6 +20,7 @@ from .protective_actions import (
     ProtectiveActionsManager,
 )
 from .risk_engine import RiskAssessment, RiskEngine
+from .simulation import DEFAULT_SPECS, MarketSimulation, SimPositionSpec
 from .storage import EncryptedStorage, EncryptionKeyError
 
 __all__ = [
@@ -49,4 +50,8 @@ __all__ = [
     "ProtectiveAction",
     "ProtectiveActionConfig",
     "ProtectiveActionsManager",
+    # Demo simulation
+    "DEFAULT_SPECS",
+    "MarketSimulation",
+    "SimPositionSpec",
 ]

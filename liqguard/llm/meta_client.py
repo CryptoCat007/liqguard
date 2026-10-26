@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 
 from liqguard.models import Alert, AlertSeverity, Position
 from liqguard.services.advice import ActionableAdvice, AdviceCalculator
+from liqguard.services.portfolio import PortfolioRiskOverview
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +561,87 @@ Question: {question}"""
                     summary += f"\nMost attention needed: {riskiest['symbol']} ({riskiest['distance_to_liquidation_pct']:.1f}% from liq)"
                 return summary
     
+    async def summarize_portfolio(
+        self,
+        overview: PortfolioRiskOverview,
+        language: str = "en",
+    ) -> dict:
+        """
+        One-line structured portfolio summary naming the riskiest position.
+
+        The riskiest position and every number come from `overview`; the LLM only
+        phrases the headline. Returns keys: headline, riskiest_symbol, risk_level,
+        min_distance_pct, recommended_action, mock.
+        """
+        rp = overview.riskiest_position
+        facts = {
+            "risk_level": overview.overall_risk_level.value,
+            "riskiest_symbol": rp.symbol if rp else None,
+            "min_distance_pct": round(rp.distance_to_liquidation_pct, 2) if rp else None,
+            "recommended_action": self._portfolio_action(overview),
+        }
+
+        if self._use_mock or rp is None:
+            return {**facts, "headline": self._mock_portfolio_headline(overview, language), "mock": True}
+
+        if language == "zh-TW":
+            system_prompt = (
+                "你是加密貨幣風險分析師。用一句繁體中文（最多 30 字）總結投資組合風險，"
+                "必須點名 riskiest_symbol 並使用提供的精確數字。回傳 JSON：{\"headline\": \"...\"}"
+            )
+        else:
+            system_prompt = (
+                "You are a crypto risk analyst. Summarize portfolio risk in ONE sentence "
+                "(max 25 words). Name riskiest_symbol and use only the exact numbers given. "
+                "Return JSON: {\"headline\": \"...\"}"
+            )
+        user_content = json.dumps({**facts, **overview.to_dict()["summary"]}, indent=2)
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=120,
+                temperature=0.2,
+            )
+            headline = str(json.loads(response.choices[0].message.content).get("headline", "")).strip()
+            if not headline or rp.symbol not in headline:
+                headline = self._mock_portfolio_headline(overview, language)
+            return {**facts, "headline": headline, "mock": False}
+        except Exception as e:
+            logger.error(f"Error summarizing portfolio: {e}")
+            return {**facts, "headline": self._mock_portfolio_headline(overview, language), "mock": True}
+
+    @staticmethod
+    def _portfolio_action(overview: PortfolioRiskOverview) -> dict:
+        rp = overview.riskiest_position
+        if rp and rp.margin_advice and rp.margin_advice.margin_to_add_usd:
+            return {
+                "action_type": "add_margin",
+                "symbol": rp.symbol,
+                "amount_usd": round(rp.margin_advice.margin_to_add_usd, 2),
+                "target_distance_pct": rp.margin_advice.target_distance_pct,
+            }
+        return {"action_type": "none"}
+
+    @staticmethod
+    def _mock_portfolio_headline(overview: PortfolioRiskOverview, language: str) -> str:
+        rp = overview.riskiest_position
+        if rp is None:
+            return "目前沒有持倉。" if language == "zh-TW" else "No open positions."
+        level = overview.overall_risk_level.value.upper()
+        dist = rp.distance_to_liquidation_pct
+        add = rp.margin_advice.margin_to_add_usd if rp.margin_advice else 0
+        if language == "zh-TW":
+            line = f"{level}：最高風險為 {rp.symbol} {rp.side.upper()}，距離清算 {dist:.1f}%"
+            return line + (f"，建議增加 ${add:,.0f} 保證金。" if add else "。")
+        line = f"{level}: riskiest is {rp.symbol} {rp.side.upper()} at {dist:.1f}% from liquidation"
+        return line + (f" — add ${add:,.0f} margin to reach safety." if add else ".")
+
     async def explain_risk(
         self,
         position: Position,

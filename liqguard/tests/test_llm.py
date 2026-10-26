@@ -170,3 +170,66 @@ class TestLLMClientModel:
         
         client = MetaLLMClient(use_mock=True)
         assert client.model == "env-model"
+
+
+class TestPortfolioSummary:
+    """One-line structured /risk summary."""
+
+    @pytest.fixture
+    def overview(self):
+        from liqguard.services.portfolio import PortfolioAnalyzer
+        positions = [
+            Position(Venue.BINANCE, "BTCUSDT", Side.LONG, 0.5, 65000, 60000, 57500, 3000, 10, -2500),
+            Position(Venue.HYPERLIQUID, "ETH", Side.SHORT, 5, 3200, 3100, 4000, 4000, 4, 500),
+        ]
+        return PortfolioAnalyzer().analyze_portfolio(positions)
+
+    async def test_mock_summary_names_riskiest(self, overview):
+        result = await MetaLLMClient(use_mock=True).summarize_portfolio(overview)
+
+        assert result["riskiest_symbol"] == "BTCUSDT"
+        assert "BTCUSDT" in result["headline"]
+        assert "\n" not in result["headline"]
+        assert result["mock"] is True
+        assert result["recommended_action"]["action_type"] == "add_margin"
+        assert result["recommended_action"]["amount_usd"] == pytest.approx(
+            overview.riskiest_position.margin_advice.margin_to_add_usd, abs=0.01
+        )
+
+    async def test_mock_summary_chinese(self, overview):
+        result = await MetaLLMClient(use_mock=True).summarize_portfolio(overview, "zh-TW")
+        assert "BTCUSDT" in result["headline"]
+        assert "距離清算" in result["headline"]
+
+    async def test_empty_portfolio(self):
+        from liqguard.services.portfolio import PortfolioRiskOverview
+        result = await MetaLLMClient(use_mock=True).summarize_portfolio(PortfolioRiskOverview())
+        assert result["riskiest_symbol"] is None
+        assert result["headline"] == "No open positions."
+
+    async def test_live_headline_missing_riskiest_falls_back(self, overview):
+        from unittest.mock import AsyncMock, MagicMock
+
+        client = MetaLLMClient(api_key="test", use_mock=False)
+        reply = MagicMock()
+        reply.choices = [MagicMock(message=MagicMock(content='{"headline": "ETH looks risky"}'))]
+        client.client = MagicMock()
+        client.client.chat.completions.create = AsyncMock(return_value=reply)
+
+        result = await client.summarize_portfolio(overview)
+
+        assert result["riskiest_symbol"] == "BTCUSDT"
+        assert "BTCUSDT" in result["headline"]
+        assert result["mock"] is False
+
+    async def test_live_headline_used_when_valid(self, overview):
+        from unittest.mock import AsyncMock, MagicMock
+
+        client = MetaLLMClient(api_key="test", use_mock=False)
+        reply = MagicMock()
+        reply.choices = [MagicMock(message=MagicMock(content='{"headline": "BTCUSDT is closest to liquidation."}'))]
+        client.client = MagicMock()
+        client.client.chat.completions.create = AsyncMock(return_value=reply)
+
+        result = await client.summarize_portfolio(overview)
+        assert result["headline"] == "BTCUSDT is closest to liquidation."
