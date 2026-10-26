@@ -77,10 +77,10 @@ class AdviceCalculator:
         """
         Calculate exact margin to add to reach target distance.
         
-        Formula (approximation):
+        Isolated-margin model: adding M USD moves the liquidation price by M / size.
             distance_gap = target_distance - current_distance
             price_change_needed = (distance_gap / 100) * mark_price
-            margin_needed = (price_change_needed * size) / leverage
+            margin_needed = price_change_needed * size
         """
         current_distance = position.distance_to_liquidation_pct
         
@@ -98,7 +98,7 @@ class AdviceCalculator:
         
         distance_gap = target_distance_pct - current_distance
         price_change_needed = (distance_gap / 100) * position.mark_price
-        margin_needed = (price_change_needed * position.size) / position.leverage
+        margin_needed = price_change_needed * abs(position.size)
         
         if position.side == Side.LONG:
             new_liq_price = position.liquidation_price - (margin_needed / position.size)

@@ -1,7 +1,7 @@
 """User model for storing user data and bindings."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .alert import UserThreshold
@@ -19,7 +19,7 @@ class ExchangeBinding:
 
     wallet_address: Optional[str] = None
 
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = True
     last_used: Optional[datetime] = None
 
@@ -52,8 +52,8 @@ class User:
 
     is_demo_mode: bool = False
 
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    last_active: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def get_binding(self, venue: str) -> Optional[ExchangeBinding]:
         """Get active binding for a venue."""

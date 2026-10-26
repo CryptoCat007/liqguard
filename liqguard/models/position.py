@@ -75,8 +75,8 @@ class Position:
         """
         Calculate additional margin needed to reach a target distance from liquidation.
 
-        This is an approximation assuming linear relationship between margin and liquidation price.
-        Actual calculation varies by exchange.
+        Assumes isolated margin: adding M USD of margin moves the liquidation
+        price by M / size. Exchanges differ slightly (maintenance tiers, fees).
 
         Args:
             target_distance_pct: Target distance from liquidation as percentage (e.g., 30 for 30%)
@@ -91,7 +91,7 @@ class Position:
 
         distance_needed = target_distance_pct - current_distance
         price_gap_needed = (distance_needed / 100) * self.mark_price
-        additional_margin = price_gap_needed * abs(self.size) / self.leverage
+        additional_margin = price_gap_needed * abs(self.size)
 
         return max(0.0, additional_margin)
 

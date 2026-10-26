@@ -91,8 +91,8 @@ class RiskEngine:
         """
         Calculate additional margin needed to reach a target distance from liquidation.
 
-        This is an approximation. The exact calculation varies by exchange
-        and depends on maintenance margin rates, funding rates, etc.
+        Assumes isolated margin: adding M USD of margin moves the liquidation
+        price by M / size. Exchanges differ slightly (maintenance tiers, fees).
 
         Args:
             position: Position to analyze
@@ -110,7 +110,7 @@ class RiskEngine:
 
         price_change_needed = (distance_gap / 100) * position.mark_price
 
-        additional_margin = (price_change_needed * position.size) / position.leverage
+        additional_margin = price_change_needed * abs(position.size)
 
         return max(0.0, additional_margin)
 

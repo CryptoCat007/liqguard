@@ -51,6 +51,28 @@ class TestMarginAdvice:
         assert advice.new_liquidation_price is not None
         assert advice.new_liquidation_price < long_position_at_risk.liquidation_price
     
+    @pytest.mark.parametrize("side,liq", [(Side.LONG, 58000), (Side.SHORT, 66000)])
+    def test_added_margin_lands_exactly_on_target(self, side, liq):
+        """New liquidation price after adding the advised margin sits at the target distance."""
+        pos = Position(
+            venue=Venue.BINANCE, symbol="BTCUSDT", side=side, size=0.5,
+            entry_price=62000, mark_price=62000, liquidation_price=liq,
+            margin=3100, leverage=10, unrealized_pnl=0,
+        )
+        advice = AdviceCalculator.calculate_margin_to_add(pos, 30)
+
+        moved = Position(
+            venue=pos.venue, symbol=pos.symbol, side=side, size=pos.size,
+            entry_price=pos.entry_price, mark_price=pos.mark_price,
+            liquidation_price=advice.new_liquidation_price,
+            margin=pos.margin + advice.margin_to_add_usd, leverage=pos.leverage,
+            unrealized_pnl=0,
+        )
+        assert moved.distance_to_liquidation_pct == pytest.approx(30.0)
+        assert advice.margin_to_add_usd == pytest.approx(
+            abs(pos.liquidation_price - advice.new_liquidation_price) * pos.size
+        )
+
     def test_margin_advice_for_safe_position(self, safe_position):
         """Test that no margin advice for already safe position."""
         advice = AdviceCalculator.calculate_margin_to_add(safe_position)

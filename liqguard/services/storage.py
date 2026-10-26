@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -214,8 +214,8 @@ class EncryptedStorage:
                 is_demo_mode=bool(row["is_demo_mode"]),
                 threshold=threshold,
                 bindings=bindings,
-                created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.utcnow(),
-                last_active=datetime.fromisoformat(row["last_active"]) if row["last_active"] else datetime.utcnow(),
+                created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else datetime.now(timezone.utc),
+                last_active=datetime.fromisoformat(row["last_active"]) if row["last_active"] else datetime.now(timezone.utc),
             )
 
     async def _get_bindings(
@@ -255,7 +255,7 @@ class EncryptedStorage:
                 wallet_address=row[7] if len(row) > 7 else None,
                 permissions=permissions,
                 is_active=bool(row[8] if len(row) > 8 else True),
-                created_at=datetime.fromisoformat(row[9]) if len(row) > 9 and row[9] else datetime.utcnow(),
+                created_at=datetime.fromisoformat(row[9]) if len(row) > 9 and row[9] else datetime.now(timezone.utc),
                 last_used=datetime.fromisoformat(row[10]) if len(row) > 10 and row[10] else None,
             )
             binding.api_secret_encrypted = api_secret
