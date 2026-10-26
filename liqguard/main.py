@@ -89,7 +89,7 @@ async def main() -> None:
         alert_manager=alert_manager,
         llm_client=llm_client,
     )
-    handlers.register(dp)
+    handlers.register(dp, bot)
 
     monitor = PositionMonitor(
         bot=bot,
@@ -100,7 +100,7 @@ async def main() -> None:
     )
 
     logger.info("LiqGuard started successfully!")
-    logger.info(f"Meta AI: {'enabled' if llm_client.is_available else 'disabled (fallback mode)'}")
+    logger.info(f"Meta AI: {'mock mode (demo/tests)' if llm_client.is_mock else 'live API'}")
     logger.info(f"Database: {config['db_path']}")
     logger.info(f"Poll interval: {config['poll_interval']}s")
 

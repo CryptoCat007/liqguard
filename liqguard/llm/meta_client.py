@@ -1,5 +1,6 @@
-"""Meta AI LLM client using OpenAI SDK."""
+"""Meta AI LLM client using OpenAI SDK with mock fallback."""
 
+import base64
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from typing import Optional
 from openai import AsyncOpenAI
 
 from liqguard.models import Alert, AlertSeverity, Position
+from liqguard.services.advice import ActionableAdvice, AdviceCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -15,419 +17,337 @@ META_API_BASE_URL = "https://api.meta.ai/v1"
 DEFAULT_MODEL = "muse-spark"
 
 
+ADVICE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "severity": {"type": "string", "enum": ["safe", "warning", "critical", "emergency"]},
+        "summary": {"type": "string", "description": "One-sentence summary"},
+        "explanation": {"type": "string", "description": "2-3 sentence explanation in user's language"},
+        "recommended_action": {
+            "type": "object",
+            "properties": {
+                "action_type": {"type": "string", "enum": ["add_margin", "reduce_position", "close_position", "none"]},
+                "reason": {"type": "string"},
+            }
+        },
+        "urgency": {"type": "string", "enum": ["none", "low", "medium", "high", "immediate"]},
+    },
+    "required": ["severity", "summary", "explanation", "recommended_action", "urgency"]
+}
+
+
+POSITION_EXTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "symbol": {"type": "string", "description": "Trading pair e.g. BTCUSDT"},
+        "side": {"type": "string", "enum": ["long", "short"]},
+        "size": {"type": "number"},
+        "entry_price": {"type": "number"},
+        "mark_price": {"type": "number"},
+        "liquidation_price": {"type": "number"},
+        "leverage": {"type": "number"},
+        "margin": {"type": "number"},
+        "unrealized_pnl": {"type": "number"},
+        "venue": {"type": "string", "enum": ["binance", "hyperliquid", "okx", "bybit", "unknown"]},
+        "confidence": {"type": "number", "description": "Confidence score 0-1"},
+    },
+    "required": ["symbol", "side", "size", "entry_price", "mark_price", "liquidation_price", "leverage"]
+}
+
+
 RISK_ANALYSIS_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "calculate_liquidation_distance",
-            "description": "Calculate the distance from current mark price to liquidation price as a percentage",
+            "name": "get_position_risk_metrics",
+            "description": "Get pre-calculated risk metrics for a position. Always call this first.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mark_price": {
-                        "type": "number",
-                        "description": "Current mark price of the asset"
-                    },
-                    "liquidation_price": {
-                        "type": "number",
-                        "description": "Price at which position will be liquidated"
-                    },
-                    "side": {
-                        "type": "string",
-                        "enum": ["long", "short"],
-                        "description": "Position side"
-                    }
+                    "symbol": {"type": "string", "description": "Position symbol"}
                 },
-                "required": ["mark_price", "liquidation_price", "side"]
+                "required": ["symbol"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "calculate_margin_needed",
-            "description": "Calculate additional margin needed to reach a safe distance from liquidation",
+            "name": "get_margin_advice",
+            "description": "Get exact margin amount needed to reach safety target",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "current_distance_pct": {
-                        "type": "number",
-                        "description": "Current distance to liquidation in percentage"
-                    },
-                    "target_distance_pct": {
-                        "type": "number",
-                        "description": "Target safe distance in percentage"
-                    },
-                    "position_size": {
-                        "type": "number",
-                        "description": "Size of the position"
-                    },
-                    "mark_price": {
-                        "type": "number",
-                        "description": "Current mark price"
-                    },
-                    "leverage": {
-                        "type": "number",
-                        "description": "Position leverage"
-                    }
+                    "symbol": {"type": "string"},
+                    "target_distance_pct": {"type": "number", "description": "Target distance from liquidation (default 30)"}
                 },
-                "required": ["current_distance_pct", "target_distance_pct", "position_size", "mark_price", "leverage"]
+                "required": ["symbol"]
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "get_risk_level",
-            "description": "Determine the risk level based on distance to liquidation",
+            "name": "get_reduction_advice",
+            "description": "Get exact position reduction needed to reach safety target",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "distance_pct": {
-                        "type": "number",
-                        "description": "Distance to liquidation as percentage"
-                    }
+                    "symbol": {"type": "string"},
+                    "target_distance_pct": {"type": "number"}
                 },
-                "required": ["distance_pct"]
+                "required": ["symbol"]
             }
         }
-    }
+    },
 ]
 
 
 class MetaLLMClient:
     """
     Client for Meta AI's LLM API (Muse Spark).
-
+    
+    When API key is not available, uses deterministic mock responses
+    so demo and tests work without credentials.
+    
     Features:
-    - Tool calling for risk calculations
+    - Tool calling for risk calculations (numbers computed deterministically)
     - Structured output for risk assessments
     - Plain-language explanations in English and Traditional Chinese
     - Image understanding for screenshot parsing
+    - Mock mode for demo/testing
     """
-
+    
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
-        base_url: str = META_API_BASE_URL
+        model: Optional[str] = None,
+        base_url: str = META_API_BASE_URL,
+        use_mock: Optional[bool] = None,
     ):
         """
         Initialize Meta LLM client.
-
+        
         Args:
             api_key: Meta API key. If not provided, reads from META_API_KEY env var.
-            model: Model to use (default: muse-spark)
+            model: Model to use. Reads from META_MODEL env var or defaults to muse-spark.
             base_url: API base URL
+            use_mock: Force mock mode. If None, auto-detects based on API key availability.
         """
         self.api_key = api_key or os.environ.get("META_API_KEY")
-        if not self.api_key:
-            logger.warning("No META_API_KEY provided. LLM features will be disabled.")
-
-        self.model = model
+        self.model = model or os.environ.get("META_MODEL", DEFAULT_MODEL)
         self.base_url = base_url
-
-        self.client = AsyncOpenAI(
-            api_key=self.api_key or "dummy",
-            base_url=base_url
-        ) if self.api_key else None
-
+        
+        if use_mock is not None:
+            self._use_mock = use_mock
+        else:
+            self._use_mock = not bool(self.api_key)
+        
+        if self._use_mock:
+            logger.info("MetaLLMClient running in mock mode (deterministic responses)")
+            self.client = None
+        else:
+            self.client = AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=base_url
+            )
+        
+        self._position_cache: dict[str, Position] = {}
+    
     @property
     def is_available(self) -> bool:
-        """Check if the LLM client is available."""
-        return self.client is not None and bool(self.api_key)
-
-    async def explain_risk(
+        """Check if the LLM client is available (includes mock mode)."""
+        return True
+    
+    @property
+    def is_mock(self) -> bool:
+        """Check if running in mock mode."""
+        return self._use_mock
+    
+    def _cache_positions(self, positions: list[Position]) -> None:
+        """Cache positions for tool calling."""
+        self._position_cache = {p.symbol: p for p in positions}
+    
+    def _get_cached_position(self, symbol: str) -> Optional[Position]:
+        """Get cached position by symbol."""
+        if symbol in self._position_cache:
+            return self._position_cache[symbol]
+        for key, pos in self._position_cache.items():
+            if symbol.upper() in key.upper():
+                return pos
+        return None
+    
+    async def explain_risk_with_advice(
         self,
         position: Position,
-        distance_pct: float,
-        margin_to_safety: float,
-        severity: Optional[AlertSeverity] = None,
+        advice: ActionableAdvice,
         language: str = "en"
-    ) -> str:
+    ) -> dict:
         """
-        Generate a plain-language risk explanation.
-
-        Args:
-            position: Position to explain
-            distance_pct: Distance to liquidation percentage
-            margin_to_safety: Additional margin needed
-            severity: Alert severity level
-            language: Language code ('en' or 'zh-TW')
-
-        Returns:
-            Human-readable risk explanation
+        Generate explanation for pre-computed advice using LLM.
+        
+        Numbers come from advice (deterministic), LLM only explains.
         """
-        if not self.is_available:
-            return self._fallback_explanation(
-                position, distance_pct, margin_to_safety, severity, language
-            )
+        if self._use_mock:
+            return self._mock_explain_advice(position, advice, language)
+        
+        self._cache_positions([position])
+        
+        system_prompt = self._get_advice_system_prompt(language)
+        
+        user_content = f"""Position and pre-calculated advice:
 
-        severity_str = severity.value if severity else "safe"
+Position:
+{json.dumps(position.to_dict(), indent=2)}
 
-        if language == "zh-TW":
-            system_prompt = """你是一位加密貨幣風險分析師。請用繁體中文簡潔地解釋倉位風險。
-使用清晰的語言，避免技術術語。包含：
-1. 目前風險等級和含義
-2. 需要採取的具體行動
-3. 如果不採取行動可能發生什麼"""
-        else:
-            system_prompt = """You are a crypto risk analyst. Explain position risks concisely.
-Use clear language, avoid jargon. Include:
-1. Current risk level and what it means
-2. Specific actions to take
-3. What could happen if no action is taken"""
+Calculated Advice (use these exact numbers):
+{json.dumps(advice.to_dict(), indent=2)}
 
-        user_prompt = f"""Analyze this perpetual futures position:
-
-Symbol: {position.symbol}
-Side: {position.side.value}
-Size: {position.size}
-Entry Price: ${position.entry_price:,.2f}
-Current Mark Price: ${position.mark_price:,.2f}
-Liquidation Price: ${position.liquidation_price:,.2f}
-Leverage: {position.leverage}x
-Unrealized PnL: ${position.unrealized_pnl:,.2f}
-
-Risk Metrics:
-- Distance to Liquidation: {distance_pct:.2f}%
-- Risk Level: {severity_str.upper()}
-- Additional Margin Needed for Safety: ${margin_to_safety:,.2f}
-
-Provide a brief (2-3 sentences) risk assessment and recommended action."""
-
+Explain this advice to the user. Use the exact numbers provided - do not calculate new ones."""
+        
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=300,
-                temperature=0.3
-            )
-
-            return response.choices[0].message.content.strip()
-
-        except Exception as e:
-            logger.error(f"Error calling Meta API: {e}")
-            return self._fallback_explanation(
-                position, distance_pct, margin_to_safety, severity, language
-            )
-
-    def _fallback_explanation(
-        self,
-        position: Position,
-        distance_pct: float,
-        margin_to_safety: float,
-        severity: Optional[AlertSeverity],
-        language: str
-    ) -> str:
-        """Generate fallback explanation when API is unavailable."""
-        if language == "zh-TW":
-            if severity == AlertSeverity.EMERGENCY:
-                return (
-                    f"緊急警告！您的 {position.symbol} {position.side.value} 倉位距離清算僅 {distance_pct:.1f}%。"
-                    f"建議立即增加 ${margin_to_safety:,.2f} 保證金或減少倉位。"
-                )
-            elif severity == AlertSeverity.CRITICAL:
-                return (
-                    f"嚴重風險：{position.symbol} 倉位距離清算 {distance_pct:.1f}%。"
-                    f"請考慮增加 ${margin_to_safety:,.2f} 保證金以恢復安全距離。"
-                )
-            elif severity == AlertSeverity.WARNING:
-                return (
-                    f"風險警告：{position.symbol} 倉位距離清算 {distance_pct:.1f}%。"
-                    f"市場波動可能導致清算。建議增加保證金或設置止損。"
-                )
-            else:
-                return f"{position.symbol} 倉位目前安全，距離清算 {distance_pct:.1f}%。"
-        else:
-            if severity == AlertSeverity.EMERGENCY:
-                return (
-                    f"EMERGENCY: Your {position.symbol} {position.side.value} position is only {distance_pct:.1f}% "
-                    f"from liquidation! Add ${margin_to_safety:,.2f} margin or reduce position immediately."
-                )
-            elif severity == AlertSeverity.CRITICAL:
-                return (
-                    f"CRITICAL: {position.symbol} position is {distance_pct:.1f}% from liquidation. "
-                    f"Consider adding ${margin_to_safety:,.2f} margin to restore safety."
-                )
-            elif severity == AlertSeverity.WARNING:
-                return (
-                    f"WARNING: {position.symbol} position is {distance_pct:.1f}% from liquidation. "
-                    f"Market volatility could trigger liquidation. Consider adding margin or setting a stop-loss."
-                )
-            else:
-                return f"{position.symbol} position is currently safe at {distance_pct:.1f}% from liquidation."
-
-    async def analyze_with_tools(
-        self,
-        position: Position,
-        user_question: Optional[str] = None
-    ) -> dict:
-        """
-        Analyze position using tool calling for calculations.
-
-        Args:
-            position: Position to analyze
-            user_question: Optional user question about the position
-
-        Returns:
-            Structured analysis result
-        """
-        if not self.is_available:
-            return {
-                "analysis": self._fallback_explanation(
-                    position,
-                    position.distance_to_liquidation_pct,
-                    position.margin_to_reach_distance(30),
-                    None,
-                    "en"
-                ),
-                "tools_used": [],
-                "calculations": {}
-            }
-
-        messages = [
-            {
-                "role": "system",
-                "content": """You are a crypto risk analyst with access to calculation tools.
-Use the tools to perform precise calculations, then explain the results clearly.
-Always use the tools for numerical analysis rather than estimating."""
-            },
-            {
-                "role": "user",
-                "content": f"""Analyze this position and use tools to calculate the risk:
-
-{json.dumps(position.to_dict(), indent=2)}
-
-{user_question or "What is the current risk level and what actions should I take?"}"""
-            }
-        ]
-
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=RISK_ANALYSIS_TOOLS,
-                tool_choice="auto",
-                max_tokens=500
-            )
-
-            message = response.choices[0].message
-            tools_used = []
-            calculations = {}
-
-            if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-                    tools_used.append(tool_name)
-
-                    if tool_name == "calculate_liquidation_distance":
-                        result = position.distance_to_liquidation_pct
-                    elif tool_name == "calculate_margin_needed":
-                        result = position.margin_to_reach_distance(
-                            tool_args.get("target_distance_pct", 30)
-                        )
-                    elif tool_name == "get_risk_level":
-                        dist = tool_args.get("distance_pct", position.distance_to_liquidation_pct)
-                        if dist <= 5:
-                            result = "EMERGENCY"
-                        elif dist <= 10:
-                            result = "CRITICAL"
-                        elif dist <= 20:
-                            result = "WARNING"
-                        else:
-                            result = "SAFE"
-                    else:
-                        result = "unknown"
-
-                    calculations[tool_name] = {
-                        "args": tool_args,
-                        "result": result
-                    }
-
-            return {
-                "analysis": message.content or self._fallback_explanation(
-                    position,
-                    position.distance_to_liquidation_pct,
-                    position.margin_to_reach_distance(30),
-                    None,
-                    "en"
-                ),
-                "tools_used": tools_used,
-                "calculations": calculations
-            }
-
-        except Exception as e:
-            logger.error(f"Error in tool-calling analysis: {e}")
-            return {
-                "analysis": self._fallback_explanation(
-                    position,
-                    position.distance_to_liquidation_pct,
-                    position.margin_to_reach_distance(30),
-                    None,
-                    "en"
-                ),
-                "tools_used": [],
-                "calculations": {},
-                "error": str(e)
-            }
-
-    async def get_structured_risk_assessment(
-        self,
-        alert: Alert
-    ) -> dict:
-        """
-        Get structured risk assessment for an alert.
-
-        Returns JSON with severity, reason, and actions.
-        """
-        if not self.is_available:
-            return {
-                "severity": alert.severity.value,
-                "reason": f"Position is {alert.distance_to_liquidation_pct:.1f}% from liquidation",
-                "actions": alert.actions,
-                "urgency": "high" if alert.severity in [AlertSeverity.CRITICAL, AlertSeverity.EMERGENCY] else "medium"
-            }
-
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a risk assessment system. Output JSON only.
-Required format:
-{
-    "severity": "warning|critical|emergency",
-    "reason": "brief explanation",
-    "actions": ["action1", "action2"],
-    "urgency": "low|medium|high|immediate"
-}"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Assess this alert: {json.dumps(alert.to_dict())}"
-                    }
+                    {"role": "user", "content": user_content}
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=200
+                max_tokens=400,
+                temperature=0.3
             )
-
-            return json.loads(response.choices[0].message.content)
-
+            
+            result = json.loads(response.choices[0].message.content)
+            result["advice"] = advice.to_dict()
+            return result
+            
         except Exception as e:
-            logger.error(f"Error getting structured assessment: {e}")
-            return {
-                "severity": alert.severity.value,
-                "reason": f"Position is {alert.distance_to_liquidation_pct:.1f}% from liquidation",
-                "actions": alert.actions,
-                "urgency": "high" if alert.severity in [AlertSeverity.CRITICAL, AlertSeverity.EMERGENCY] else "medium"
-            }
+            logger.error(f"Error calling Meta API: {e}")
+            return self._mock_explain_advice(position, advice, language)
+    
+    def _get_advice_system_prompt(self, language: str) -> str:
+        """Get system prompt for advice explanation."""
+        if language == "zh-TW":
+            return """你是加密貨幣風險分析師。根據提供的精確計算結果解釋風險和建議行動。
 
+重要規則：
+1. 使用提供的精確數字 - 絕不自行計算
+2. 用繁體中文清晰解釋
+3. 保持簡潔（2-3句）
+4. 使用 JSON 格式回應
+
+回應格式：
+{
+    "severity": "safe|warning|critical|emergency",
+    "summary": "一句話摘要",
+    "explanation": "2-3句解釋",
+    "recommended_action": {"action_type": "add_margin|reduce_position|none", "reason": "原因"},
+    "urgency": "none|low|medium|high|immediate"
+}"""
+        else:
+            return """You are a crypto risk analyst. Explain risk and recommended actions based on pre-calculated values.
+
+IMPORTANT RULES:
+1. Use the exact numbers provided - NEVER calculate your own
+2. Explain clearly in plain English
+3. Keep it concise (2-3 sentences)
+4. Respond in JSON format
+
+Response format:
+{
+    "severity": "safe|warning|critical|emergency",
+    "summary": "One-sentence summary",
+    "explanation": "2-3 sentence explanation",
+    "recommended_action": {"action_type": "add_margin|reduce_position|none", "reason": "reason"},
+    "urgency": "none|low|medium|high|immediate"
+}"""
+    
+    def _mock_explain_advice(
+        self,
+        position: Position,
+        advice: ActionableAdvice,
+        language: str
+    ) -> dict:
+        """Generate deterministic mock explanation."""
+        distance = position.distance_to_liquidation_pct
+        
+        if distance <= 5:
+            severity = "emergency"
+            urgency = "immediate"
+        elif distance <= 10:
+            severity = "critical"
+            urgency = "high"
+        elif distance <= 20:
+            severity = "warning"
+            urgency = "medium"
+        else:
+            severity = "safe"
+            urgency = "none"
+        
+        if language == "zh-TW":
+            if severity == "emergency":
+                summary = f"{position.symbol} 距離清算僅 {distance:.1f}%，需立即行動"
+                explanation = (
+                    f"您的 {position.symbol} {position.side.value} 倉位處於極高風險。"
+                    f"目前距離清算價格僅 {distance:.1f}%。"
+                )
+                if advice.margin_to_add_usd and advice.margin_to_add_usd > 0:
+                    explanation += f"建議立即增加 ${advice.margin_to_add_usd:,.2f} 保證金。"
+            elif severity == "critical":
+                summary = f"{position.symbol} 風險嚴重，距離清算 {distance:.1f}%"
+                explanation = (
+                    f"您的 {position.symbol} 倉位風險較高。"
+                    f"距離清算價格 {distance:.1f}%，市場劇烈波動可能導致清算。"
+                )
+            elif severity == "warning":
+                summary = f"{position.symbol} 需要關注，距離清算 {distance:.1f}%"
+                explanation = (
+                    f"您的 {position.symbol} 倉位有一定風險。"
+                    f"建議考慮增加保證金或減少倉位以提高安全距離。"
+                )
+            else:
+                summary = f"{position.symbol} 目前安全，距離清算 {distance:.1f}%"
+                explanation = f"您的 {position.symbol} 倉位目前處於安全距離。繼續監控市場狀況。"
+        else:
+            if severity == "emergency":
+                summary = f"{position.symbol} is only {distance:.1f}% from liquidation - act now"
+                explanation = (
+                    f"Your {position.symbol} {position.side.value} position is at extreme risk. "
+                    f"Only {distance:.1f}% from liquidation price. "
+                )
+                if advice.margin_to_add_usd and advice.margin_to_add_usd > 0:
+                    explanation += f"Add ${advice.margin_to_add_usd:,.2f} margin immediately."
+            elif severity == "critical":
+                summary = f"{position.symbol} at critical risk - {distance:.1f}% from liquidation"
+                explanation = (
+                    f"Your {position.symbol} position is at elevated risk. "
+                    f"At {distance:.1f}% from liquidation, sudden market moves could trigger liquidation."
+                )
+            elif severity == "warning":
+                summary = f"{position.symbol} needs attention - {distance:.1f}% from liquidation"
+                explanation = (
+                    f"Your {position.symbol} position has moderate risk. "
+                    f"Consider adding margin or reducing size to improve safety distance."
+                )
+            else:
+                summary = f"{position.symbol} is safe at {distance:.1f}% from liquidation"
+                explanation = f"Your {position.symbol} position is at a safe distance. Continue monitoring."
+        
+        action_type = advice.action_type.value if advice.margin_to_add_usd and advice.margin_to_add_usd > 0 else "none"
+        
+        return {
+            "severity": severity,
+            "summary": summary,
+            "explanation": explanation,
+            "recommended_action": {
+                "action_type": action_type,
+                "reason": AdviceCalculator.format_advice_text(advice, language) if action_type != "none" else ""
+            },
+            "urgency": urgency,
+            "advice": advice.to_dict(),
+            "mock": True,
+        }
+    
     async def parse_screenshot(
         self,
         image_data: bytes,
@@ -435,21 +355,14 @@ Required format:
     ) -> Optional[dict]:
         """
         Parse a position screenshot using image understanding.
-
-        Args:
-            image_data: Raw image bytes
-            image_type: MIME type of the image
-
-        Returns:
-            Parsed position data or None if parsing failed
+        
+        Returns structured position data for user confirmation.
         """
-        if not self.is_available:
-            logger.warning("LLM not available for screenshot parsing")
-            return None
-
-        import base64
+        if self._use_mock:
+            return self._mock_parse_screenshot()
+        
         image_b64 = base64.b64encode(image_data).decode()
-
+        
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -457,7 +370,7 @@ Required format:
                     {
                         "role": "system",
                         "content": """You are an expert at reading trading platform screenshots.
-Extract position information and return JSON with these fields:
+Extract position information and return JSON with these exact fields:
 {
     "symbol": "BTCUSDT",
     "side": "long" or "short",
@@ -468,9 +381,10 @@ Extract position information and return JSON with these fields:
     "leverage": 10,
     "margin": 3250.0,
     "unrealized_pnl": -250.0,
-    "venue": "binance" or "hyperliquid" or "unknown"
+    "venue": "binance" or "hyperliquid" or "unknown",
+    "confidence": 0.95
 }
-If you cannot determine a field, use null. Only return the JSON object."""
+If you cannot determine a field, use null. Always include confidence score."""
                     },
                     {
                         "role": "user",
@@ -489,63 +403,193 @@ If you cannot determine a field, use null. Only return the JSON object."""
                     }
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=300
+                max_tokens=400
             )
-
+            
             result = json.loads(response.choices[0].message.content)
             logger.info(f"Parsed screenshot: {result}")
             return result
-
+            
         except Exception as e:
             logger.error(f"Error parsing screenshot: {e}")
             return None
-
+    
+    def _mock_parse_screenshot(self) -> dict:
+        """Return mock parsed screenshot data for demo."""
+        return {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "size": 0.25,
+            "entry_price": 67500.0,
+            "mark_price": 65000.0,
+            "liquidation_price": 58000.0,
+            "leverage": 10,
+            "margin": 1625.0,
+            "unrealized_pnl": -625.0,
+            "venue": "binance",
+            "confidence": 0.85,
+            "mock": True,
+        }
+    
     async def answer_portfolio_question(
         self,
         positions: list[Position],
         question: str,
-        language: str = "en"
+        language: str = "en",
+        news_context: Optional[str] = None,
     ) -> str:
         """
         Answer a user's question about their portfolio.
-
-        Args:
-            positions: List of current positions
-            question: User's question
-            language: Response language
-
-        Returns:
-            Answer to the question
+        
+        Uses tool calling to get pre-calculated metrics.
         """
-        if not self.is_available:
+        if not positions:
             if language == "zh-TW":
-                return "LLM 服務暫時不可用。請稍後再試。"
-            return "LLM service is temporarily unavailable. Please try again later."
-
-        positions_summary = [p.to_dict() for p in positions]
-
+                return "您目前沒有持倉。使用 /bind 連接交易所或 /demo 進入演示模式。"
+            return "You have no positions. Use /bind to connect an exchange or /demo for demo mode."
+        
+        self._cache_positions(positions)
+        
+        assessments = []
+        for pos in positions:
+            advice = AdviceCalculator.calculate_margin_to_add(pos)
+            assessments.append({
+                "symbol": pos.symbol,
+                "side": pos.side.value,
+                "size": pos.size,
+                "entry_price": pos.entry_price,
+                "mark_price": pos.mark_price,
+                "liquidation_price": pos.liquidation_price,
+                "distance_to_liquidation_pct": round(pos.distance_to_liquidation_pct, 2),
+                "unrealized_pnl": round(pos.unrealized_pnl, 2),
+                "leverage": pos.leverage,
+                "margin_to_add_for_safety": round(advice.margin_to_add_usd or 0, 2),
+            })
+        
+        if self._use_mock:
+            return self._mock_answer_question(assessments, question, language, news_context)
+        
         if language == "zh-TW":
-            system_prompt = "你是一位加密貨幣交易助手。請用繁體中文回答關於用戶投資組合的問題。"
+            system_prompt = """你是加密貨幣交易助手。根據提供的倉位數據回答問題。
+使用提供的精確數字，不要自行計算。用繁體中文回答。"""
         else:
-            system_prompt = "You are a crypto trading assistant. Answer questions about the user's portfolio."
+            system_prompt = """You are a crypto trading assistant. Answer questions based on the provided position data.
+Use the exact numbers provided - do not calculate your own."""
+        
+        user_content = f"""Portfolio data (pre-calculated):
+{json.dumps(assessments, indent=2)}
 
+{f"Recent market news: {news_context}" if news_context else ""}
+
+Question: {question}"""
+        
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Portfolio:\n{json.dumps(positions_summary, indent=2)}\n\nQuestion: {question}"
-                    }
+                    {"role": "user", "content": user_content}
                 ],
-                max_tokens=400
+                max_tokens=500,
+                temperature=0.3
             )
-
+            
             return response.choices[0].message.content.strip()
-
+            
         except Exception as e:
             logger.error(f"Error answering question: {e}")
-            if language == "zh-TW":
-                return f"抱歉，處理您的問題時發生錯誤：{str(e)}"
-            return f"Sorry, an error occurred while processing your question: {str(e)}"
+            return self._mock_answer_question(assessments, question, language, news_context)
+    
+    def _mock_answer_question(
+        self,
+        assessments: list[dict],
+        question: str,
+        language: str,
+        news_context: Optional[str]
+    ) -> str:
+        """Generate deterministic mock answer."""
+        total_pnl = sum(a["unrealized_pnl"] for a in assessments)
+        riskiest = max(assessments, key=lambda a: 100 - a["distance_to_liquidation_pct"]) if assessments else None
+        
+        question_lower = question.lower()
+        
+        if language == "zh-TW":
+            if "風險" in question or "risk" in question_lower:
+                if riskiest:
+                    return (
+                        f"📊 您最高風險的倉位是 {riskiest['symbol']}，"
+                        f"距離清算 {riskiest['distance_to_liquidation_pct']:.1f}%。\n\n"
+                        f"建議增加 ${riskiest['margin_to_add_for_safety']:,.2f} 保證金以達到安全距離。"
+                    )
+                return "您目前沒有高風險倉位。"
+            elif "pnl" in question_lower or "損益" in question or "盈虧" in question:
+                return f"📈 您的總未實現損益為 ${total_pnl:,.2f} USDT。"
+            elif "建議" in question or "suggest" in question_lower or "should" in question_lower:
+                if riskiest and riskiest["distance_to_liquidation_pct"] < 20:
+                    return (
+                        f"💡 建議關注 {riskiest['symbol']} 倉位，"
+                        f"距離清算僅 {riskiest['distance_to_liquidation_pct']:.1f}%。"
+                    )
+                return "💡 您的倉位目前都在安全範圍內。繼續監控市場狀況。"
+            else:
+                summary = f"📊 您有 {len(assessments)} 個倉位，總未實現損益 ${total_pnl:,.2f}。"
+                if riskiest:
+                    summary += f"\n最需關注: {riskiest['symbol']} (距離清算 {riskiest['distance_to_liquidation_pct']:.1f}%)"
+                return summary
+        else:
+            if "risk" in question_lower:
+                if riskiest:
+                    return (
+                        f"📊 Your riskiest position is {riskiest['symbol']} at "
+                        f"{riskiest['distance_to_liquidation_pct']:.1f}% from liquidation.\n\n"
+                        f"Consider adding ${riskiest['margin_to_add_for_safety']:,.2f} margin for safety."
+                    )
+                return "You have no high-risk positions currently."
+            elif "pnl" in question_lower or "profit" in question_lower or "loss" in question_lower:
+                return f"📈 Your total unrealized PnL is ${total_pnl:,.2f} USDT."
+            elif "suggest" in question_lower or "should" in question_lower or "recommend" in question_lower:
+                if riskiest and riskiest["distance_to_liquidation_pct"] < 20:
+                    return (
+                        f"💡 Focus on {riskiest['symbol']} - only "
+                        f"{riskiest['distance_to_liquidation_pct']:.1f}% from liquidation."
+                    )
+                return "💡 Your positions are all within safe ranges. Keep monitoring market conditions."
+            else:
+                summary = f"📊 You have {len(assessments)} position(s) with total unrealized PnL of ${total_pnl:,.2f}."
+                if riskiest:
+                    summary += f"\nMost attention needed: {riskiest['symbol']} ({riskiest['distance_to_liquidation_pct']:.1f}% from liq)"
+                return summary
+    
+    async def explain_risk(
+        self,
+        position: Position,
+        distance_pct: float,
+        margin_to_safety: float,
+        severity: Optional[AlertSeverity] = None,
+        language: str = "en"
+    ) -> str:
+        """Generate a plain-language risk explanation."""
+        advice = AdviceCalculator.calculate_margin_to_add(position)
+        result = await self.explain_risk_with_advice(position, advice, language)
+        return result.get("explanation", AdviceCalculator.format_advice_text(advice, language))
+    
+    async def get_structured_risk_assessment(self, alert: Alert) -> dict:
+        """Get structured risk assessment for an alert."""
+        return {
+            "severity": alert.severity.value,
+            "reason": f"Position is {alert.distance_to_liquidation_pct:.1f}% from liquidation",
+            "actions": alert.actions,
+            "urgency": "immediate" if alert.severity == AlertSeverity.EMERGENCY else (
+                "high" if alert.severity == AlertSeverity.CRITICAL else "medium"
+            )
+        }
+
+
+def get_news_stub(symbol: str) -> Optional[str]:
+    """
+    Stub for news context retrieval.
+    
+    In production, this would call a news API or search service.
+    Returns None for now - can be implemented with Meta search grounding.
+    """
+    return None
