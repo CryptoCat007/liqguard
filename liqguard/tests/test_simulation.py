@@ -107,6 +107,18 @@ class TestAlerts:
         assert sim.summary["riskiest_symbol"] == sim.overview.riskiest_position.symbol
         assert sim.summary["riskiest_symbol"] in sim.summary["headline"]
 
+    async def test_summary_reflects_final_tick(self, sim):
+        await run(sim)
+        final = sim.overview.riskiest_position.distance_to_liquidation_pct
+        assert sim.summary["min_distance_pct"] == pytest.approx(final, abs=0.01)
+
+    async def test_reset_emits_fresh_summary(self, sim):
+        events = await run(sim)
+        events.clear()
+        await sim.reset_and_notify()
+        assert [e["type"] for e in events] == ["reset", "summary"]
+        assert sim.summary["min_distance_pct"] > 20
+
 
 class TestControl:
     async def test_double_start_is_rejected(self):

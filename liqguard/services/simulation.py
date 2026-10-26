@@ -307,6 +307,7 @@ class MarketSimulation:
         await self.stop()
         self.reset()
         await self._emit("reset", self.snapshot())
+        await self.refresh_summary()
 
     async def wait(self) -> None:
         """Wait for the run and any pending advice generation to finish."""
@@ -341,6 +342,9 @@ class MarketSimulation:
             self.overview = self.analyzer.analyze_portfolio(self.positions)
             await self._emit("tick", self._record_tick())
             await self._check_alerts()
+        if self._side_tasks:
+            await asyncio.gather(*list(self._side_tasks), return_exceptions=True)
+        await self.refresh_summary()
         self.state = "finished"
         await self._add_audit("simulation_finished", None, "Price path complete; no execution performed")
         await self._emit("status", self._status())

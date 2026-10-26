@@ -15,6 +15,7 @@ Built for the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/m
 - 🎮 **Demo Mode**: Simulated price paths with alert sequences
 - 💰 **Actionable Advice**: Exact margin/reduction amounts, not estimates
 - 🛡️ **Protective Actions**: User-confirmed risk reduction (testnet only)
+- 🖥️ **Web Dashboard**: Read-only live view for demos; same alerts as Telegram
 
 ## Quick Start
 
@@ -58,7 +59,7 @@ liqguard
 | `/bind` | Connect an exchange (Binance or Hyperliquid) |
 | `/unbind` | Disconnect an exchange |
 | `/positions` | View all positions with actionable advice |
-| `/risk` | Portfolio risk overview with metrics |
+| `/risk` | Portfolio risk overview across venues + one-line Muse summary naming the riskiest position |
 | `/threshold` | Configure alert thresholds |
 | `/demo` | Demo mode with price simulation |
 | `/ask <question>` | Ask AI about your positions |
@@ -138,15 +139,18 @@ liqguard/
 │   ├── risk_engine.py  # Liquidation distance calculations
 │   ├── alert_manager.py # Alert cooldowns and deduplication
 │   ├── protective_actions.py # Tier 1 actions with guardrails
+│   ├── simulation.py   # Shared demo price path + event bus (web + Telegram)
 │   └── storage.py      # Encrypted SQLite storage
 ├── llm/                 # AI integration
 │   └── meta_client.py  # Meta Muse Spark client + mock
 ├── telegram/            # Bot interface
 │   ├── handlers.py     # Command handlers
-│   └── monitor.py      # Background position monitor
-├── dashboard/           # Web dashboard
+│   ├── monitor.py      # Background position monitor
+│   └── sim_bridge.py   # Mirrors simulation alerts to Telegram chats
+├── dashboard/           # Read-only web dashboard
 │   ├── server.py       # FastAPI + WebSocket server
-│   └── run.py          # Standalone runner
+│   ├── run.py          # Standalone runner (liqguard-dashboard)
+│   └── static/         # index.html, app.css, app.js (Chart.js)
 └── main.py             # Entry point (bot + optional dashboard)
 ```
 
@@ -235,103 +239,96 @@ export LIQGUARD_ENCRYPTION_KEY="your-key-here"
 
 ## Web Dashboard
 
-A single-page web dashboard for demo/hackathon judges. Shows real-time risk monitoring with the same data as the Telegram bot.
+A single-page, read-only dashboard for the demo video and judges. It shows the same
+demo portfolio that Telegram `/demo` uses (BTC + SOL on Binance, ETH on Hyperliquid).
 
-### Running the Dashboard
+### Run it
 
 ```bash
-# Standalone dashboard (demo mode only)
-liqguard-dashboard --port 8765
+pip install -e ".[dev]"
 
-# Or with Python
-python -m liqguard.dashboard.run --port 8765
+# Web only, no Telegram token needed
+liqguard-dashboard --port 8765          # or: python -m liqguard.dashboard.run --port 8765
 
-# Combined with Telegram bot
-liqguard --dashboard --dashboard-port 8765
-
-# Via environment variable
-LIQGUARD_DASHBOARD=true liqguard
+# Bot + dashboard in one process: alerts appear on the web and in Telegram at the same time
+liqguard --dashboard --dashboard-port 8765   # or set LIQGUARD_DASHBOARD=true
 ```
 
-Then open http://127.0.0.1:8765 in your browser.
+Open http://127.0.0.1:8765 and click **Simulate market**.
 
-### Dashboard Features
+To get the web-triggered alerts in Telegram, run the combined mode and either send `/demo`
+to the bot once (any scenario subscribes your chat) or preset
+`LIQGUARD_DEMO_CHAT_IDS=<your chat id>`. Starting **🎬 Liquidation Simulation** from Telegram
+drives the same run, so the dashboard updates as well.
 
-| Feature | Description |
-|---------|-------------|
-| **📊 Portfolio Overview** | Total positions, notional value, margin, risk level |
-| **📈 Price vs Liquidation Chart** | Real-time Chart.js graph for each position |
-| **⚡ Position Risk Levels** | Distance-to-liquidation bars for each position |
-| **🔔 Alert Timeline** | Three-tier alerts (warning/critical/emergency) |
-| **💡 AI Advice Cards** | Muse explanations with exact action recommendations |
-| **📋 Audit Log** | Action history (when protective actions enabled) |
-| **▶️ Simulate Market** | Triggers the same demo path as `/demo` in Telegram |
+### What's on the page
 
-### How It Works
+| Panel | Contents |
+|-------|----------|
+| Muse summary banner | Overall risk level plus a one-line Muse summary naming the riskiest position (the same summary `/risk` shows) |
+| KPIs | Total notional, margin used, unrealized PnL, net exposure, closest distance to liquidation, margin needed to restore the safety buffer |
+| Chart | **Distance** tab: every position's distance to liquidation over time, with shaded warning/critical/emergency bands. **Per-symbol** tabs: mark price vs liquidation line, plus the price where each tier fires |
+| Positions | Venue, side, leverage, distance gauge with tier markers, mark/liq price, PnL |
+| Alert timeline | Three-tier alerts in order, showing which channels (Web, Telegram) received each one |
+| Muse advice | Per-alert explanation, plus exact "add $X margin" and "reduce Y%" numbers computed in code |
+| Audit log | Simulation start/stop, every alert, every advice card, and protective-action steps from Telegram (sanitized) |
 
-1. Click **Simulate Market** to start the liquidation path simulation
-2. Prices move toward liquidation over ~30 seconds
-3. Alerts fire at 20%, 10%, 5% thresholds
-4. AI advice cards appear for each alert
-5. Charts update in real-time via WebSocket
+### How the simulation works
 
-### API Endpoints
+`liqguard/services/simulation.py` (`MarketSimulation`) is one shared, deterministic price path
+(seeded, about 30 s). Each position moves toward its liquidation price at a different pace, so the
+run shows warning → critical → emergency in sequence. No tier is ever skipped, and each fires
+once per position. All numbers come from `PortfolioAnalyzer` / `AdviceCalculator`; Muse
+(or the mock) only writes the wording. The web dashboard and `TelegramSimulationBridge` both
+subscribe to the same event stream.
 
-The dashboard exposes a REST API at the same port:
+### API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/portfolio` | GET | Current portfolio overview (JSON) |
-| `/api/positions` | GET | All positions |
-| `/api/price-history` | GET | Price history for charts |
-| `/api/alerts` | GET | Alert timeline |
-| `/api/advice` | GET | AI advice cards |
-| `/api/simulate` | POST | Start simulation |
-| `/api/stop-simulation` | POST | Stop simulation |
-| `/api/reset` | POST | Reset all state |
-| `/ws` | WebSocket | Real-time updates |
+| `/api/snapshot` | GET | Full state: overview, summary, history, alerts, advice, audit |
+| `/api/portfolio` | GET | `/risk` data layer (`PortfolioRiskOverview.to_dict()`) + Muse summary |
+| `/api/alerts` · `/api/advice` · `/api/audit` | GET | Timeline, advice cards, audit log |
+| `/api/health` | GET | Status, Muse mode, simulation state |
+| `/api/simulate` · `/api/simulate/stop` · `/api/simulate/reset` | POST | Demo simulation controls |
+| `/ws` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `summary` / `audit` / `status` events |
 
 ### Security
 
-- **Read-only**: No execution capability from web interface
-- **No secrets exposed**: API keys never sent to browser
-- **Demo data by default**: Real exchange data only with bound accounts
-- **Local only**: Binds to 127.0.0.1 by default
+- **Read-only.** The only write endpoints are the demo-simulation controls. Nothing binds accounts or proposes, confirms, or executes actions; that stays in Telegram (Tier 1, testnet only).
+- **No secrets in the browser.** Responses carry no API keys, wallet secrets, or Telegram user IDs, and tests check this.
+- **Demo data by default.** Binds to `127.0.0.1` by default and sends a strict Content-Security-Policy. Chart.js is the only external script (jsDelivr CDN).
 
 ## Testing
 
 ```bash
-# Run all tests (91 tests)
-python3 -m pytest liqguard/tests/ -v
-
-# Run with coverage
-python3 -m pytest --cov=liqguard
-
-# Run specific test file
-python3 -m pytest liqguard/tests/test_portfolio.py -v
+python3 -m pytest liqguard/tests/ -q
 ```
 
-### Test Coverage
-
-- `test_risk_engine.py`: Liquidation distance, margin calculations, risk scoring
-- `test_advice.py`: Actionable advice generation
-- `test_portfolio.py`: Portfolio analysis and metrics
-- `test_llm.py`: Mock mode and severity levels
-- `test_storage.py`: Encryption key handling
-- `test_dashboard.py`: Dashboard server, WebSocket, simulation
+| File | Covers |
+|------|--------|
+| `test_risk_engine.py` | Liquidation distance, margin calculations, risk scoring |
+| `test_advice.py` | Actionable advice; added margin lands exactly on the target distance |
+| `test_portfolio.py` | `/risk` portfolio aggregation and metrics |
+| `test_llm.py` | Mock mode, severity levels, one-line portfolio summary (incl. live-response validation) |
+| `test_simulation.py` | Deterministic path, tier ordering, advice/audit, Telegram bridge and handlers |
+| `test_dashboard.py` | Endpoints, WebSocket, controls, no execution routes, no secret leakage |
+| `test_storage.py` | Encryption key handling |
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Yes | Telegram Bot API token |
-| `META_API_KEY` | No | Meta AI API key (uses mock if not set) |
+| `TELEGRAM_BOT_TOKEN` | Bot only | Telegram Bot API token (not needed for `liqguard-dashboard`) |
+| `META_API_KEY` | No | Meta AI API key (Muse runs in deterministic mock mode if unset) |
 | `META_MODEL` | No | Model name (default: muse-spark) |
-| `LIQGUARD_ENCRYPTION_KEY` | Recommended | Fernet key for secrets (auto-generated if not set) |
+| `LIQGUARD_ENCRYPTION_KEY` | Recommended | Fernet key for secrets (auto-generated to `~/.liqguard/encryption.key` if not set) |
 | `LIQGUARD_DB_PATH` | No | SQLite database path (default: liqguard.db) |
 | `LIQGUARD_POLL_INTERVAL` | No | Position check interval in seconds (default: 30) |
-| `LIQGUARD_DASHBOARD` | No | Enable web dashboard (default: false) |
+| `LIQGUARD_DASHBOARD` | No | Start the dashboard with the bot (default: false) |
+| `LIQGUARD_DASHBOARD_HOST` | No | Dashboard bind address (default: 127.0.0.1) |
 | `LIQGUARD_DASHBOARD_PORT` | No | Dashboard port (default: 8765) |
+| `LIQGUARD_DEMO_CHAT_IDS` | No | Comma-separated chat IDs that receive simulation alerts without running `/demo` first |
 
 ## Demo Video Script
 
@@ -343,12 +340,13 @@ For the hackathon demo (~3 minutes):
 3. "Liquidations happen fast. LiqGuard warns you in time."
 
 ### Scene 2: Web Dashboard + Simulation (60s)
-1. Open web dashboard at http://127.0.0.1:8765
-2. Click "Simulate Market" button
-3. Watch the price chart move toward liquidation
-4. Show alerts appearing in timeline (warning → critical → emergency)
-5. Show AI advice cards with exact numbers
-6. Meanwhile, show Telegram receiving the same alerts
+Setup: `liqguard --dashboard`, send `/demo` to the bot once, put the browser and Telegram side by side.
+1. Open http://127.0.0.1:8765 and point out the Muse summary banner and the cross-venue KPIs
+2. Click **Simulate market**
+3. Distance chart: lines fall through the warning, critical and emergency bands
+4. Alerts land in the timeline (tagged Web ✓ and Telegram ✓) and in Telegram at the same moment
+5. Muse advice cards show exact "add $X margin" and "reduce Y%" numbers
+6. Click the BTCUSDT tab: price closing in on the red liquidation line
 
 ### Scene 3: Telegram Bot Commands (40s)
 1. `/risk` → Show portfolio risk overview in Telegram

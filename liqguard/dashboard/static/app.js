@@ -190,7 +190,7 @@ function renderOverview(ov) {
   $("kpiMinDistSym").textContent = closest ? `${closest.symbol} ${closest.side}` : "—";
   $("kpiSafety").textContent = money(rm.total_margin_needed_for_safety);
   $("kpiSafetySub").textContent = rm.total_margin_needed_for_safety > 0
-    ? `to restore a ${S.safetyTarget ?? 30}% buffer everywhere` : "all positions above safety target";
+    ? `to restore a ${S.safetyTarget ?? 30}% buffer` : "all above safety target";
 
   if (!S.summaryRiskiest && ov.riskiest_position) {
     const rp = ov.riskiest_position;
@@ -204,7 +204,12 @@ function renderOverview(ov) {
 }
 
 function renderSummary(summary) {
-  if (!summary) return;
+  if (!summary) {
+    S.summaryRiskiest = null;
+    $("headline").textContent = "Muse is summarizing the portfolio…";
+    $("summaryTag").hidden = true;
+    return;
+  }
   $("headline").textContent = summary.headline;
   $("summaryTag").hidden = !summary.mock;
   S.summaryRiskiest = summary.riskiest_symbol;

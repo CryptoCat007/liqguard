@@ -633,14 +633,14 @@ Question: {question}"""
         rp = overview.riskiest_position
         if rp is None:
             return "目前沒有持倉。" if language == "zh-TW" else "No open positions."
-        level = overview.overall_risk_level.value.upper()
         dist = rp.distance_to_liquidation_pct
         add = rp.margin_advice.margin_to_add_usd if rp.margin_advice else 0
+        target = rp.margin_advice.target_distance_pct if rp.margin_advice else None
         if language == "zh-TW":
-            line = f"{level}：最高風險為 {rp.symbol} {rp.side.upper()}，距離清算 {dist:.1f}%"
-            return line + (f"，建議增加 ${add:,.0f} 保證金。" if add else "。")
-        line = f"{level}: riskiest is {rp.symbol} {rp.side.upper()} at {dist:.1f}% from liquidation"
-        return line + (f" — add ${add:,.0f} margin to reach safety." if add else ".")
+            line = f"最高風險為 {rp.symbol} {rp.side.upper()}（{rp.venue}），距離清算 {dist:.1f}%"
+            return line + (f"，增加 ${add:,.0f} 保證金可恢復 {target:.0f}% 緩衝。" if add else "。")
+        line = f"Riskiest is {rp.symbol} {rp.side.upper()} on {rp.venue.title()} at {dist:.1f}% from liquidation"
+        return line + (f" — add ${add:,.0f} margin to restore a {target:.0f}% buffer." if add else ".")
 
     async def explain_risk(
         self,
