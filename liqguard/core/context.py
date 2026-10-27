@@ -9,7 +9,12 @@ from liqguard.ai import MetaLLMClient
 from liqguard.alerts import AlertManager
 from liqguard.auth import LoginLinkService, SessionSigner
 from liqguard.config import Settings
-from liqguard.protect import AuditLogger, ExecutionTier, ProtectiveActionConfig, ProtectiveActionsManager
+from liqguard.protect import (
+    AuditLogger,
+    ExecutionTier,
+    ProtectiveActionConfig,
+    ProtectiveActionsManager,
+)
 from liqguard.simulation import MarketSimulation, SimulationRegistry
 from liqguard.storage import EncryptedStorage
 

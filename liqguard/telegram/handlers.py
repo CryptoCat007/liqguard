@@ -17,7 +17,12 @@ from liqguard.ai import get_news_stub
 from liqguard.core import AppContext
 from liqguard.exchanges import SCENARIOS, BinanceAdapter, HyperliquidAdapter
 from liqguard.models import MAINNET, TESTNET, ExchangeBinding, Position, Side, User
-from liqguard.risk import AdviceCalculator, PortfolioAnalyzer, RiskEngine, format_portfolio_overview_text
+from liqguard.risk import (
+    AdviceCalculator,
+    PortfolioAnalyzer,
+    RiskEngine,
+    format_portfolio_overview_text,
+)
 from liqguard.simulation import MarketSimulation
 
 logger = logging.getLogger(__name__)
