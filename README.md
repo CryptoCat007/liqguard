@@ -15,7 +15,8 @@ Built for the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/m
 - 🎮 **Demo Mode**: Simulated price paths with alert sequences
 - 💰 **Actionable Advice**: Exact margin/reduction amounts, not estimates
 - 🛡️ **Protective Actions**: User-confirmed risk reduction (testnet only)
-- 🖥️ **Web Dashboard**: Read-only live view for demos; same alerts as Telegram
+- 🖥️ **Web Dashboard**: Public demo page plus a private per-user view behind Telegram login
+- 👥 **Multi-user**: Every position, key, alert, action, audit entry and simulation is scoped to its owner
 
 ## Quick Start
 
@@ -56,8 +57,9 @@ liqguard
 |---------|-------------|
 | `/start` | Welcome message and quick start |
 | `/help` | Show all available commands |
-| `/bind` | Connect an exchange (Binance or Hyperliquid) |
+| `/bind` | Connect an exchange: Binance (read-only key), Hyperliquid (wallet address) or Binance testnet (for protective actions) |
 | `/unbind` | Disconnect an exchange |
+| `/dashboard` | One-time login link to your private web dashboard (`/dashboard revoke` signs out everywhere) |
 | `/positions` | View all positions with actionable advice |
 | `/risk` | Portfolio risk overview across venues + one-line Muse summary naming the riskiest position |
 | `/threshold` | Configure alert thresholds |
@@ -123,53 +125,113 @@ Send a position screenshot → Muse extracts fields → User confirms → Monito
 
 ## Architecture
 
+Business logic lives in framework-free packages. Telegram (`aiogram`) and the web dashboard
+(`FastAPI`) are thin delivery layers on top of one shared `AppContext`; neither imports the
+other, and `test_architecture.py` enforces both rules plus the absence of import cycles.
+
 ```
-liqguard/
-├── connectors/          # Exchange API connectors
-│   ├── binance.py      # Binance USDⓈ-M Futures
-│   ├── hyperliquid.py  # Hyperliquid DEX
-│   └── demo.py         # Demo mode with price simulation
-├── models/              # Data models
-│   ├── position.py     # Normalized position format
-│   ├── alert.py        # Alert and threshold models
-│   └── user.py         # User and binding models
-├── services/            # Business logic
-│   ├── advice.py       # Deterministic actionable advice
-│   ├── portfolio.py    # Portfolio analysis & data layer
-│   ├── risk_engine.py  # Liquidation distance calculations
-│   ├── alert_manager.py # Alert cooldowns and deduplication
-│   ├── protective_actions.py # Tier 1 actions with guardrails
-│   ├── simulation.py   # Shared demo price path + event bus (web + Telegram)
-│   └── storage.py      # Encrypted SQLite storage
-├── llm/                 # AI integration
-│   └── meta_client.py  # Meta Muse Spark client + mock
-├── telegram/            # Bot interface
-│   ├── handlers.py     # Command handlers
-│   ├── monitor.py      # Background position monitor
-│   └── sim_bridge.py   # Mirrors simulation alerts to Telegram chats
-├── dashboard/           # Read-only web dashboard
-│   ├── server.py       # FastAPI + WebSocket server
-│   ├── run.py          # Standalone runner (liqguard-dashboard)
-│   └── static/         # index.html, app.css, app.js (Chart.js)
-└── main.py             # Entry point (bot + optional dashboard)
+                 ┌──────────────┐          ┌──────────────┐
+                 │  telegram/   │          │     web/     │   delivery layers
+                 │  handlers,   │          │ FastAPI, WS, │   (only these import
+                 │  sim_bridge  │          │ auth routes  │    aiogram / FastAPI)
+                 └──────┬───────┘          └──────┬───────┘
+                        └───────────┬─────────────┘
+                                    ▼
+                           ┌────────────────┐
+                           │     core/      │  AppContext wiring, PositionService,
+                           │                │  BindingActionExecutor
+                           └───────┬────────┘
+     ┌──────────┬──────────┬───────┼─────────┬────────────┬──────────┐
+     ▼          ▼          ▼       ▼         ▼            ▼          ▼
+ exchanges/   alerts/   protect/  simulation/ storage/    auth/      ai/
+ adapters     monitor,  tier-1    per-user    envelope    sessions,  Muse client
+ + key policy cooldowns guardrails registry   encryption, login      + mock
+                                              repositories links,
+                                                          widget
+     └──────────┴──────────┴───────┬─────────┴────────────┴──────────┘
+                                   ▼
+                            risk/  (pure math: engine, advice, portfolio)
+                                   ▼
+                            models/ (dataclasses, no I/O)
 ```
 
-### Data Layer API
+| Package | Responsibility |
+|---------|----------------|
+| `models/` | Plain dataclasses: `Position`, `User`, `ExchangeBinding`, `Alert`, thresholds |
+| `risk/` | Pure calculations: liquidation distance, exact margin/reduction advice, portfolio overview |
+| `ai/` | `MetaLLMClient` (OpenAI-compatible Muse client) with deterministic mock fallback |
+| `exchanges/` | `ExchangeAdapter` interface; Binance, Hyperliquid and demo adapters; Binance key-permission policy |
+| `alerts/` | Per-user cooldown/dedup (`AlertManager`) and the polling `PositionMonitor` (delivers through a `Notifier`) |
+| `protect/` | Tier-1 protective actions, guardrails, kill switch, per-user audit logger |
+| `simulation/` | Deterministic market simulation and `SimulationRegistry` (one per user + one public demo) |
+| `storage/` | SQLite schema, envelope encryption (`KeyManager`), per-user repositories |
+| `auth/` | Signed session tokens, one-time login links, Telegram Login Widget verification |
+| `core/` | `AppContext` (wires everything once), `PositionService`, testnet action executor |
+| `telegram/` | aiogram handlers, Telegram notifier, owner-only simulation bridge |
+| `web/` | Dashboard app, session/CSRF guards, static frontend |
+| `config.py` · `logsafe.py` · `main.py` | Settings from env, log redaction, process entry point |
 
-The `services/portfolio.py` module exposes a clean API for future integrations:
+`risk/` is still the data layer for any future integration:
 
 ```python
-from liqguard.services import PortfolioAnalyzer, format_portfolio_overview_text
+from liqguard.risk import PortfolioAnalyzer, format_portfolio_overview_text
 
-analyzer = PortfolioAnalyzer(user_threshold)
-overview = analyzer.analyze_portfolio(positions)
-
-# JSON-serializable for API/dashboard
-data = overview.to_dict()
-
-# Formatted for display
+overview = PortfolioAnalyzer(user_threshold).analyze_portfolio(positions)
+data = overview.to_dict()                                   # JSON for API/dashboard
 text = format_portfolio_overview_text(overview, language="en")
 ```
+
+### Multi-user isolation
+
+Every piece of per-user state is keyed by the owner's Telegram user id, and lookups
+never fall back to "any user":
+
+| Data | Where it is scoped |
+|------|--------------------|
+| Exchange keys / wallets | `bindings` rows keyed by `telegram_id`, encrypted with that user's own data key; a ciphertext copied into another user's row fails to decrypt |
+| Positions | `PositionService` builds adapters from the requesting user's bindings only; demo books are per user |
+| Alerts | `AlertManager` keys cooldowns and history by `(user, venue, symbol)`; the monitor delivers only to `notifier.notify(owner_id, …)` |
+| Protective actions | Stored per user; another user's action id is "not found" for confirm/execute/cancel; daily caps and kill switch per user |
+| Audit log | `audit_log` rows and in-memory entries per user; subscribers receive only their user's entries |
+| Simulations | `SimulationRegistry` gives each user a private simulation. Its Telegram bridge sends only to the owner (the old broadcast-to-every-chat path is gone). The public dashboard demo has no owner and never sends to Telegram |
+| Dashboard | `/api/me/*` and `/ws/me` resolve the user from the session cookie only; there is no user id parameter to tamper with |
+
+`test_isolation.py` checks each row with two users (Alice and Bob).
+
+### Key handling
+
+- **Envelope encryption.** A master key (KEK) from `LIQGUARD_MASTER_KEY` (or a mode-600 key
+  file outside the repo) wraps a random per-user data key (DEK). Only wrapped DEKs are stored.
+  API key, secret and wallet address are encrypted with the owner's DEK. Comma-separated master
+  keys enable rotation (`EncryptedStorage.rotate_master_key()` re-wraps every DEK). SQLite runs
+  with `secure_delete` so unbound keys are overwritten.
+- **Read-only on mainnet.** On `/bind`, LiqGuard calls Binance
+  `GET /sapi/v1/account/apiRestrictions` for *that key* and rejects any key with withdraw,
+  transfer or trading permission (futures, spot/margin, options, portfolio margin, FIX). A key
+  whose permissions cannot be verified is rejected too. The mainnet adapter additionally raises
+  `ReadOnlyViolation` on any non-GET request.
+- **Testnet trading only.** The separate "Binance testnet" binding may trade (tier-1 protective
+  actions), but a withdraw permission is still rejected. Actions execute only for positions
+  whose `network` is testnet.
+- **Never logged.** Bindings, adapters, settings and the LLM client have redacted `repr`s; a
+  logging filter on every handler scrubs bot tokens, 64-char API keys/signatures, Fernet
+  ciphertexts and `token=`/`signature=` query values; uvicorn access logs are off. The bot
+  deletes the message containing the secret after reading it.
+
+### Dashboard login
+
+1. Send `/dashboard` to the bot in a private chat. It replies with a one-time link
+   (`/auth/login?token=…`, 256-bit random, stored only as a SHA-256 hash, expires after
+   `LIQGUARD_LOGIN_LINK_TTL`, default 5 min). Group chats get no link.
+2. Alternatively, sign in with the **Telegram Login Widget** on `/login` (needs
+   `LIQGUARD_BOT_USERNAME` and BotFather `/setdomain`). The widget hash is verified with
+   `SHA256(bot_token)` and must be fresh.
+3. Either path sets `liqguard_session`: an HMAC-signed, expiring token
+   (`LIQGUARD_SESSION_TTL`, default 12 h) in an `HttpOnly`, `SameSite=Lax` cookie (`Secure`
+   when `LIQGUARD_PUBLIC_URL` is https). The token carries a session epoch;
+   `/dashboard revoke` bumps it, which signs out every device and voids unused links.
+4. State-changing requests need the `X-LiqGuard-CSRF` header and a same-origin `Origin`;
+   `/ws/me` checks the Origin and the cookie and closes with code 1008 otherwise.
 
 ## Protective Actions (Tiers)
 
@@ -180,7 +242,7 @@ text = format_portfolio_overview_text(overview, language="en")
 ### Tier 1: User Confirmation (Implemented)
 - AI suggests risk-reducing actions
 - User taps confirm button before execution
-- **Testnet only** - mainnet disabled by config
+- **Testnet only**: needs `LIQGUARD_PROTECT_ENABLED=true` and a Binance testnet binding; there is no mainnet switch
 - Guardrails:
   - Per-action amount cap ($1,000 default)
   - Daily total cap ($5,000 default)
@@ -217,30 +279,35 @@ The **Liquidation Simulation** gradually moves prices toward liquidation, firing
 
 ## Security Model
 
-### API Key Protection
+See [Key handling](#key-handling) and [Dashboard login](#dashboard-login) above. In short:
 
-1. **Read-Only Enforcement**: Binance keys with withdraw permission are rejected
-2. **Encryption at Rest**: Secrets encrypted with Fernet (AES-128-CBC)
-3. **Testnet Execution**: Protective actions only on testnet
-4. **Never Mainnet**: Production trading disabled by config
-5. **Audit Logging**: Every action logged with timestamp
-
-### Encryption Key Management
+1. **Read-only mainnet keys**: per-key permissions are checked; withdraw, transfer or trading permission is rejected
+2. **Envelope encryption**: per-user data keys wrapped by a master key; rotation supported
+3. **Testnet-only execution**: protective actions never touch mainnet
+4. **Per-user isolation**: every lookup is scoped to the owning Telegram user
+5. **Audit logging**: every protective-action step is persisted to the owner's audit trail
+6. **No secrets in logs**: redacted reprs plus a log redaction filter
 
 ```bash
-# Generate a key
-python -c "from liqguard.services import EncryptedStorage; print(EncryptedStorage.generate_key())"
+# Generate a master key
+python3 -c "from liqguard.storage import generate_key; print(generate_key())"
 
-# Set via environment (recommended for production)
-export LIQGUARD_ENCRYPTION_KEY="your-key-here"
+# Set it via environment (recommended for production)
+export LIQGUARD_MASTER_KEY="your-key-here"
 
-# Or auto-generated and saved to ~/.liqguard/encryption.key
+# Otherwise it is generated once and saved to ~/.liqguard/encryption.key (mode 600)
 ```
 
 ## Web Dashboard
 
-A single-page, read-only dashboard for the demo video and judges. It shows the same
-demo portfolio that Telegram `/demo` uses (BTC + SOL on Binance, ETH on Hyperliquid).
+Two views on one page:
+
+- **`/` – public demo**, clearly labelled **DEMO DATA**. It shows the demo portfolio that
+  Telegram `/demo` uses (BTC + SOL on Binance, ETH on Hyperliquid). No login is needed, and
+  nothing on it ever reaches Telegram.
+- **`/me` – your private dashboard** after signing in with `/dashboard` (or the Telegram
+  widget on `/login`). It shows only your bindings (masked), positions, audit log and your own
+  simulation, whose alerts also arrive in your Telegram chat.
 
 ### Run it
 
@@ -248,18 +315,19 @@ demo portfolio that Telegram `/demo` uses (BTC + SOL on Binance, ETH on Hyperliq
 pip install -e ".[dev]"
 
 # Web only, no Telegram token needed
-liqguard-dashboard --port 8765          # or: python -m liqguard.dashboard.run --port 8765
+liqguard-dashboard --port 8765          # or: python3 -m liqguard.web.run --port 8765
+liqguard-dashboard --public-only        # demo page only, login disabled
 
 # Bot + dashboard in one process: alerts appear on the web and in Telegram at the same time
 liqguard --dashboard --dashboard-port 8765   # or set LIQGUARD_DASHBOARD=true
 ```
 
-Open http://127.0.0.1:8765 and click **Simulate market**.
+Open http://127.0.0.1:8765 and click **Simulate market** for the public demo.
 
-To get the web-triggered alerts in Telegram, run the combined mode and either send `/demo`
-to the bot once (any scenario subscribes your chat) or preset
-`LIQGUARD_DEMO_CHAT_IDS=<your chat id>`. Starting **🎬 Liquidation Simulation** from Telegram
-drives the same run, so the dashboard updates as well.
+For the private view, run the combined mode, send `/dashboard` to the bot and open the link.
+**Simulate market** on `/me` runs *your* simulation: alerts appear on the page and in your
+Telegram chat only. Starting **🎬 Liquidation Simulation** from Telegram drives the same
+private run. Set `LIQGUARD_PUBLIC_URL` to the address users open (https in production).
 
 ### What's on the page
 
@@ -275,29 +343,35 @@ drives the same run, so the dashboard updates as well.
 
 ### How the simulation works
 
-`liqguard/services/simulation.py` (`MarketSimulation`) is one shared, deterministic price path
-(seeded, about 30 s). Each position moves toward its liquidation price at a different pace, so the
+`liqguard/simulation/market.py` (`MarketSimulation`) is a deterministic price path
+(seeded, about 30 s); `SimulationRegistry` keeps one per user plus the public demo. Each position moves toward its liquidation price at a different pace, so the
 run shows warning → critical → emergency in sequence. No tier is ever skipped, and each fires
 once per position. All numbers come from `PortfolioAnalyzer` / `AdviceCalculator`; Muse
 (or the mock) only writes the wording. The web dashboard and `TelegramSimulationBridge` both
-subscribe to the same event stream.
+subscribe to the owning simulation's event stream.
 
 ### API
 
+The same simulation routes exist under `/api/demo/*` (public, demo data) and `/api/me/*`
+(session cookie required, the signed-in user's data only).
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/snapshot` | GET | Full state: overview, summary, history, alerts, advice, audit |
-| `/api/portfolio` | GET | `/risk` data layer (`PortfolioRiskOverview.to_dict()`) + Muse summary |
-| `/api/alerts` · `/api/advice` · `/api/audit` | GET | Timeline, advice cards, audit log |
-| `/api/health` | GET | Status, Muse mode, simulation state |
-| `/api/simulate` · `/api/simulate/stop` · `/api/simulate/reset` | POST | Demo simulation controls |
-| `/ws` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `summary` / `audit` / `status` events |
+| `…/snapshot` | GET | Full state: overview, summary, history, alerts, advice, audit |
+| `…/portfolio` | GET | `/risk` data layer (`PortfolioRiskOverview.to_dict()`) + Muse summary |
+| `…/alerts` · `…/advice` · `…/audit` | GET | Timeline, advice cards, audit log |
+| `…/simulate` · `…/simulate/stop` · `…/simulate/reset` | POST | Simulation controls (CSRF header required) |
+| `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, audit log |
+| `/api/health` · `/api/auth/config` | GET | Status; login options (no secrets) |
+| `/auth/login?token=` · `/auth/telegram` | GET | One-time link / Telegram widget sign-in |
+| `/auth/logout` | POST | Sign out (CSRF header required) |
+| `/ws/demo` · `/ws/me` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `summary` / `audit` / `status` events |
 
 ### Security
 
-- **Read-only.** The only write endpoints are the demo-simulation controls. Nothing binds accounts or proposes, confirms, or executes actions; that stays in Telegram (Tier 1, testnet only).
-- **No secrets in the browser.** Responses carry no API keys, wallet secrets, or Telegram user IDs, and tests check this.
-- **Demo data by default.** Binds to `127.0.0.1` by default and sends a strict Content-Security-Policy. Chart.js is the only external script (jsDelivr CDN).
+- **No trading from the web.** The only write endpoints are simulation controls and logout. Binding accounts and confirming actions stay in Telegram (tier 1, testnet only).
+- **No secrets in the browser.** Responses carry no API keys, secrets or ciphertexts; bindings show a masked hint. Tests check this.
+- **Hardened by default.** Binds to `127.0.0.1`, strict Content-Security-Policy, `X-Frame-Options: DENY`, `Cache-Control: no-store`. Chart.js (jsDelivr) and, on `/login`, the Telegram widget script are the only external scripts.
 
 ## Testing
 
@@ -313,22 +387,33 @@ python3 -m pytest liqguard/tests/ -q
 | `test_llm.py` | Mock mode, severity levels, one-line portfolio summary (incl. live-response validation) |
 | `test_simulation.py` | Deterministic path, tier ordering, advice/audit, Telegram bridge and handlers |
 | `test_dashboard.py` | Endpoints, WebSocket, controls, no execution routes, no secret leakage |
-| `test_storage.py` | Encryption key handling |
+| `test_storage.py` | Master key sources, envelope encryption, rotation, legacy migration |
+| `test_isolation.py` | Two users: storage, alerts, monitor, simulations, actions, audit, demo books, dashboard |
+| `test_auth.py` | Session tokens, login links, Telegram widget, cookies, CSRF, WebSocket auth, `/dashboard` |
+| `test_exchanges.py` | Binance key-permission policy, read-only mainnet adapter, no secrets in reprs |
+| `test_architecture.py` | No framework imports in business logic, no cycles, log redaction, startup key message |
+
+242 tests at the time of writing.
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Bot only | Telegram Bot API token (not needed for `liqguard-dashboard`) |
+| `TELEGRAM_BOT_TOKEN` | Bot only | Telegram Bot API token |
 | `META_API_KEY` | No | Meta AI API key (Muse runs in deterministic mock mode if unset) |
 | `META_MODEL` | No | Model name (default: muse-spark) |
-| `LIQGUARD_ENCRYPTION_KEY` | Recommended | Fernet key for secrets (auto-generated to `~/.liqguard/encryption.key` if not set) |
+| `LIQGUARD_MASTER_KEY` | Recommended | Master key(s), comma-separated for rotation. Legacy name `LIQGUARD_ENCRYPTION_KEY` still works |
+| `LIQGUARD_KEY_FILE` | No | Key file used when no env key is set (default `~/.liqguard/encryption.key`, created mode 600) |
 | `LIQGUARD_DB_PATH` | No | SQLite database path (default: liqguard.db) |
 | `LIQGUARD_POLL_INTERVAL` | No | Position check interval in seconds (default: 30) |
 | `LIQGUARD_DASHBOARD` | No | Start the dashboard with the bot (default: false) |
-| `LIQGUARD_DASHBOARD_HOST` | No | Dashboard bind address (default: 127.0.0.1) |
-| `LIQGUARD_DASHBOARD_PORT` | No | Dashboard port (default: 8765) |
-| `LIQGUARD_DEMO_CHAT_IDS` | No | Comma-separated chat IDs that receive simulation alerts without running `/demo` first |
+| `LIQGUARD_DASHBOARD_HOST` / `_PORT` | No | Dashboard bind address and port (default: 127.0.0.1:8765) |
+| `LIQGUARD_PUBLIC_URL` | Production | Dashboard URL used in login links; https enables `Secure` cookies |
+| `LIQGUARD_BOT_USERNAME` | No | Enables the Telegram Login Widget (auto-detected when the bot starts) |
+| `LIQGUARD_SESSION_SECRET` | No | Session signing secret, at least 32 chars (default: derived from the master key) |
+| `LIQGUARD_SESSION_TTL` | No | Dashboard session lifetime in seconds (default: 43200) |
+| `LIQGUARD_LOGIN_LINK_TTL` | No | One-time login link lifetime in seconds (default: 300) |
+| `LIQGUARD_PROTECT_ENABLED` | No | Enable tier-1 protective actions on testnet bindings (default: false) |
 
 ## Demo Video Script
 
@@ -340,8 +425,8 @@ For the hackathon demo (~3 minutes):
 3. "Liquidations happen fast. LiqGuard warns you in time."
 
 ### Scene 2: Web Dashboard + Simulation (60s)
-Setup: `liqguard --dashboard`, send `/demo` to the bot once, put the browser and Telegram side by side.
-1. Open http://127.0.0.1:8765 and point out the Muse summary banner and the cross-venue KPIs
+Setup: `liqguard --dashboard`, send `/dashboard` to the bot and open the link; put the browser and Telegram side by side.
+1. On your private dashboard, point out the Muse summary banner and the cross-venue KPIs
 2. Click **Simulate market**
 3. Distance chart: lines fall through the warning, critical and emergency bands
 4. Alerts land in the timeline (tagged Web ✓ and Telegram ✓) and in Telegram at the same moment
@@ -367,7 +452,7 @@ Setup: `liqguard --dashboard`, send `/demo` to the bot once, put the browser and
 ### Scene 6: Security Wrap-up (10s)
 1. Read-only API keys
 2. Encrypted storage
-3. No secrets in dashboard
+3. Per-user isolation and private dashboard login
 
 ## Roadmap
 
@@ -377,6 +462,9 @@ Setup: `liqguard --dashboard`, send `/demo` to the bot once, put the browser and
 - [x] Portfolio risk overview
 - [x] Protective actions Tier 1
 - [x] Web dashboard for demo/judges
+- [x] Multi-user isolation, envelope encryption, dashboard login
+- [ ] Hyperliquid testnet execution and reduce-position execution
+- [ ] Persist pending actions and kill switch across restarts
 - [ ] OKX and Bybit support
 - [ ] Tier 2: Rules-based automation
 - [ ] Tier 3: Full AI automation
