@@ -1,26 +1,18 @@
-"""Forwards shared demo-simulation events to Telegram chats."""
+"""Forwards one user's simulation events to that user's Telegram chat, and nowhere else."""
+
+from __future__ import annotations
 
 import logging
-from typing import Iterable, Optional
+from typing import Callable, Optional
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from liqguard.services.simulation import MarketSimulation
+from liqguard.simulation import MarketSimulation
 
 logger = logging.getLogger(__name__)
 
 LEVEL_EMOJI = {"warning": "⚠️", "critical": "🚨", "emergency": "🆘"}
-
-
-def parse_chat_ids(raw: Optional[str]) -> set[int]:
-    """Parse a comma-separated LIQGUARD_DEMO_CHAT_IDS value."""
-    ids = set()
-    for part in (raw or "").split(","):
-        part = part.strip()
-        if part.lstrip("-").isdigit():
-            ids.add(int(part))
-    return ids
 
 
 def format_advice_message(card: dict) -> str:
@@ -46,30 +38,28 @@ def format_advice_message(card: dict) -> str:
 
 
 class TelegramSimulationBridge:
-    """Subscribes to a MarketSimulation and mirrors its alerts to Telegram chats."""
+    """
+    Subscribes to a user-owned MarketSimulation and sends its alerts to the
+    owner's chat. The recipient is fixed to `simulation.owner_id`; there is
+    no list of chats to broadcast to, and the public demo simulation (owner
+    None) cannot be bridged.
+    """
 
-    def __init__(self, bot: Bot, simulation: MarketSimulation, chat_ids: Iterable[int] = ()):
+    def __init__(self, bot: Bot, simulation: MarketSimulation):
+        if simulation.owner_id is None:
+            raise ValueError("Public simulations are never forwarded to Telegram")
         self.bot = bot
         self.simulation = simulation
-        self.chat_ids: set[int] = set(chat_ids)
-        simulation.subscribe("telegram", self.on_event)
-
-    def add_chat(self, chat_id: int) -> None:
-        self.chat_ids.add(chat_id)
-
-    def has_chat(self, chat_id: int) -> bool:
-        return chat_id in self.chat_ids
+        self.chat_id: int = simulation.owner_id
+        self.unsubscribe: Callable[[], None] = simulation.subscribe("telegram", self.on_event)
 
     async def _send(self, text: str, keyboard: Optional[InlineKeyboardMarkup] = None) -> None:
-        for chat_id in list(self.chat_ids):
-            try:
-                await self.bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=keyboard)
-            except Exception as e:
-                logger.error(f"Failed to send simulation event to {chat_id}: {e}")
+        try:
+            await self.bot.send_message(self.chat_id, text, parse_mode="Markdown", reply_markup=keyboard)
+        except Exception as e:
+            logger.error("Failed to send simulation event to %s: %s", self.chat_id, type(e).__name__)
 
     async def on_event(self, event: dict) -> None:
-        if not self.chat_ids:
-            return
         kind, data = event["type"], event["data"]
 
         if kind == "advice":
@@ -85,12 +75,12 @@ class TelegramSimulationBridge:
             await self._send(format_advice_message(data), keyboard)
 
         elif kind == "audit" and data["event"] == "simulation_started":
+            t = self.simulation.threshold
             await self._send(
                 "🎬 **Market simulation started** (demo data)\n\n"
                 "Prices will walk toward liquidation. Alerts fire at "
-                f"⚠️ {self.simulation.threshold.warning_distance_pct:.0f}% · "
-                f"🚨 {self.simulation.threshold.critical_distance_pct:.0f}% · "
-                f"🆘 {self.simulation.threshold.emergency_distance_pct:.0f}%."
+                f"⚠️ {t.warning_distance_pct:.0f}% · 🚨 {t.critical_distance_pct:.0f}% · "
+                f"🆘 {t.emergency_distance_pct:.0f}%."
             )
 
         elif kind == "status" and data["state"] in ("finished", "stopped"):
@@ -99,3 +89,23 @@ class TelegramSimulationBridge:
             if headline:
                 text += f"\n\n🧠 {headline}"
             await self._send(text + "\n\nUse /risk for the portfolio overview.")
+
+
+def attach_bridges(bot: Bot) -> Callable[[MarketSimulation], Callable[[], None]]:
+    """Registry hook: give every user simulation a bridge to its owner's chat."""
+    def hook(simulation: MarketSimulation) -> Callable[[], None]:
+        return TelegramSimulationBridge(bot, simulation).unsubscribe
+    return hook
+
+
+class TelegramNotifier:
+    """`alerts.Notifier` implementation: one message to one user."""
+
+    def __init__(self, bot: Bot):
+        self.bot = bot
+
+    async def notify(self, user_id: int, text: str) -> None:
+        try:
+            await self.bot.send_message(user_id, text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error("Failed to deliver alert to %s: %s", user_id, type(e).__name__)

@@ -6,18 +6,35 @@ from typing import Optional
 
 from .alert import UserThreshold
 
+MAINNET = "mainnet"
+TESTNET = "testnet"
+
+
+def mask_secret(value: Optional[str], visible: int = 4) -> Optional[str]:
+    """`…ABCD`-style hint that is safe to show in chats and logs."""
+    if not value:
+        return None
+    return "…" + value[-visible:] if len(value) > visible * 2 else "…"
+
 
 @dataclass
 class ExchangeBinding:
-    """Binding to an exchange (CEX API key or DEX wallet address)."""
+    """
+    Binding to an exchange (CEX API key or DEX wallet address).
+
+    `api_key` / `api_secret` hold plaintext only in memory after the owning
+    user's data key decrypted them; they are excluded from repr so they never
+    end up in logs or tracebacks.
+    """
 
     venue: str
     binding_type: str  # "api_key" or "wallet"
 
-    api_key: Optional[str] = None
-    api_secret_encrypted: Optional[str] = None
+    api_key: Optional[str] = field(default=None, repr=False)
+    api_secret: Optional[str] = field(default=None, repr=False)
 
     wallet_address: Optional[str] = None
+    network: str = MAINNET
 
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = True
@@ -25,12 +42,21 @@ class ExchangeBinding:
 
     permissions: list[str] = field(default_factory=list)
 
+    @property
+    def api_key_hint(self) -> Optional[str]:
+        return mask_secret(self.api_key)
+
+    @property
+    def is_testnet(self) -> bool:
+        return self.network == TESTNET
+
     def to_dict(self) -> dict:
         """Convert to dictionary (without secrets)."""
         return {
             "venue": self.venue,
+            "network": self.network,
             "binding_type": self.binding_type,
-            "api_key": self.api_key[:8] + "..." if self.api_key else None,
+            "api_key": self.api_key_hint,
             "wallet_address": self.wallet_address,
             "created_at": self.created_at.isoformat(),
             "is_active": self.is_active,
@@ -51,26 +77,33 @@ class User:
     threshold: UserThreshold = field(default_factory=UserThreshold)
 
     is_demo_mode: bool = False
+    session_epoch: int = 0
 
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def get_binding(self, venue: str) -> Optional[ExchangeBinding]:
-        """Get active binding for a venue."""
+    def get_binding(self, venue: str, network: str = MAINNET) -> Optional[ExchangeBinding]:
+        """Get active binding for a venue on a network."""
         for binding in self.bindings:
-            if binding.venue == venue and binding.is_active:
+            if binding.venue == venue and binding.network == network and binding.is_active:
                 return binding
         return None
 
     def add_binding(self, binding: ExchangeBinding) -> None:
-        """Add or replace a binding for a venue."""
-        self.bindings = [b for b in self.bindings if b.venue != binding.venue]
+        """Add or replace a binding for a venue/network."""
+        self.bindings = [
+            b for b in self.bindings
+            if (b.venue, b.network) != (binding.venue, binding.network)
+        ]
         self.bindings.append(binding)
 
-    def remove_binding(self, venue: str) -> bool:
-        """Remove binding for a venue."""
+    def remove_binding(self, venue: str, network: Optional[str] = None) -> bool:
+        """Remove binding(s) for a venue (optionally only one network)."""
         original_count = len(self.bindings)
-        self.bindings = [b for b in self.bindings if b.venue != venue]
+        self.bindings = [
+            b for b in self.bindings
+            if not (b.venue == venue and (network is None or b.network == network))
+        ]
         return len(self.bindings) < original_count
 
     def has_any_binding(self) -> bool:

@@ -32,7 +32,7 @@ dev = [
 
 [project.scripts]
 liqguard = "liqguard.main:main_sync"
-liqguard-dashboard = "liqguard.dashboard.run:run_dashboard"
+liqguard-dashboard = "liqguard.web.run:run_dashboard"
 
 [build-system]
 requires = ["hatchling"]

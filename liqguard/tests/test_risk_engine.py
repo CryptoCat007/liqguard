@@ -3,7 +3,7 @@
 import pytest
 
 from liqguard.models import AlertSeverity, Position, Side, UserThreshold, Venue
-from liqguard.services.risk_engine import RiskEngine
+from liqguard.risk.engine import RiskEngine
 
 
 class TestDistanceToLiquidation:

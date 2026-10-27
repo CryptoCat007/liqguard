@@ -1,11 +1,13 @@
-"""Tests for the read-only web dashboard."""
+"""Tests for the public (demo) side of the read-only web dashboard."""
 
 import pytest
 from fastapi.testclient import TestClient
 
-from liqguard.dashboard import create_app
-from liqguard.llm import MetaLLMClient
-from liqguard.services.simulation import MarketSimulation
+from liqguard.ai import MetaLLMClient
+from liqguard.simulation import MarketSimulation
+from liqguard.web import create_app
+
+CSRF = {"X-LiqGuard-CSRF": "1"}
 
 SECRET = "meta-key-that-must-never-leak"
 
@@ -17,12 +19,12 @@ def sim():
 
 @pytest.fixture
 def client(sim):
-    with TestClient(create_app(simulation=sim)) as c:
+    with TestClient(create_app(demo_simulation=sim)) as c:
         yield c
 
 
 def run_to_end(client: TestClient, sim: MarketSimulation) -> None:
-    assert client.post("/api/simulate").json()["status"] == "started"
+    assert client.post("/api/demo/simulate", headers=CSRF).json()["status"] == "started"
     client.portal.call(sim.wait)
 
 
@@ -41,21 +43,22 @@ class TestPages:
 
     def test_health(self, client):
         body = client.get("/api/health").json()
-        assert body == {"status": "ok", "demo": True, "muse_mode": "mock", "state": "idle"}
+        assert body == {"status": "ok", "demo": True, "muse_mode": "mock", "state": "idle", "login_enabled": False}
 
 
 class TestReadEndpoints:
     def test_snapshot_initial_state(self, client):
-        snap = client.get("/api/snapshot").json()
+        snap = client.get("/api/demo/snapshot").json()
         assert snap["state"] == "idle"
         assert snap["demo"] is True
         assert snap["thresholds"] == {"warning": 20.0, "critical": 10.0, "emergency": 5.0}
         assert set(snap["history"]) == {"BTCUSDT", "ETH", "SOLUSDT"}
         assert snap["summary"]["riskiest_symbol"] in snap["history"]
-        assert "web" in snap["channels"]
+        assert snap["channels"] == ["web"]
+        assert snap["scope"] == "public"
 
     def test_portfolio_aggregates_both_venues(self, client):
-        body = client.get("/api/portfolio").json()
+        body = client.get("/api/demo/portfolio").json()
         ov = body["overview"]
         assert ov["venues"] == ["binance", "hyperliquid"]
         assert ov["summary"]["total_positions"] == 3
@@ -66,9 +69,9 @@ class TestReadEndpoints:
     def test_full_run_populates_timeline_advice_audit(self, client, sim):
         run_to_end(client, sim)
 
-        alerts = client.get("/api/alerts").json()
-        advice = client.get("/api/advice").json()
-        audit = client.get("/api/audit").json()
+        alerts = client.get("/api/demo/alerts").json()
+        advice = client.get("/api/demo/advice").json()
+        audit = client.get("/api/demo/audit").json()
 
         assert {a["level"] for a in alerts} == {"warning", "critical", "emergency"}
         assert len(advice) == len(alerts)
@@ -79,24 +82,24 @@ class TestReadEndpoints:
 
     def test_no_secret_in_any_response(self, client, sim):
         run_to_end(client, sim)
-        for path in ["/", "/static/app.js", "/api/health", "/api/snapshot", "/api/portfolio",
-                     "/api/alerts", "/api/advice", "/api/audit"]:
+        for path in ["/", "/static/app.js", "/api/health", "/api/demo/snapshot", "/api/demo/portfolio",
+                     "/api/demo/alerts", "/api/demo/advice", "/api/demo/audit"]:
             assert SECRET not in client.get(path).text, path
 
 
 class TestControls:
     def test_simulate_twice_reports_running(self, client):
         slow = MarketSimulation(None, tick_interval=0.2)
-        with TestClient(create_app(simulation=slow)) as c:
-            assert c.post("/api/simulate").json()["status"] == "started"
-            assert c.post("/api/simulate").json()["status"] == "already_running"
-            assert c.post("/api/simulate/stop").json()["status"] == "stopped"
+        with TestClient(create_app(demo_simulation=slow)) as c:
+            assert c.post("/api/demo/simulate", headers=CSRF).json()["status"] == "started"
+            assert c.post("/api/demo/simulate", headers=CSRF).json()["status"] == "already_running"
+            assert c.post("/api/demo/simulate/stop", headers=CSRF).json()["status"] == "stopped"
             assert c.get("/api/health").json()["state"] == "stopped"
 
     def test_reset_clears_state(self, client, sim):
         run_to_end(client, sim)
-        assert client.post("/api/simulate/reset").json()["status"] == "reset"
-        assert client.get("/api/alerts").json() == []
+        assert client.post("/api/demo/simulate/reset", headers=CSRF).json()["status"] == "reset"
+        assert client.get("/api/demo/alerts").json() == []
         assert client.get("/api/health").json()["state"] == "idle"
 
     def test_no_execution_endpoints(self, client):
@@ -104,23 +107,33 @@ class TestControls:
         for forbidden in ("/api/actions", "/api/execute", "/api/confirm", "/api/bind"):
             assert forbidden not in paths
         posts = {r.path for r in client.app.routes if "POST" in getattr(r, "methods", set())}
-        assert posts == {"/api/simulate", "/api/simulate/stop", "/api/simulate/reset"}
+        assert posts == {"/api/demo/simulate", "/api/demo/simulate/stop", "/api/demo/simulate/reset", "/auth/logout"}
+
+    def test_post_without_csrf_header_is_rejected(self, client):
+        assert client.post("/api/demo/simulate").status_code == 403
+        r = client.post("/api/demo/simulate", headers={**CSRF, "Origin": "https://evil.example"})
+        assert r.status_code == 403
+
+    def test_public_page_is_labelled_demo(self, client):
+        html = client.get("/").text
+        assert "DEMO DATA" in html
 
 
 class TestWebSocket:
     def test_snapshot_then_live_events(self, client, sim):
-        with client.websocket_connect("/ws") as ws:
+        with client.websocket_connect("/ws/demo") as ws:
             first = ws.receive_json()
             assert first["type"] == "snapshot"
             assert first["data"]["state"] == "idle"
+            assert first["data"]["scope"] == "public"
 
-            client.post("/api/simulate")
+            client.post("/api/demo/simulate", headers=CSRF)
             seen = set()
             while not {"tick", "alert", "advice", "audit"} <= seen:
                 seen.add(ws.receive_json()["type"])
 
     def test_ping(self, client):
-        with client.websocket_connect("/ws") as ws:
+        with client.websocket_connect("/ws/demo") as ws:
             ws.receive_json()
             ws.send_text("ping")
             assert ws.receive_json() == {"type": "pong"}

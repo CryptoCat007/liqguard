@@ -1,24 +1,18 @@
-"""Tests for the shared demo market simulation and its Telegram bridge."""
+"""Tests for the demo market simulation, its owner-only Telegram bridge and handler integration."""
 
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
-from liqguard.llm import MetaLLMClient
+from liqguard.ai import MetaLLMClient
 from liqguard.models import Side
-from liqguard.services.advice import ActionType
-from liqguard.services.protective_actions import (
-    ActionStatus,
-    AuditLogEntry,
-    ProtectiveActionsManager,
-)
-from liqguard.services.simulation import TIERS, MarketSimulation, price_at_distance
-from liqguard.telegram.sim_bridge import (
-    TelegramSimulationBridge,
-    format_advice_message,
-    parse_chat_ids,
-)
+from liqguard.protect import ActionStatus, AuditLogEntry, ProtectiveActionsManager
+from liqguard.risk import ActionType
+from liqguard.simulation import TIERS, MarketSimulation, price_at_distance
+from liqguard.telegram.sim_bridge import TelegramSimulationBridge, format_advice_message
+
+from .conftest import fake_message
 
 
 @pytest.fixture
@@ -148,23 +142,27 @@ class TestControl:
         assert snap["demo"] is True
 
 
-class TestAuditMirroring:
-    async def test_protective_action_audit_is_mirrored_without_user_id(self, tmp_path):
-        manager = ProtectiveActionsManager()
-        manager.audit.log_path = tmp_path / "audit.log"
-        sim = MarketSimulation(None, actions_manager=manager, tick_interval=0)
+def audit_entry(user_id: int) -> AuditLogEntry:
+    return AuditLogEntry(
+        timestamp=datetime.now(timezone.utc),
+        user_id=user_id,
+        action_id="pa_1",
+        action_type=ActionType.ADD_MARGIN,
+        symbol="BTCUSDT",
+        venue="binance",
+        status=ActionStatus.REJECTED,
+        amount_usd=1200.0,
+        details={"reason": "Protective actions are disabled.", "position": {"secret": "x"}},
+    )
 
-        manager.audit.log(AuditLogEntry(
-            timestamp=datetime.now(timezone.utc),
-            user_id=987654321,
-            action_id="pa_1",
-            action_type=ActionType.ADD_MARGIN,
-            symbol="BTCUSDT",
-            venue="binance",
-            status=ActionStatus.REJECTED,
-            amount_usd=1200.0,
-            details={"reason": "Protective actions are disabled.", "position": {"secret": "x"}},
-        ))
+
+class TestAuditMirroring:
+    async def test_owner_entries_are_mirrored_sanitized(self):
+        manager = ProtectiveActionsManager()
+        sim = MarketSimulation(None, owner_id=987654321, tick_interval=0)
+        manager.audit.subscribe(987654321, sim.record_protective_audit)
+
+        manager.audit.log(audit_entry(987654321))
         await sim.wait()
 
         entry = sim.audit[-1]
@@ -174,31 +172,42 @@ class TestAuditMirroring:
         assert "secret" not in str(entry)
         assert "$1,200.00" in entry["detail"]
 
+    async def test_other_users_entries_are_not_mirrored(self):
+        manager = ProtectiveActionsManager()
+        sim = MarketSimulation(None, owner_id=1, tick_interval=0)
+        manager.audit.subscribe(1, sim.record_protective_audit)
+        manager.audit.log(audit_entry(2))
+        sim.record_protective_audit(audit_entry(2))
+        await sim.wait()
+        assert sim.audit == []
+
 
 class TestTelegramBridge:
-    def test_parse_chat_ids(self):
-        assert parse_chat_ids("123, -100456 ,abc,,") == {123, -100456}
-        assert parse_chat_ids(None) == set()
-
-    async def test_web_triggered_run_reaches_telegram(self, sim):
+    async def test_run_reaches_only_the_owner(self):
+        sim = MarketSimulation(MetaLLMClient(use_mock=True), owner_id=42, tick_interval=0)
         bot = AsyncMock()
-        bridge = TelegramSimulationBridge(bot, sim, chat_ids=[42])
-        assert bridge.has_chat(42)
+        TelegramSimulationBridge(bot, sim)
 
         await sim.start(source="web")
         await sim.wait()
 
-        texts = [c.args[1] for c in bot.send_message.call_args_list]
-        assert all(c.args[0] == 42 for c in bot.send_message.call_args_list)
+        calls = bot.send_message.call_args_list
+        assert calls and {c.args[0] for c in calls} == {42}
+        texts = [c.args[1] for c in calls]
         assert any("simulation started" in t for t in texts)
         alert_texts = [t for t in texts if "ALERT" in t]
         assert len(alert_texts) == len(sim.alerts)
         assert any("EMERGENCY ALERT" in t for t in alert_texts)
         assert "telegram" in sim.alerts[0]["channels"]
 
-    async def test_no_chats_sends_nothing(self, sim):
+    def test_public_simulation_cannot_be_bridged(self, sim):
+        with pytest.raises(ValueError):
+            TelegramSimulationBridge(AsyncMock(), sim)
+
+    async def test_unsubscribe_stops_delivery(self):
+        sim = MarketSimulation(None, owner_id=7, tick_interval=0)
         bot = AsyncMock()
-        TelegramSimulationBridge(bot, sim)
+        TelegramSimulationBridge(bot, sim).unsubscribe()
         await sim.start()
         await sim.wait()
         bot.send_message.assert_not_called()
@@ -218,40 +227,51 @@ class TestTelegramBridge:
 
 class TestTelegramHandlersIntegration:
     @pytest.fixture
-    def handlers(self, sim):
-        from liqguard.services import AlertManager, RiskEngine
+    def bot(self, ctx):
+        from liqguard.telegram import attach_bridges
+
+        bot = AsyncMock()
+        ctx.simulations.on_create(attach_bridges(bot))
+        return bot
+
+    @pytest.fixture
+    def handlers(self, ctx, bot):
         from liqguard.telegram import BotHandlers
 
-        storage = AsyncMock()
-        bridge = TelegramSimulationBridge(AsyncMock(), sim)
-        return BotHandlers(
-            storage=storage, risk_engine=RiskEngine(), alert_manager=AlertManager(),
-            llm_client=sim.llm, simulation=sim, sim_bridge=bridge,
-        )
+        return BotHandlers(ctx)
 
-    async def test_telegram_demo_starts_shared_simulation(self, handlers, sim):
-        message = AsyncMock()
-        await handlers._start_liquidation_simulation(555, message)
+    async def test_telegram_demo_starts_the_users_own_simulation(self, handlers, ctx, bot):
+        await handlers._start_liquidation_simulation(555, fake_message(555))
+        sim = ctx.simulations.get(555)
         await sim.wait()
 
-        assert handlers.sim_bridge.has_chat(555)
-        assert sim.state == "finished"
+        assert sim.owner_id == 555 and sim.state == "finished"
+        assert ctx.simulations.public.state == "idle"
         assert any(e["event"] == "simulation_started" and e["source"] == "telegram" for e in sim.audit)
-        sent_to = {c.args[0] for c in handlers.sim_bridge.bot.send_message.call_args_list}
-        assert sent_to == {555}
+        assert {c.args[0] for c in bot.send_message.call_args_list} == {555}
 
-    async def test_positions_follow_simulation_for_subscribed_demo_user(self, handlers, sim):
+    async def test_positions_follow_own_simulation(self, handlers, ctx):
         from liqguard.models import User
 
-        handlers.sim_bridge.add_chat(7)
+        await ctx.storage.save_user(User(telegram_id=7, is_demo_mode=True))
+        sim = ctx.simulations.get_or_create(7)
         await sim.start()
         await sim.wait()
-        user = User(telegram_id=7, is_demo_mode=True)
+        user = await ctx.storage.get_user(7)
 
         positions, label = await handlers._get_positions_for_user(user)
 
         assert [p.mark_price for p in positions] == [p.mark_price for p in sim.positions]
         assert "simulation" in label
+
+    async def test_simulation_uses_owner_thresholds(self, handlers, ctx):
+        from liqguard.models import User, UserThreshold
+
+        await ctx.storage.save_user(User(telegram_id=8, threshold=UserThreshold(warning_distance_pct=25.0)))
+        await handlers._start_liquidation_simulation(8, fake_message(8))
+        sim = ctx.simulations.get(8)
+        await sim.wait()
+        assert sim.snapshot()["thresholds"]["warning"] == 25.0
 
     async def test_risk_text_has_muse_headline(self, handlers, sim):
         text = await handlers._risk_overview_text(sim.overview, "en")

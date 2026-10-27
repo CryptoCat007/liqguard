@@ -1,8 +1,8 @@
-"""Models for LiqGuard."""
+"""Plain data models shared by every layer. No I/O, no framework imports."""
 
 from .alert import Alert, AlertSeverity, AlertType, UserThreshold
 from .position import Position, Side, Venue
-from .user import ExchangeBinding, User
+from .user import MAINNET, TESTNET, ExchangeBinding, User, mask_secret
 
 __all__ = [
     "Alert",
@@ -14,4 +14,7 @@ __all__ = [
     "Venue",
     "ExchangeBinding",
     "User",
+    "MAINNET",
+    "TESTNET",
+    "mask_secret",
 ]

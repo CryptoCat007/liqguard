@@ -3,7 +3,7 @@
 import pytest
 
 from liqguard.models import Position, Side, UserThreshold, Venue
-from liqguard.services.portfolio import (
+from liqguard.risk.portfolio import (
     PortfolioAnalyzer,
     PortfolioRiskOverview,
     RiskLevel,

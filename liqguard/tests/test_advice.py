@@ -3,7 +3,7 @@
 import pytest
 
 from liqguard.models import Position, Side, Venue
-from liqguard.services.advice import ActionableAdvice, ActionType, AdviceCalculator
+from liqguard.risk.advice import ActionableAdvice, ActionType, AdviceCalculator
 
 
 class TestMarginAdvice:

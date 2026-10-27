@@ -2,9 +2,9 @@
 
 import pytest
 
-from liqguard.llm import MetaLLMClient
+from liqguard.ai import MetaLLMClient
 from liqguard.models import AlertSeverity, Position, Side, Venue
-from liqguard.services.advice import AdviceCalculator
+from liqguard.risk.advice import AdviceCalculator
 
 
 class TestLLMClientMockMode:
@@ -177,7 +177,7 @@ class TestPortfolioSummary:
 
     @pytest.fixture
     def overview(self):
-        from liqguard.services.portfolio import PortfolioAnalyzer
+        from liqguard.risk.portfolio import PortfolioAnalyzer
         positions = [
             Position(Venue.BINANCE, "BTCUSDT", Side.LONG, 0.5, 65000, 60000, 57500, 3000, 10, -2500),
             Position(Venue.HYPERLIQUID, "ETH", Side.SHORT, 5, 3200, 3100, 4000, 4000, 4, 500),
@@ -202,7 +202,7 @@ class TestPortfolioSummary:
         assert "距離清算" in result["headline"]
 
     async def test_empty_portfolio(self):
-        from liqguard.services.portfolio import PortfolioRiskOverview
+        from liqguard.risk.portfolio import PortfolioRiskOverview
         result = await MetaLLMClient(use_mock=True).summarize_portfolio(PortfolioRiskOverview())
         assert result["riskiest_symbol"] is None
         assert result["headline"] == "No open positions."

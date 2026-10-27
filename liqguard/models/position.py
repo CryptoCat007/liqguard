@@ -38,6 +38,7 @@ class Position:
     unrealized_pnl: float
     margin_ratio: Optional[float] = None
     timestamp: datetime = None
+    network: str = "mainnet"
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -112,4 +113,5 @@ class Position:
             "notional_value": self.notional_value,
             "distance_to_liquidation_pct": self.distance_to_liquidation_pct,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "network": self.network,
         }

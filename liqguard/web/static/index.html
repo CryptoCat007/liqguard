@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiqGuard · Liquidation early-warning</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="ribbon" id="ribbon">
+    <b>DEMO DATA</b>
+    <span id="ribbonText">Public demo with simulated positions — nothing here belongs to a real account.</span>
+    <a href="/login" id="ribbonLink">Sign in to see your own account →</a>
+  </div>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3Z" fill="url(#g)"/>
+        <path d="m8.5 12 2.5 2.5 4.5-5" fill="none" stroke="#0b0f17" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs>
+      </svg>
+      <div>
+        <div class="brand-name">LiqGuard</div>
+        <div class="brand-sub">Liquidation early-warning · Binance + Hyperliquid</div>
+      </div>
+    </div>
+
+    <div class="pills">
+      <span class="pill pill-demo" id="scopePill" title="Simulated positions; no exchange keys are used">DEMO DATA</span>
+      <span class="pill" id="musePill" title="Muse explains numbers computed in code">Muse · —</span>
+      <span class="pill" id="channelsPill" title="Where alerts are delivered">Channels · —</span>
+      <span class="pill" id="connPill"><span class="dot"></span><span id="connText">Connecting</span></span>
+    </div>
+
+    <div class="controls">
+      <button class="btn btn-primary" id="simulateBtn" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        Simulate market
+      </button>
+      <button class="btn btn-ghost" id="stopBtn" type="button" disabled>Stop</button>
+      <button class="btn btn-ghost" id="resetBtn" type="button">Reset</button>
+      <a class="btn btn-ghost" id="signInBtn" href="/login">Sign in</a>
+      <button class="btn btn-ghost" id="signOutBtn" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+  <div class="progress"><div class="progress-fill" id="progressFill"></div></div>
+
+  <main class="layout">
+    <section class="card account" id="account" hidden>
+      <div class="card-head">
+        <div>
+          <div class="card-title">Your account</div>
+          <div class="card-sub" id="accountSub">Live data from your own exchange connections · refreshed every 30 s</div>
+        </div>
+        <span class="tag tag-ro">PRIVATE · READ-ONLY</span>
+      </div>
+      <div class="account-grid">
+        <div>
+          <div class="account-label">Connected exchanges</div>
+          <div id="accountBindings" class="bindings"></div>
+        </div>
+        <div>
+          <div class="account-label" id="accountPositionsLabel">Positions</div>
+          <div id="accountPositions" class="account-positions"></div>
+        </div>
+        <div>
+          <div class="account-label">Protective actions (your audit log)</div>
+          <div id="accountActions" class="audit scroll account-actions"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="banner card" id="banner">
+      <div class="banner-level" id="riskLevel">—</div>
+      <div class="banner-body">
+        <div class="banner-label">
+          <span class="muse-glyph">✦</span> Muse portfolio summary
+          <span class="tag" id="summaryTag" hidden>MOCK</span>
+        </div>
+        <div class="banner-headline" id="headline">Loading portfolio…</div>
+      </div>
+      <div class="banner-riskiest">
+        <div class="banner-label">Riskiest position</div>
+        <div class="riskiest-chip" id="riskiest">—</div>
+      </div>
+    </section>
+
+    <section class="kpis">
+      <div class="kpi card"><div class="kpi-label">Total notional</div><div class="kpi-value" id="kpiNotional">—</div><div class="kpi-sub" id="kpiVenues">—</div></div>
+      <div class="kpi card"><div class="kpi-label">Margin used</div><div class="kpi-value" id="kpiMargin">—</div><div class="kpi-sub" id="kpiLeverage">—</div></div>
+      <div class="kpi card"><div class="kpi-label">Unrealized PnL</div><div class="kpi-value" id="kpiPnl">—</div><div class="kpi-sub">across all venues</div></div>
+      <div class="kpi card"><div class="kpi-label">Net exposure</div><div class="kpi-value" id="kpiNet">—</div><div class="kpi-sub" id="kpiLongShort">—</div></div>
+      <div class="kpi card"><div class="kpi-label">Closest to liquidation</div><div class="kpi-value" id="kpiMinDist">—</div><div class="kpi-sub" id="kpiMinDistSym">—</div></div>
+      <div class="kpi card"><div class="kpi-label">Margin to reach safety</div><div class="kpi-value" id="kpiSafety">—</div><div class="kpi-sub" id="kpiSafetySub">—</div></div>
+    </section>
+
+    <section class="row-main">
+      <div class="card chart-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title" id="chartTitle">Distance to liquidation</div>
+            <div class="card-sub" id="chartSub">All positions · tier bands at warning / critical / emergency</div>
+          </div>
+          <div class="tabs" id="chartTabs" role="tablist"></div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart" aria-label="Price versus liquidation chart"></canvas>
+          <div class="chart-empty" id="chartEmpty" hidden>Chart library failed to load (offline?). Live data is still shown in the panels.</div>
+        </div>
+        <div class="legend" id="chartLegend"></div>
+      </div>
+
+      <div class="card positions-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Positions</div>
+            <div class="card-sub">Distance to liquidation per position</div>
+          </div>
+        </div>
+        <div class="positions" id="positions"></div>
+      </div>
+    </section>
+
+    <section class="row-bottom">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Alert timeline</div>
+            <div class="card-sub">Three-tier alerts · same events as Telegram</div>
+          </div>
+          <div class="tier-counts">
+            <span class="tc tc-warning" title="Warning"><i></i><b id="cntWarning">0</b></span>
+            <span class="tc tc-critical" title="Critical"><i></i><b id="cntCritical">0</b></span>
+            <span class="tc tc-emergency" title="Emergency"><i></i><b id="cntEmergency">0</b></span>
+          </div>
+        </div>
+        <ol class="timeline scroll" id="timeline"></ol>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Muse advice</div>
+            <div class="card-sub">Numbers from code · wording from Muse</div>
+          </div>
+        </div>
+        <div class="advice scroll" id="advice"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Action audit log</div>
+            <div class="card-sub">Every alert, suggestion and action step</div>
+          </div>
+          <span class="tag tag-ro" title="The dashboard cannot place, confirm or execute actions">READ-ONLY</span>
+        </div>
+        <div class="audit scroll" id="audit"></div>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span id="footScope">Public demo · simulated data only.</span>
+      Read-only view · no API keys or wallet secrets are sent to the browser · actions require confirmation in Telegram and run on testnet only.
+    </footer>
+  </main>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
