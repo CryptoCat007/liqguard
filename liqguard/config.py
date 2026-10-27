@@ -63,7 +63,15 @@ class Settings:
 
     @property
     def dashboard_url(self) -> str:
-        return self.public_url or f"http://{self.dashboard_host}:{self.dashboard_port}"
+        if self.public_url:
+            return self.public_url
+        host = "127.0.0.1" if self.dashboard_host in ("", "0.0.0.0", "::") else self.dashboard_host
+        return f"http://{host}:{self.dashboard_port}"
+
+    @property
+    def dashboard_login_available(self) -> bool:
+        """Login links only make sense if a dashboard is served here or reachable at LIQGUARD_PUBLIC_URL."""
+        return bool(self.public_url) or self.dashboard_enabled
 
     @property
     def secure_cookies(self) -> bool:

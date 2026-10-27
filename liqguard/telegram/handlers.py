@@ -795,6 +795,12 @@ class BotHandlers:
             await self.storage.bump_session_epoch(user.telegram_id)
             await message.answer("🔒 Signed out of the dashboard everywhere. Unused login links no longer work.")
             return
+        if not self.ctx.settings.dashboard_login_available:
+            await message.answer(
+                "🖥 The web dashboard is not enabled on this LiqGuard instance. "
+                "Everything is available here in Telegram: /positions, /risk, /actions."
+            )
+            return
 
         token = await self.ctx.login_links.create(user.telegram_id)
         url = self.ctx.dashboard_login_url(token)

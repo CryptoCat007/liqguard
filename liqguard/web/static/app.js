@@ -615,7 +615,7 @@ async function refreshAccount() {
   binds.replaceChildren(...(data.bindings || []).map((b) => el("div", { class: "binding" },
     el("span", { class: `venue venue-${b.venue}` }, venueTitle(b)),
     el("span", {}, b.binding_type === "wallet" ? "wallet" : (b.permissions || []).join(" · ") || "api key"),
-    el("span", { class: "hint" }, b.api_key || (b.wallet_address ? `${b.wallet_address.slice(0, 6)}…${b.wallet_address.slice(-4)}` : "")),
+    el("span", { class: "hint" }, b.api_key || b.wallet_address || ""),
   )));
   if (!data.bindings?.length) binds.append(empty("🔌", "No exchanges connected", "Use /bind in Telegram (read-only Binance key or Hyperliquid wallet)."));
 

@@ -17,6 +17,13 @@ def mask_secret(value: Optional[str], visible: int = 4) -> Optional[str]:
     return "…" + value[-visible:] if len(value) > visible * 2 else "…"
 
 
+def mask_wallet(address: Optional[str]) -> Optional[str]:
+    """`0x1234…abcd`: enough for the owner to recognise, not a full identifier."""
+    if not address:
+        return None
+    return f"{address[:6]}…{address[-4:]}" if len(address) > 12 else "…"
+
+
 @dataclass
 class ExchangeBinding:
     """
@@ -57,7 +64,7 @@ class ExchangeBinding:
             "network": self.network,
             "binding_type": self.binding_type,
             "api_key": self.api_key_hint,
-            "wallet_address": self.wallet_address,
+            "wallet_address": mask_wallet(self.wallet_address),
             "created_at": self.created_at.isoformat(),
             "is_active": self.is_active,
             "last_used": self.last_used.isoformat() if self.last_used else None,

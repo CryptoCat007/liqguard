@@ -110,6 +110,13 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
             "Dashboard: http://%s:%s (public demo at /, /dashboard in Telegram for a private login link to %s)",
             settings.dashboard_host, settings.dashboard_port, settings.dashboard_url,
         )
+        if not settings.public_url:
+            logger.warning(
+                "LIQGUARD_PUBLIC_URL is not set: login links point to %s, which only works on this machine. "
+                "Set it to the https URL your users open.", settings.dashboard_url,
+            )
+    elif not settings.public_url:
+        logger.info("Dashboard disabled: /dashboard will tell users it is not available.")
 
     logger.info("Muse: %s", "mock mode" if ctx.llm.is_mock else "live API")
     logger.info("Database: %s · poll interval %ss · protective actions %s",
