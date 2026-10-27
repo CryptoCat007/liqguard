@@ -51,6 +51,23 @@ python -m liqguard.main
 liqguard
 ```
 
+### Using it as a user (end to end)
+
+1. Open the bot in Telegram and send **/start**.
+2. Send **/bind** and pick one:
+   - **Binance**: create an API key with only *Enable Reading* ticked (no trading, no
+     withdrawals; IP restriction recommended) and send the key, then the secret. Both
+     messages are deleted right away. LiqGuard asks Binance what this key may do and
+     rejects it if it can trade, withdraw or transfer.
+   - **Hyperliquid**: send your wallet address (`0x…`). No key is needed.
+3. **/positions** and **/risk** show your live positions. The monitor polls every 30 s and
+   alerts you (and only you) as positions approach liquidation.
+4. Send **/dashboard** in the private chat and open the one-time link to see your own
+   dashboard: masked connections, live positions, audit log and a private simulation.
+5. **/unbind** removes a connection; **/dashboard revoke** signs out every browser.
+
+`test_e2e.py` runs exactly this flow for two users with only the exchange APIs faked.
+
 ## Bot Commands
 
 | Command | Description |
@@ -279,24 +296,51 @@ The **Liquidation Simulation** gradually moves prices toward liquidation, firing
 
 ## Security Model
 
-See [Key handling](#key-handling) and [Dashboard login](#dashboard-login) above. In short:
+Per-user isolation and per-user encryption are hard requirements. Details are in
+[Multi-user isolation](#multi-user-isolation), [Key handling](#key-handling) and
+[Dashboard login](#dashboard-login); this section is the summary.
 
-1. **Read-only mainnet keys**: per-key permissions are checked; withdraw, transfer or trading permission is rejected
-2. **Envelope encryption**: per-user data keys wrapped by a master key; rotation supported
-3. **Testnet-only execution**: protective actions never touch mainnet
-4. **Per-user isolation**: every lookup is scoped to the owning Telegram user
-5. **Audit logging**: every protective-action step is persisted to the owner's audit trail
-6. **No secrets in logs**: redacted reprs plus a log redaction filter
+### Guarantees
 
-```bash
-# Generate a master key
-python3 -c "from liqguard.storage import generate_key; print(generate_key())"
+| # | Guarantee | Enforced by | Tested in |
+|---|-----------|-------------|-----------|
+| 1 | A user only ever sees, receives or acts on their own positions, keys, alerts, protective actions, audit entries and simulations | Owner id is part of every storage query, in-memory key and lookup; there is no "all users" read path outside the monitor loop, which handles one user at a time | `test_isolation.py`, `test_e2e.py` |
+| 2 | Exchange credentials are encrypted per user | Envelope encryption: master key → per-user data key → API key, secret, wallet address | `test_storage.py`, `test_isolation.py`, `test_e2e.py` (raw DB bytes contain no key, secret or wallet) |
+| 3 | Mainnet keys are read-only | Per-key `apiRestrictions` check at `/bind`; unverifiable keys are rejected; the mainnet adapter refuses non-GET requests | `test_exchanges.py`, `test_e2e.py` |
+| 4 | No mainnet trading, ever | Protective actions run only for `network == testnet` positions through the user's own testnet binding | `test_isolation.py` |
+| 5 | Dashboard data needs a valid session for that user | HMAC-signed, expiring cookie with a per-user epoch; one-time hashed login links; Telegram widget hash check; CSRF header and Origin checks | `test_auth.py`, `test_e2e.py` |
+| 6 | Secrets never reach logs or API responses | Redacted reprs, log redaction filter, masked hints (`…ABCD`, `0x1234…abcd`) in the dashboard | `test_architecture.py`, `test_exchanges.py`, `test_e2e.py` |
 
-# Set it via environment (recommended for production)
-export LIQGUARD_MASTER_KEY="your-key-here"
+### Threat model
 
-# Otherwise it is generated once and saved to ~/.liqguard/encryption.key (mode 600)
-```
+- **Other LiqGuard users**: cannot read or influence your data via Telegram commands, callback
+  data (action ids are random and owner-checked), dashboard routes (no user id in any URL) or
+  WebSockets (cookie and Origin bound).
+- **Database leak without the master key**: reveals only ciphertexts and wrapped data keys. Keep the
+  master key outside the database host's backups (env var or secrets manager).
+- **Stolen login link**: works once and for 5 minutes; `/dashboard revoke` kills all sessions.
+- **Cross-site requests**: blocked by `SameSite=Lax`, the custom CSRF header and the Origin check.
+
+### Not protected against (by design)
+
+- **The operator.** Whoever holds the master key and the database can decrypt every user's
+  credentials. That is inherent to a server that must call Binance on your behalf. Use
+  read-only, IP-restricted keys.
+- **Hyperliquid addresses are public on-chain.** They are encrypted anyway, so a database leak
+  does not link a Telegram account to a wallet.
+- **Telegram itself.** The bot deletes the messages containing your API key and secret right
+  after reading them, but copies may remain on your other devices until they sync. During
+  `/bind` the API key is held in memory only until you send the secret.
+
+### Production checklist
+
+1. Set `LIQGUARD_MASTER_KEY` from a secrets manager and back it up separately from the database.
+2. Serve the dashboard behind HTTPS and set `LIQGUARD_PUBLIC_URL=https://…` (enables `Secure` cookies).
+3. Set `LIQGUARD_BOT_USERNAME` and BotFather `/setdomain` if you want the Login Widget.
+4. Keep `LIQGUARD_PROTECT_ENABLED=false` unless you want testnet protective actions.
+5. Generate a master key with
+   `python3 -c "from liqguard.storage import generate_key; print(generate_key())"`.
+   If none is set, one is created once at `~/.liqguard/encryption.key` (mode 600) and reused across restarts.
 
 ## Web Dashboard
 
@@ -392,8 +436,9 @@ python3 -m pytest liqguard/tests/ -q
 | `test_auth.py` | Session tokens, login links, Telegram widget, cookies, CSRF, WebSocket auth, `/dashboard` |
 | `test_exchanges.py` | Binance key-permission policy, read-only mainnet adapter, no secrets in reprs |
 | `test_architecture.py` | No framework imports in business logic, no cycles, log redaction, startup key message |
+| `test_e2e.py` | Two users from `/start` → `/bind` → monitor alerts → `/dashboard` login → private dashboard → `/unbind`, with faked exchange APIs |
 
-242 tests at the time of writing.
+246 tests at the time of writing.
 
 ## Environment Variables
 
@@ -408,7 +453,7 @@ python3 -m pytest liqguard/tests/ -q
 | `LIQGUARD_POLL_INTERVAL` | No | Position check interval in seconds (default: 30) |
 | `LIQGUARD_DASHBOARD` | No | Start the dashboard with the bot (default: false) |
 | `LIQGUARD_DASHBOARD_HOST` / `_PORT` | No | Dashboard bind address and port (default: 127.0.0.1:8765) |
-| `LIQGUARD_PUBLIC_URL` | Production | Dashboard URL used in login links; https enables `Secure` cookies |
+| `LIQGUARD_PUBLIC_URL` | Production | Dashboard URL used in login links; https enables `Secure` cookies. If unset and the dashboard is off, `/dashboard` says it is unavailable |
 | `LIQGUARD_BOT_USERNAME` | No | Enables the Telegram Login Widget (auto-detected when the bot starts) |
 | `LIQGUARD_SESSION_SECRET` | No | Session signing secret, at least 32 chars (default: derived from the master key) |
 | `LIQGUARD_SESSION_TTL` | No | Dashboard session lifetime in seconds (default: 43200) |
