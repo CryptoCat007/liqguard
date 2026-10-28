@@ -28,14 +28,18 @@ from liqguard.risk import (
     RescueSimulator,
     RiskEngine,
     format_portfolio_overview_text,
+    portfolio_insights,
     position_protection,
 )
+from liqguard.simulation import SCENARIOS as SIM_SCENARIOS
 from liqguard.simulation import MarketSimulation
 
 from .views import (
     format_option_detail,
     format_rescue_text,
     funding_lines,
+    insight_lines,
+    insights_section,
     liquidation_lines,
     protection_lines,
     protection_summary,
@@ -152,7 +156,7 @@ class BotHandlers:
                 "🛡️ **LiqGuard 指令**\n\n"
                 "**連接交易所**\n/bind - 連接交易所\n/unbind - 移除連接\n\n"
                 "**監控倉位**\n/positions - 倉位與風險\n/risk - 投資組合風險總覽\n/status - 帳戶狀態\n\n"
-                "**設定**\n/threshold - 警報閾值\n/settings - 喚醒提醒、自適應閾值、止損檢查\n/language - 切換語言\n/demo - 演示模式\n\n"
+                "**設定**\n/threshold - 警報閾值\n/settings - 喚醒提醒、自適應閾值、止損檢查、倉位大小\n/language - 切換語言\n/demo - 演示模式\n\n"
                 "**AI 功能**\n/ask <問題> - 詢問倉位\n📸 發送截圖 - 解析倉位\n\n"
                 "**網頁儀表板**\n/dashboard - 取得一次性登入連結\n/dashboard revoke - 登出所有裝置\n\n"
                 "**保護操作（僅測試網）**\n/actions - 待處理操作\n/killswitch - 緊急停止\n\n"
@@ -162,9 +166,9 @@ class BotHandlers:
             text = (
                 "🛡️ **LiqGuard Commands**\n\n"
                 "**Connect exchanges**\n/bind - Connect Binance or Hyperliquid\n/unbind - Remove a connection\n\n"
-                "**Monitor**\n/positions - Positions with risk assessment\n/risk - Portfolio risk overview\n"
+                "**Monitor**\n/positions - Positions with risk assessment\n/risk - Portfolio risk: what to handle first, stress test, sizing\n"
                 "/status - Account status\n\n"
-                "**Settings**\n/threshold - Alert thresholds\n/settings - Wake-up reminders, adaptive tiers, stop-loss checks\n"
+                "**Settings**\n/threshold - Alert thresholds\n/settings - Wake-up reminders, adaptive tiers, stop-loss checks, position sizing\n"
                 "/language - Change language\n/demo - Demo mode\n\n"
                 "**AI**\n/ask <question> - Ask about your positions\n📸 Send a screenshot - Parse a position\n\n"
                 "**Web dashboard**\n/dashboard - One-time login link\n/dashboard revoke - Sign out everywhere\n\n"
@@ -342,6 +346,7 @@ class BotHandlers:
     def _positions_text(self, user: User, snapshot: BookSnapshot) -> tuple[str, list]:
         context = snapshot.context
         assessed = self._assess(user, snapshot)
+        insights = portfolio_insights(snapshot.positions, context, user.threshold)
         assessments = [a for a, _ in assessed]
         response = f"**{snapshot.label}**\n\n"
         for a, info in assessed:
@@ -358,6 +363,7 @@ class BotHandlers:
             response += "".join(line + "\n" for line in funding_lines(pos, context))
             response += f"├ PnL: ${pos.unrealized_pnl:,.2f}\n├ Leverage: {pos.leverage}x\n"
             response += "".join(line + "\n" for line in protection_lines(info))
+            response += "".join(line + "\n" for line in insight_lines(insights, pos))
             if a.margin_to_safety > 0:
                 response += (
                     f"└ Add **${a.margin_to_safety:,.2f}** margin → {user.threshold.safety_target_pct:.0f}% from liq "
@@ -414,6 +420,10 @@ class BotHandlers:
         buttons = []
         riskiest = overview.riskiest_position
         infos = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in snapshot.positions]
+        insights = portfolio_insights(snapshot.positions, snapshot.context, user.threshold)
+        section = insights_section(insights)
+        if section:
+            text += f"\n\n{section}"
         summary = protection_summary(infos)
         if summary:
             text += f"\n\n**Protection checks**\n{summary}"
@@ -427,6 +437,13 @@ class BotHandlers:
                     buttons.append([InlineKeyboardButton(
                         text=f"🛟 Rescue options for {riskiest.symbol}", callback_data=self._rescue_callback(snapshot, pos),
                     )])
+        top = insights.top
+        if top is not None and (riskiest is None or top.symbol != riskiest.symbol):
+            pos = next((p for p in snapshot.positions if p.symbol == top.symbol and p.venue.value == top.venue), None)
+            if pos is not None:
+                buttons.insert(0, [InlineKeyboardButton(
+                    text=f"🎯 Rescue {top.symbol} first", callback_data=self._rescue_callback(snapshot, pos),
+                )])
         if riskiest and riskiest.margin_advice:
             buttons.append([InlineKeyboardButton(
                 text=f"💰 Add ${riskiest.margin_advice.margin_to_add_usd:.0f} to {riskiest.symbol}",
@@ -436,6 +453,8 @@ class BotHandlers:
             InlineKeyboardButton(text="📋 Detailed Positions", callback_data="risk:positions"),
             InlineKeyboardButton(text="🔄 Refresh", callback_data="risk:refresh"),
         ])
+        if len(text) > 4000:
+            text = text[:3900] + "\n\n... (truncated — see /dashboard for everything)"
         return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
     async def _rescue_plan_for(self, user: User, source: str, symbol: str) -> Optional[RescuePlan]:
@@ -558,9 +577,11 @@ class BotHandlers:
             f"   Critical/emergency alerts repeat every **{t.escalation_interval_minutes:g} min** until you tap "
             f"✅ I'm awake, up to **{t.escalation_max_reminders}** reminders, louder each time.\n"
             f"📈 Adaptive tiers: **{onoff[t.adaptive_thresholds]}** (widen for wicks, weekends, thin hours, closed stock market)\n"
-            f"🛑 Stop-loss checks: **{onoff[t.stop_loss_checks]}**\n\n"
+            f"🛑 Stop-loss checks: **{onoff[t.stop_loss_checks]}**\n"
+            f"📏 Position sizing: risk ≤ **{t.risk_per_trade_pct:g}%** of equity per trade (loss at the stop, else at "
+            f"liquidation), margin ≤ **{t.max_margin_pct:g}%** of equity per position\n\n"
             "Text form: `/settings interval 3`, `/settings max 5`, `/settings escalation off`, "
-            "`/settings adaptive on`, `/settings stops off`\n\n"
+            "`/settings adaptive on`, `/settings stops off`, `/settings risk 2`, `/settings maxmargin 25`\n\n"
             "💡 Make sure reminders can wake you: open this chat → bot name → Notifications → turn sound on "
             "(and add LiqGuard as a notification exception / allowed in Do Not Disturb). See the README."
         )
@@ -580,6 +601,10 @@ class BotHandlers:
             [InlineKeyboardButton(text=f"⏰ Escalation {'ON' if t.escalation_enabled else 'OFF'}", callback_data="settings:escalation:toggle"),
              InlineKeyboardButton(text=f"📈 Adaptive {'ON' if t.adaptive_thresholds else 'OFF'}", callback_data="settings:adaptive:toggle")],
             [InlineKeyboardButton(text=f"🛑 Stop checks {'ON' if t.stop_loss_checks else 'OFF'}", callback_data="settings:stops:toggle")],
+            [InlineKeyboardButton(text=f"{mark(t.risk_per_trade_pct == r)}risk {r:g}%", callback_data=f"settings:risk:{r:g}")
+             for r in (0.5, 1, 2, 5)],
+            [InlineKeyboardButton(text=f"{mark(t.max_margin_pct == m)}margin ≤{m}%", callback_data=f"settings:maxmargin:{m}")
+             for m in (10, 25, 50)],
         ])
 
     @staticmethod
@@ -597,6 +622,16 @@ class BotHandlers:
                 if not 1 <= n <= 20:
                     return None
                 return dataclasses.replace(threshold, escalation_max_reminders=n)
+            if key == "risk":
+                pct = float(value.rstrip("%"))
+                if not 0.1 <= pct <= 20:
+                    return None
+                return dataclasses.replace(threshold, risk_per_trade_pct=pct)
+            if key == "maxmargin":
+                pct = float(value.rstrip("%"))
+                if not 1 <= pct <= 100:
+                    return None
+                return dataclasses.replace(threshold, max_margin_pct=pct)
         except ValueError:
             return None
         if key in fields:
@@ -624,7 +659,7 @@ class BotHandlers:
         if len(parts) == 2:
             updated = self.apply_setting(user.threshold, parts[0], parts[1])
             if updated is None:
-                await message.answer("❌ Unknown or out-of-range setting. Interval 0.5–60 min, max 1–20, on/off for toggles.")
+                await message.answer("❌ Unknown or out-of-range setting. Interval 0.5–60 min, max 1–20, risk 0.1–20%, maxmargin 1–100%, on/off for toggles.")
                 return
             await self._save_settings(user, updated)
         await message.answer(self._settings_text(user), parse_mode="Markdown", reply_markup=self._settings_keyboard(user))
@@ -743,6 +778,7 @@ class BotHandlers:
             [InlineKeyboardButton(text="🚨 Critical Risk", callback_data="demo:critical")],
             [InlineKeyboardButton(text="✅ Safe Portfolio", callback_data="demo:safe")],
             [InlineKeyboardButton(text="🎬 Liquidation Simulation", callback_data="demo:liquidation_sim")],
+            [InlineKeyboardButton(text="🎬 5 longs, one wallet (cross margin)", callback_data="demo:cross_longs_sim")],
         ]
         if user.is_demo_mode:
             rows.append([InlineKeyboardButton(text="❌ Disable Demo Mode", callback_data="demo:disable")])
@@ -751,7 +787,9 @@ class BotHandlers:
             text = (
                 "🎮 **Demo Mode**\n\nSelect a scenario:\n• Normal: typical market\n• Volatile: some risk\n"
                 "• Critical: near liquidation\n• Safe: all positions safe\n"
-                "• **Liquidation Sim**: watch prices walk toward liquidation with alerts (also on your /dashboard)"
+                "• **Liquidation Sim**: watch prices walk toward liquidation with alerts (also on your /dashboard)\n"
+                "• **5 longs, one wallet**: five correlated cross-margin longs fall together; see why the platform's "
+                "liq lines lie, which position to handle first, and the account-level stress test"
             )
         await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
 
@@ -771,8 +809,9 @@ class BotHandlers:
             await callback.answer()
             return
 
-        if scenario == "liquidation_sim":
-            await self._start_liquidation_simulation(user_id, callback.message)
+        if scenario in ("liquidation_sim", "cross_longs_sim"):
+            key = "cross_longs" if scenario == "cross_longs_sim" else "mixed"
+            await self._start_liquidation_simulation(user_id, callback.message, key)
             await callback.answer("Starting simulation...")
             return
 
@@ -788,13 +827,15 @@ class BotHandlers:
         )
         await callback.answer()
 
-    async def _start_liquidation_simulation(self, user_id: int, message: Message) -> None:
+    async def _start_liquidation_simulation(self, user_id: int, message: Message, scenario: str = "mixed") -> None:
         await self.storage.set_demo_mode(user_id, True)
         user = await self.storage.get_user(user_id) or User(telegram_id=user_id, is_demo_mode=True)
         sim = self.simulation_for(user)
+        sim.set_scenario(scenario)
         started = await sim.start(source="telegram")
+        title = SIM_SCENARIOS[sim.scenario].title
         await message.edit_text(
-            "🎬 **Liquidation Simulation**\n\n"
+            f"🎬 **Liquidation Simulation · {title}**\n\n"
             + ("Started. " if started else "Already running. ")
             + "This simulation is private to you: alerts arrive here and on your /dashboard, nowhere else.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[

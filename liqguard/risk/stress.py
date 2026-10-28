@@ -268,7 +268,7 @@ class Concentration:
         return (
             f"{self.dominant_share_pct:.0f}% of exposure is {self.dominant_side} across {self.dominant_count} coins "
             f"that move together (avg correlation {self.avg_correlation:.2f}): your {self.positions} positions behave "
-            f"like {self.effective_bets:.1f} independent bet{'s' if self.effective_bets >= 1.95 else ''}."
+            f"like {self.effective_bets:.1f} independent bets."
         )
 
     def to_dict(self) -> dict:

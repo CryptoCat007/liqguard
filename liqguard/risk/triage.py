@@ -10,7 +10,9 @@ Each position gets an urgency score from 0 to 100:
   than a calm one 4% away. u = 1 / (1 + minutes / 120).
 - 30% **distance against its own (adaptive) tiers**. u = 1 - distance / warning
   tier, clamped to 0..1.
-- 15% **size at stake**: the loss if liquidated, relative to the largest one.
+- 15% **size**: notional relative to the largest position. (In one cross
+  wallet every position's loss-at-liquidation is the same shared buffer, so
+  notional is what tells them apart.)
 
 Positions inside a tier rank above those that are not; the top one is
 labelled "Handle this first".
@@ -32,7 +34,7 @@ DEFAULT_SIGMA_5M = {"BTC": 0.22, "ETH": 0.28}
 DEFAULT_CRYPTO_SIGMA_5M = 0.40
 DEFAULT_STOCK_SIGMA_5M = 0.15
 WEIGHTS = (0.55, 0.30, 0.15)
-TIME_SCALE_MINUTES = 120.0
+TIME_SCALE_MINUTES = 720.0
 
 
 def sigma_5m(position: Position, profile: Optional[WickProfile]) -> tuple[float, str]:
@@ -81,7 +83,7 @@ class TriageItem:
         t = self.minutes_to_liq
         when = f"~{t:.0f} min" if t < 120 else f"~{t / 60:.1f} h" if t < 72 * 60 else f"~{t / 1440:.0f} d"
         return (f"{self.distance_pct:.1f}% from liq ≈ {self.distance_pct / self.sigma_5m_pct:.1f} typical 5m moves "
-                f"({when} at typical volatility), ${self.loss_at_liq_usd:,.0f} at stake")
+                f"({when} at typical volatility), ${self.notional:,.0f} notional")
 
     def to_dict(self) -> dict:
         inf = math.isinf(self.minutes_to_liq)
@@ -115,12 +117,12 @@ def triage(entries: list[tuple[Position, float, Optional[float], UserThreshold, 
         loss = abs(position.size) * abs(position.mark_price - liq) if liq else 0.0
         raw.append((position, distance, severity, tiers.warning_distance_pct, sigma, source,
                     time_to_liquidation_minutes(distance, sigma), loss))
-    max_loss = max((r[7] for r in raw), default=0.0) or 1.0
+    max_notional = max((r[0].notional_value for r in raw), default=0.0) or 1.0
     items = []
     for position, distance, severity, warn, sigma, source, minutes, loss in raw:
         u_time = 0.0 if math.isinf(minutes) else 1 / (1 + minutes / TIME_SCALE_MINUTES)
         u_dist = 0.0 if math.isinf(distance) else min(max(1 - distance / warn, 0.0), 1.0) if warn > 0 else 0.0
-        score = 100 * (WEIGHTS[0] * u_time + WEIGHTS[1] * u_dist + WEIGHTS[2] * loss / max_loss)
+        score = 100 * (WEIGHTS[0] * u_time + WEIGHTS[1] * u_dist + WEIGHTS[2] * position.notional_value / max_notional)
         items.append(TriageItem(
             symbol=position.symbol, venue=position.venue.value, side=position.side.value,
             distance_pct=distance, severity=severity.value if severity else None, warning_tier_pct=warn,

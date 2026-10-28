@@ -15,6 +15,12 @@ def _usd(x: Optional[float]) -> str:
     return "n/a" if x is None else f"${x:,.2f}"
 
 
+def format_price(x: Optional[float]) -> str:
+    if x is None:
+        return "n/a"
+    return f"${x:,.2f}" if abs(x) >= 100 else f"${x:,.4f}" if abs(x) >= 1 else f"${x:.6g}"
+
+
 def format_stop_message(check: dict, explanation: Optional[dict] = None, demo: bool = False) -> str:
     """From `StopCheck.to_dict()` and Muse's `explain_stop_fix` output."""
     head = STOP_HEAD.get(check["status"], "🛑 **STOP-LOSS CHECK**")
@@ -119,7 +125,7 @@ def triage_lines(items: list[dict]) -> list[str]:
         dist = "n/a" if t.get("distance_pct") is None else f"{t['distance_pct']:.1f}%"
         lines.append(
             f"{t['rank']}. {icon} **{t['symbol']}** {t['side'].upper()} · {dist} from liq · "
-            f"{_minutes(t.get('minutes_to_liq'))} at typical volatility · {_usd(t.get('loss_at_liq_usd'))} at stake{label}"
+            f"{_minutes(t.get('minutes_to_liq'))} at typical volatility · ${t['notional']:,.0f} notional{label}"
         )
     return lines
 
@@ -131,7 +137,7 @@ def format_triage_message(items: list[dict], severity: Optional[str] = None, dem
     lines += triage_lines(items)
     if items and items[0].get("reason"):
         lines += ["", f"Why {items[0]['symbol']} first: {items[0]['reason']}."]
-    lines.append("_Order = time to liquidation at typical volatility, distance vs your tiers, size at stake._")
+    lines.append("_Order = time to liquidation at typical volatility, distance vs your tiers, position size._")
     return "\n".join(lines)
 
 
@@ -186,8 +192,8 @@ def comparison_line(c: dict) -> Optional[str]:
         return None
     gap = c.get("gap_pct")
     flag = f" ⚠️ **{gap:.1f} pts closer**" if gap is not None and gap >= 1 else ""
-    return (f"{c['symbol']}: platform liq {_usd(c['platform_price'])} ({c['platform_distance_pct']:.1f}% away) · "
-            f"LiqGuard correlated liq **{_usd(c['correlated_price'])}** ({c['correlated_distance_pct']:.1f}% away){flag}")
+    return (f"{c['symbol']}: platform liq {format_price(c['platform_price'])} ({c['platform_distance_pct']:.1f}% away) · "
+            f"LiqGuard correlated liq **{format_price(c['correlated_price'])}** ({c['correlated_distance_pct']:.1f}% away){flag}")
 
 
 def format_correlation_message(stress: Optional[dict], concentration: dict, comparisons: list[dict],

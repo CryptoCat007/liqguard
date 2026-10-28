@@ -6,8 +6,17 @@ from typing import Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from liqguard.alerts import (
+    HANDLE_FIRST_ICON,
+    comparison_line,
+    format_price,
+    priority_line,
+    sizing_line,
+    stress_lines,
+    triage_lines,
+)
 from liqguard.models import Position
-from liqguard.risk import RescuePlan, RiskContext, project_funding
+from liqguard.risk import PortfolioInsights, RescuePlan, RiskContext, project_funding
 
 OPTION_EMOJI = {"add_margin": "💰", "reduce": "✂️", "hedge": "🛡"}
 OPTION_LABEL = {"add_margin": "Add margin", "reduce": "Reduce", "hedge": "Hedge"}
@@ -208,3 +217,59 @@ def protection_summary(infos: list[dict]) -> Optional[str]:
     if adl:
         parts.append(f"⚡ ADL 4–5/5: {', '.join(adl)}")
     return "\n".join(parts) if parts else None
+
+
+def insight_lines(insights: PortfolioInsights, position: Position) -> list[str]:
+    """Per-position triage rank, platform vs correlated liq and sizing for /positions."""
+    lines = []
+    priority, top = insights.priority(position), insights.top
+    line = priority_line(priority.to_dict() if priority else None, top.to_dict() if top else None)
+    if line:
+        lines.append(f"├ {line}")
+    comparison = insights.comparison(position)
+    if comparison is not None and comparison.correlated_market_move_pct is not None:
+        c = comparison.to_dict()
+        if c.get("gap_pct") is not None and c["gap_pct"] >= 1:
+            lines.append(f"├ Correlated liq: **{format_price(c['correlated_price'])}** ({c['correlated_distance_pct']:.1f}% away, "
+                         f"platform line {c['platform_distance_pct']:.1f}%) ⚠️ {c['gap_pct']:.1f} pts closer")
+    sizing = insights.sizing_for(position)
+    if sizing is not None:
+        line = sizing_line(sizing.to_dict())
+        if line:
+            lines.append(f"├ {line}")
+    return lines
+
+
+def insights_section(insights: PortfolioInsights) -> Optional[str]:
+    """/risk: priority triage, portfolio stress test, concentration, platform vs correlated liq, sizing."""
+    data = insights.to_dict()
+    parts = []
+    at_risk = [t for t in data["triage"] if t["at_risk"]]
+    if at_risk:
+        parts.append(f"**{HANDLE_FIRST_ICON} Priority triage** (handle in this order)\n" + "\n".join(triage_lines(at_risk)))
+    elif data["triage"]:
+        parts.append("**🎯 Priority triage**\nNo position is inside an alert tier.")
+    for stress in data["stress"]:
+        if len(stress["symbols"]) < 2 and stress["liq_move_down_pct"] is None:
+            continue
+        lines = [f"**📉 Stress test · {stress['venue'].title()} cross ({len(stress['symbols'])} positions)**"]
+        lines += stress_lines(stress)
+        comps = [c for c in data["comparisons"] if c["symbol"] in stress["symbols"]]
+        shown = [line for line in (comparison_line(c) for c in comps) if line]
+        if shown:
+            lines.append("Platform line vs LiqGuard correlated liq:")
+            lines += [f"• {line}" for line in shown]
+        parts.append("\n".join(lines))
+    conc = data["concentration"]
+    if conc.get("flagged"):
+        parts.append(f"**🧲 Concentration**\n{conc['message']}")
+    oversized = [s for s in data["sizing"] if s["status"] == "oversized"]
+    if oversized:
+        first = oversized[0]
+        lines = [f"**📏 Position sizing** (limits: {first['max_risk_pct']:g}% risk/trade, {first['max_margin_pct']:g}% margin; /settings)"]
+        for c in oversized:
+            risk = "n/a" if c.get("risk_pct") is None else f"{c['risk_pct']:.1f}%"
+            lines.append(f"• {c['symbol']}: {risk} of equity at its {c['exit_kind']} → suggested ≤ **{c['suggested_size']:g}** "
+                         f"(cut {c['reduce_pct']:.0f}%)")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts) if parts else None

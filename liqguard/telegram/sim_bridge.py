@@ -10,12 +10,17 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from liqguard.alerts import (
     ACK_PREFIX,
+    comparison_line,
     format_adl_message,
+    format_correlation_message,
     format_prefunding_message,
+    format_sizing_message,
     format_stop_message,
+    format_triage_message,
+    priority_line,
     wick_line,
 )
-from liqguard.simulation import MarketSimulation
+from liqguard.simulation import SCENARIOS, MarketSimulation
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,10 @@ def format_advice_message(card: dict) -> str:
         + (f" (tier {card['threshold_pct']:.1f}%)" if card.get("threshold_pct") else ""),
         f"Mark: ${card['mark_price']:,.2f} · Liq: ${card['liquidation_price']:,.2f}",
     ]
+    for line in (priority_line(card.get("priority"), card.get("handle_first")),
+                 comparison_line(card["liq_comparison"]) if card.get("liq_comparison") else None):
+        if line:
+            lines.append(line)
     stress = wick_line(card.get("wicks"))
     if stress:
         lines.append(stress)
@@ -128,6 +137,19 @@ class TelegramSimulationBridge:
             ]])
             await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True), keyboard)
 
+        elif kind == "alert" and data["level"] == "triage":
+            rows = [ack_row(data["ack_id"])] if data.get("ack_id") else []
+            rows.append([InlineKeyboardButton(text=f"🛟 Rescue {data['symbol']} first", callback_data=f"rescue:sim:{data['symbol']}")])
+            await self._send(format_triage_message(data["items"], data.get("severity"), demo=True),
+                             InlineKeyboardMarkup(inline_keyboard=rows))
+
+        elif kind == "alert" and data["level"] == "sizing":
+            await self._send(format_sizing_message(data["sizing"], demo=True))
+
+        elif kind == "alert" and data["level"] == "correlation":
+            await self._send(format_correlation_message(data.get("stress"), data["concentration"], data["comparisons"],
+                                                        data.get("severity"), demo=True))
+
         elif kind == "alert" and data["level"] == "adl":
             await self._send(format_adl_message(data["symbol"], data["venue"], data["side"], data["adl"],
                                                 data.get("unrealized_pnl", 0.0), demo=True))
@@ -148,16 +170,20 @@ class TelegramSimulationBridge:
             esc = (f"⏰ Critical/emergency alerts repeat every {t.escalation_interval_minutes:g} demo min "
                    f"(×{self.simulation.escalation_seconds_per_minute:g}s) until you tap ✅ I'm awake, "
                    f"up to {t.escalation_max_reminders}." if t.escalation_enabled else "⏰ Wake-up escalation is off (/settings).")
+            scenario = SCENARIOS.get(self.simulation.scenario)
             await self._send(
-                "🎬 **Market simulation started** (demo data)\n\n"
+                "🎬 **Market simulation started** (demo data)"
+                + (f" · **{scenario.title}**\n_{scenario.description}_" if scenario else "") + "\n\n"
                 "Prices will walk toward liquidation. Your tiers: "
                 f"⚠️ {t.warning_distance_pct:.0f}% · 🚨 {t.critical_distance_pct:.0f}% · "
                 f"🆘 {t.emergency_distance_pct:.0f}%"
                 + (f", widened per symbol for 30-day wicks and the session (demo clock {session['weekday']}: {'; '.join(session['reasons'])})"
                    if t.adaptive_thresholds and session["reasons"] else "")
                 + ".\n"
-                "Liquidation prices are computed for cross margin (BTC + SOL share one Binance wallet); "
+                "Liquidation prices are computed for cross margin (positions on one venue share its wallet); "
                 "demo funding settles on a simulated clock (12 min per step) and ⏳ warns before large payments.\n"
+                "🎯 Several positions at risk at once arrive as one list in the order to handle them; 📏 oversized "
+                "positions and 🧲 correlated-move liquidation of the whole account are flagged.\n"
                 "🛑 Stop-losses are checked against liquidation, ⚡ ADL lights are watched, and " + esc
             )
 
