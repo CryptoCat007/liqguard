@@ -88,3 +88,119 @@ def thresholds_line(thresholds: Optional[dict]) -> Optional[str]:
     reasons = "; ".join(thresholds.get("reasons", []))
     return (f"Adaptive tiers {e['warning']:.1f}/{e['critical']:.1f}/{e['emergency']:.1f}% "
             f"(yours {b['warning']:g}/{b['critical']:g}/{b['emergency']:g}%): {reasons}")
+
+
+SEVERITY_ICON = {"warning": "⚠️", "critical": "🚨", "emergency": "🆘"}
+HANDLE_FIRST_ICON = "🎯"
+
+
+def _minutes(m: Optional[float]) -> str:
+    if m is None:
+        return "n/a"
+    if m < 120:
+        return f"~{m:.0f} min"
+    return f"~{m / 60:.1f} h" if m < 72 * 60 else f"~{m / 1440:.0f} d"
+
+
+def priority_line(priority: Optional[dict], top: Optional[dict]) -> Optional[str]:
+    """`🎯 Handle this first (#1 of 3 at risk)` or `#2 of 3 — handle SOLUSDT first`, from `TriageItem.to_dict()`."""
+    if not priority or not top or (priority.get("of") or 0) < 2:
+        return None
+    if priority.get("label"):
+        return f"{HANDLE_FIRST_ICON} **{priority['label']}** (#{priority['rank']} of {priority['of']} positions by urgency)"
+    return f"Priority #{priority['rank']} of {priority['of']} — {HANDLE_FIRST_ICON} handle **{top['symbol']}** first"
+
+
+def triage_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for t in items:
+        icon = SEVERITY_ICON.get(t.get("severity") or "", "✅")
+        label = f" — {HANDLE_FIRST_ICON} **{t['label']}**" if t.get("label") else ""
+        dist = "n/a" if t.get("distance_pct") is None else f"{t['distance_pct']:.1f}%"
+        lines.append(
+            f"{t['rank']}. {icon} **{t['symbol']}** {t['side'].upper()} · {dist} from liq · "
+            f"{_minutes(t.get('minutes_to_liq'))} at typical volatility · {_usd(t.get('loss_at_liq_usd'))} at stake{label}"
+        )
+    return lines
+
+
+def format_triage_message(items: list[dict], severity: Optional[str] = None, demo: bool = False) -> str:
+    """One consolidated alert for several positions, most urgent first (from `TriageItem.to_dict()`)."""
+    icon = SEVERITY_ICON.get(severity or "", "🚨")
+    lines = [f"{icon} **{len(items)} POSITIONS AT RISK — HANDLE IN THIS ORDER**{' · demo' if demo else ''}", ""]
+    lines += triage_lines(items)
+    if items and items[0].get("reason"):
+        lines += ["", f"Why {items[0]['symbol']} first: {items[0]['reason']}."]
+    lines.append("_Order = time to liquidation at typical volatility, distance vs your tiers, size at stake._")
+    return "\n".join(lines)
+
+
+def sizing_line(check: dict) -> Optional[str]:
+    if check.get("status") != "oversized":
+        return None
+    reasons = "; ".join(check.get("reasons", []))
+    return (f"📏 Oversized: {reasons}. Suggested size ≤ **{check['suggested_size']:g}** "
+            f"(≈ {_usd(check.get('suggested_notional'))}, cut {check['reduce_pct']:.0f}%)")
+
+
+def format_sizing_message(checks: list[dict], demo: bool = False) -> str:
+    """From `SizingCheck.to_dict()` of the oversized positions."""
+    first = checks[0]
+    lines = [
+        f"📏 **POSITION SIZE TOO LARGE FOR THE ACCOUNT**{' · demo' if demo else ''}",
+        "",
+        f"Account equity {_usd(first['equity'])} · your limits: lose ≤ {first['max_risk_pct']:g}% per trade at the exit, "
+        f"margin ≤ {first['max_margin_pct']:g}% of equity per position.",
+    ]
+    for c in checks:
+        risk = "n/a" if c.get("risk_pct") is None else f"{c['risk_pct']:.1f}%"
+        lines.append(
+            f"• **{c['symbol']}** {c['side'].upper()} {c['size']:g} ({_usd(c['notional'])}, "
+            f"{c['notional_x_equity']:.1f}× equity): loses {_usd(c.get('loss_at_exit_usd'))} = **{risk}** at its "
+            f"{c['exit_kind']}, margin {c['margin_pct']:.0f}% → suggested **{c['suggested_size']:g}** "
+            f"(≈ {_usd(c.get('suggested_notional'))})"
+        )
+    lines.append("Change limits with `/settings risk 2` and `/settings maxmargin 25`.")
+    return "\n".join(lines)
+
+
+def stress_lines(stress: dict) -> list[str]:
+    """Shock table and account-level liquidation move from `AccountStress.to_dict()`."""
+    cells = []
+    for s in stress["shocks"]:
+        if s["market_move_pct"] < 0:
+            cells.append(f"{s['market_move_pct']:+.0f}%: {'💀 LIQUIDATED' if s['liquidated'] else '✅ ' + _usd(s['margin_left']) + ' left'}")
+    lines = [f"If everything moves together — {' · '.join(cells)}"]
+    down, uni = stress.get("liq_move_down_pct"), stress.get("uniform_liq_move_down_pct")
+    if down is not None:
+        lines.append(
+            f"Account liquidated by a **{down:.1f}%** market drop (coins moving by their beta)"
+            + (f", {uni:.1f}% if all move equally" if uni is not None else "")
+        )
+    return lines
+
+
+def comparison_line(c: dict) -> Optional[str]:
+    """Platform's displayed liq next to LiqGuard's correlated liq, gap highlighted."""
+    if c.get("correlated_price") is None or c.get("platform_price") is None:
+        return None
+    gap = c.get("gap_pct")
+    flag = f" ⚠️ **{gap:.1f} pts closer**" if gap is not None and gap >= 1 else ""
+    return (f"{c['symbol']}: platform liq {_usd(c['platform_price'])} ({c['platform_distance_pct']:.1f}% away) · "
+            f"LiqGuard correlated liq **{_usd(c['correlated_price'])}** ({c['correlated_distance_pct']:.1f}% away){flag}")
+
+
+def format_correlation_message(stress: Optional[dict], concentration: dict, comparisons: list[dict],
+                               severity: Optional[str] = None, demo: bool = False) -> str:
+    icon = SEVERITY_ICON.get(severity or "", "🧲")
+    lines = [f"{icon} **PORTFOLIO STRESS TEST**{' · demo' if demo else ''}", ""]
+    if concentration.get("message"):
+        lines += [f"🧲 {concentration['message']}", ""]
+    if stress:
+        lines.append(f"{stress['venue'].title()} cross account ({len(stress['symbols'])} positions, one wallet):")
+        lines += stress_lines(stress)
+    shown = [line for line in (comparison_line(c) for c in comparisons) if line]
+    if shown:
+        lines += ["", "Platform line vs real (correlated) liquidation:"] + [f"• {line}" for line in shown]
+        lines.append("_The platform's line assumes every other position stays still. In a fast move they fall together._")
+    return "\n".join(lines)

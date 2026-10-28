@@ -9,18 +9,33 @@ from typing import Awaitable, Callable, Optional, Protocol, Union
 
 from liqguard.models import Position, User
 from liqguard.risk import (
+    BAND_ORDER,
+    PortfolioInsights,
     PreFundingWarning,
     RiskAssessment,
     RiskContext,
     RiskEngine,
     StopCheck,
+    portfolio_insights,
     position_protection,
     pre_funding_warning,
+    stress_band,
 )
 
 from .escalation import ESCALATING, EscalationService, ack_action
 from .manager import AlertManager
-from .messages import format_adl_message, format_stop_message, thresholds_line, wick_line
+from .messages import (
+    comparison_line,
+    format_adl_message,
+    format_correlation_message,
+    format_sizing_message,
+    format_stop_message,
+    format_triage_message,
+    priority_line,
+    sizing_line,
+    thresholds_line,
+    wick_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +69,23 @@ def rescue_action(position: Position) -> Action:
 
 
 def format_alert_message(position: Position, assessment: RiskAssessment, explanation: str,
-                         protection: Optional[dict] = None) -> str:
+                         protection: Optional[dict] = None, insights: Optional[PortfolioInsights] = None) -> str:
     emoji = SEVERITY_EMOJI.get(assessment.risk_level_str, "❓")
     message = (
         f"{emoji} **{assessment.risk_level_str} ALERT**\n\n"
         f"**{position.symbol}** {position.side.value.upper()}\n"
         f"Distance to liquidation: **{assessment.distance_to_liquidation_pct:.1f}%**\n"
     )
-    for line in (wick_line((protection or {}).get("wicks")), thresholds_line((protection or {}).get("thresholds"))):
+    extra: list[Optional[str]] = []
+    if insights is not None:
+        priority, top = insights.priority(position), insights.top
+        comparison, sizing = insights.comparison(position), insights.sizing_for(position)
+        extra = [
+            priority_line(priority.to_dict() if priority else None, top.to_dict() if top else None),
+            comparison_line(comparison.to_dict()) if comparison and comparison.correlated_market_move_pct is not None else None,
+            sizing_line(sizing.to_dict()) if sizing else None,
+        ]
+    for line in (*extra, wick_line((protection or {}).get("wicks")), thresholds_line((protection or {}).get("thresholds"))):
         if line:
             message += f"{line}\n"
     message += f"\n{explanation}\n\n"
@@ -122,6 +146,9 @@ class PositionMonitor:
         self.escalation = escalation
         self._stop_state: dict[tuple[int, str, str], tuple] = {}
         self._adl_state: dict[tuple[int, str, str], int] = {}
+        self._oversized: dict[int, set[tuple[str, str]]] = {}
+        self._stress_band: dict[int, Optional[str]] = {}
+        self._concentrated: dict[int, bool] = {}
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -153,7 +180,12 @@ class PositionMonitor:
                 logger.error("Error checking user %s: %s", user.telegram_id, type(e).__name__)
 
     async def check_user(self, user: User) -> int:
-        """Check one user's positions; returns the number of alerts delivered."""
+        """
+        Check one user's positions; returns the number of alerts delivered.
+
+        When two or more positions are due a tier alert in the same check they
+        go out as one consolidated message, most urgent first.
+        """
         result = await self._positions(user)
         if isinstance(result, list):
             positions, context = result, None
@@ -161,8 +193,11 @@ class PositionMonitor:
             positions, context = result.positions, result.context
         ctx = context if context is not None else RiskContext()
         sent = 0
+        protections = {(p.venue.value, p.symbol): position_protection(p, ctx, user.threshold) for p in positions}
+        insights = portfolio_insights(positions, ctx, user.threshold, protections)
+        due = []
         for position in positions:
-            protection = position_protection(position, ctx, user.threshold)
+            protection = protections[(position.venue.value, position.symbol)]
             info = protection.to_dict()
             engine = RiskEngine(protection.adaptive.threshold, context)
             assessment = engine.assess_position(position)
@@ -183,24 +218,80 @@ class PositionMonitor:
                 continue
             alert = engine.create_alert(assessment)
             if alert and self.alert_manager.process_alert(user.telegram_id, alert, user.threshold.cooldown_seconds):
-                explanation = await self.explainer.explain_risk(
-                    position,
-                    assessment.distance_to_liquidation_pct,
-                    assessment.margin_to_safety,
-                    assessment.severity,
-                    user.language,
-                )
-                text = format_alert_message(position, assessment, explanation, info)
-                actions = [rescue_action(position)]
-                if self.escalation is not None and severity in ESCALATING:
-                    ack = self.escalation.open(user.telegram_id, position.venue.value, position.symbol, severity, text,
-                                               user.threshold, assessment.distance_to_liquidation_pct)
-                    if ack is not None:
-                        actions.insert(0, ack_action(ack))
-                await self.notifier.notify(user.telegram_id, text, actions=actions)
-                sent += 1
+                due.append((position, assessment, info))
+        if len(due) >= 2:
+            sent += await self._send_triage(user, due, insights)
+        elif due:
+            sent += await self._send_tier_alert(user, *due[0], insights)
+        sent += await self._check_portfolio(user, insights)
         if context is not None:
             sent += await self._check_prefunding(user, positions, context)
+        return sent
+
+    def _open_escalation(self, user: User, position: Position, severity: Optional[str], text: str, distance: float,
+                         actions: list[Action]) -> None:
+        if self.escalation is not None and severity in ESCALATING:
+            ack = self.escalation.open(user.telegram_id, position.venue.value, position.symbol, severity, text,
+                                       user.threshold, distance)
+            if ack is not None:
+                actions.insert(0, ack_action(ack))
+
+    async def _send_tier_alert(self, user: User, position: Position, assessment: RiskAssessment, info: dict,
+                               insights: PortfolioInsights) -> int:
+        explanation = await self.explainer.explain_risk(
+            position,
+            assessment.distance_to_liquidation_pct,
+            assessment.margin_to_safety,
+            assessment.severity,
+            user.language,
+        )
+        text = format_alert_message(position, assessment, explanation, info, insights)
+        actions = [rescue_action(position)]
+        severity = assessment.severity.value if assessment.severity else None
+        self._open_escalation(user, position, severity, text, assessment.distance_to_liquidation_pct, actions)
+        await self.notifier.notify(user.telegram_id, text, actions=actions)
+        return 1
+
+    async def _send_triage(self, user: User, due: list, insights: PortfolioInsights) -> int:
+        """One message for several positions; escalation and the rescue button for the one to handle first."""
+        items = [t.to_dict() for t in insights.at_risk]
+        severities = [a.severity.value for _, a, _ in due if a.severity]
+        worst = max(severities, key=BAND_ORDER.index) if severities else None
+        text = format_triage_message(items, worst)
+        top = insights.top
+        lead = next(((p, a) for p, a, _ in due if top and p.symbol == top.symbol and p.venue.value == top.venue), None)
+        lead = lead or (due[0][0], due[0][1])
+        position, assessment = lead
+        actions = [rescue_action(position)]
+        self._open_escalation(user, position, assessment.severity.value if assessment.severity else None, text,
+                              assessment.distance_to_liquidation_pct, actions)
+        await self.notifier.notify(user.telegram_id, text, actions=actions)
+        return 1
+
+    async def _check_portfolio(self, user: User, insights: PortfolioInsights) -> int:
+        """Sizing and correlated-stress warnings, each only when it gets worse (new oversized position, worse band)."""
+        uid, sent = user.telegram_id, 0
+        oversized = {(s.venue, s.symbol) for s in insights.oversized}
+        new = oversized - self._oversized.get(uid, set())
+        self._oversized[uid] = oversized
+        if new:
+            checks = [s.to_dict() for s in insights.oversized if (s.venue, s.symbol) in new]
+            await self.notifier.notify(uid, format_sizing_message(checks))
+            sent += 1
+        worst = insights.worst_stress()
+        band = stress_band(worst.first_liquidation if worst else None)
+        previous = self._stress_band.get(uid)
+        worse = band is not None and (previous is None or BAND_ORDER.index(band) > BAND_ORDER.index(previous))
+        flagged = insights.concentration.flagged
+        if worse or (flagged and not self._concentrated.get(uid, False)):
+            data = insights.to_dict()
+            comps = [c for c in data["comparisons"] if worst is None or c["symbol"] in worst.symbols]
+            await self.notifier.notify(uid, format_correlation_message(
+                worst.to_dict() if worst else None, data["concentration"], comps, band))
+            sent += 1
+        if worse or band is None:
+            self._stress_band[uid] = band
+        self._concentrated[uid] = flagged
         return sent
 
     async def _check_stop(self, user: User, position: Position, check: StopCheck) -> int:

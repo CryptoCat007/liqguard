@@ -85,6 +85,7 @@ from liqguard.risk import (
     portfolio_insights,
     position_protection,
     pre_funding_warning,
+    stress_band,
     true_liquidation,
 )
 from liqguard.risk.sessions import DEFAULT_LOW_LIQUIDITY_HOURS
@@ -226,16 +227,6 @@ SCENARIOS: dict[str, Scenario] = {
     ),
 }
 DEFAULT_SCENARIO = "mixed"
-
-# Account-level liquidation move (correlated market %) that raises the "correlation" alert to each level.
-STRESS_BANDS: tuple[tuple[str, float], ...] = (("emergency", 2.5), ("critical", 5.0), ("warning", 10.0))
-
-
-def stress_band(move_pct: Optional[float]) -> Optional[str]:
-    if move_pct is None:
-        return None
-    return next((name for name, limit in STRESS_BANDS if abs(move_pct) <= limit), None)
-
 
 def price_at_distance(side: Side, liquidation_price: float, distance_pct: float) -> float:
     """Mark price at which a position sits `distance_pct` from liquidation."""

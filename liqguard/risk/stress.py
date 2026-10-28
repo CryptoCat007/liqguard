@@ -30,6 +30,10 @@ MAX_UP_PCT = 300.0
 SCAN_STEP_PCT = 0.5
 CONCENTRATION_SHARE_PCT = 75.0
 
+# Account-level liquidation move (correlated market %) at which the stress warning reaches each level.
+STRESS_BANDS: tuple[tuple[str, float], ...] = (("emergency", 2.5), ("critical", 5.0), ("warning", 10.0))
+BAND_ORDER = ("warning", "critical", "emergency")
+
 Model = Callable[[Position], float]
 
 
@@ -47,6 +51,12 @@ def _r(v: Optional[float], dp: int = 2) -> Optional[float]:
 
 def shocked_price(position: Position, market_move_pct: float, model: Model) -> float:
     return max(position.mark_price * (1 + model(position) * market_move_pct / 100), position.mark_price * 1e-6)
+
+
+def stress_band(move_pct: Optional[float]) -> Optional[str]:
+    if move_pct is None:
+        return None
+    return next((name for name, limit in STRESS_BANDS if abs(move_pct) <= limit), None)
 
 
 def account_surplus(account: MarginAccount, market_move_pct: float, model: Model = correlated_model) -> tuple[float, float]:
