@@ -14,6 +14,9 @@ Built for the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/m
 - 📸 **Screenshot Parsing**: Send a position screenshot, get it analyzed
 - 🎮 **Demo Mode**: Simulated price paths with alert sequences
 - 💰 **Actionable Advice**: Exact margin/reduction amounts, not estimates
+- 📐 **True Liquidation Price**: Cross-margin aware (other positions' PnL and maintenance), Binance maintenance tiers and the Hyperliquid margin model
+- 💸 **Funding & Fees**: Live funding rates (refreshed every minute), liquidation drift over 8 h / 24 h at the current rate, pre-funding warnings, taker fees in every cost
+- 🛟 **Rescue Simulator**: Add margin vs reduce X% vs hedge, each with new liquidation price, distance and full cost; Muse explains the trade-offs
 - 🛡️ **Protective Actions**: User-confirmed risk reduction (testnet only)
 - 🖥️ **Web Dashboard**: Public demo page plus a private per-user view behind Telegram login
 - 👥 **Multi-user**: Every position, key, alert, action, audit entry and simulation is scoped to its owner
@@ -77,8 +80,8 @@ liqguard
 | `/bind` | Connect an exchange: Binance (read-only key), Hyperliquid (wallet address) or Binance testnet (for protective actions) |
 | `/unbind` | Disconnect an exchange |
 | `/dashboard` | One-time login link to your private web dashboard (`/dashboard revoke` signs out everywhere) |
-| `/positions` | View all positions with actionable advice |
-| `/risk` | Portfolio risk overview across venues + one-line Muse summary naming the riskiest position |
+| `/positions` | All positions: exchange vs true liquidation price, funding rate, next payment, 8 h / 24 h drift, 🛟 rescue buttons |
+| `/risk` | Portfolio risk overview + Muse summary; true liquidation and funding drift for the riskiest position, 🛟 rescue button |
 | `/threshold` | Configure alert thresholds |
 | `/demo` | Demo mode with price simulation |
 | `/ask <question>` | Ask AI about your positions |
@@ -86,6 +89,79 @@ liqguard
 | `/killswitch` | Emergency stop for all actions |
 | `/language` | Change language (English/繁體中文) |
 | `/status` | View account status |
+
+## Liquidation, Funding & Rescue
+
+All of this is computed in `liqguard/risk/` (pure Python, no I/O). Muse only explains it.
+
+### True liquidation price (`risk/liquidation.py`)
+
+Binance's published one-way formula, solved per maintenance tier:
+
+```
+        WB − TMM₁ + UPNL₁ + cum − s·Q·E
+LP  =  ─────────────────────────────────         s = +1 long, −1 short
+              Q·MMR − s·Q
+```
+
+- **WB** is the wallet: the cross wallet balance (Binance `crossWalletBalance`; Hyperliquid
+  `accountValue` minus cross uPnL) or the isolated wallet.
+- **UPNL₁ / TMM₁** are the unrealized PnL and maintenance margin of every *other* cross
+  position in the same account. This is why a losing SOL position moves BTC's liquidation price.
+- **MMR / cum** come from the tier that contains Q·LP. Binance tiers are read per account from
+  `GET /fapi/v1/leverageBracket`. Built-in defaults are only used, and flagged, when the account
+  can't be read. Hyperliquid uses MMR = 1 / (2 × max leverage) from `meta`, with cum = 0.
+- `true_liquidation(position, account)` returns the price, the distance, and what went into it.
+  Alerts use the **closer** of the exchange-reported and computed distances. A cross position
+  whose account couldn't be fetched falls back to the exchange's figure.
+- The tests check hand-derived examples and that equity equals maintenance at the computed
+  price for random books. They also check that the result matches Hyperliquid's documented
+  formula exactly and that bisection agrees with the closed form.
+
+### Funding (`exchanges/funding.py`, `core/market.py`, `risk/funding.py`)
+
+- **Live rates.** Rates come from public endpoints, refreshed every `LIQGUARD_FUNDING_REFRESH`
+  seconds, and nothing is hardcoded.
+  - **Binance:** `GET /fapi/v1/premiumIndex` gives `lastFundingRate` and `nextFundingTime`, and
+    `GET /fapi/v1/fundingInfo` gives the per-symbol `fundingIntervalHours` (4 h or 8 h, default 8).
+  - **Hyperliquid:** `POST /info {"type":"metaAndAssetCtxs"}` gives the hourly `funding`; it
+    settles on the hour.
+- **Refresh failures.** A failed refresh keeps the last good data and reports the error in
+  `/api/health`. For example, Binance returns HTTP 451 from restricted regions.
+- **Drift.** Each payment (`s · Q · mark · rate`) comes out of the margin pool, so in cross margin
+  every position's funding moves every liquidation price. `project_funding` shows the 8 h and
+  24 h drift, labelled **"at current rate"** because the rate changes every settlement.
+- **Pre-funding warning.** Sent when all of these hold:
+  - A settlement is within `LIQGUARD_PREFUNDING_LEAD_MINUTES`.
+  - The position pays.
+  - It is within the warning distance.
+  - The pool's payment is at least 5% of the remaining margin buffer, or would push it into a
+    worse alert tier.
+
+  It is sent once per position per settlement and comes with a 🛟 button.
+- **Fees.** Taker fees default to 0.05% on Binance and 0.045% on Hyperliquid, and can be
+  overridden with `LIQGUARD_TAKER_FEE_*`.
+
+### Rescue simulator (`risk/rescue.py`)
+
+For one at-risk position, each option is solved exactly for the safety target (default 30%):
+
+| Option | How it is computed | Cost reported |
+|--------|--------------------|---------------|
+| 💰 Add margin | Exact wallet amount whose liquidation price sits at the target | 24 h funding; capital required |
+| ✂️ Reduce X% | Bisection on the fraction. Cross: realized PnL and fee go to the shared wallet. Isolated: margin is released pro rata, so only a full close helps (and the plan says so) | Taker fee, realized loss, 24 h funding on what is left |
+| 🛡 Hedge | Binance cross: opposite leg in Hedge Mode in the same wallet, size solved by bisection. Hyperliquid or isolated: a cross-venue hedge, marked as **not** moving this liquidation price | Open + close fees, 24 h funding on net exposure, capital |
+
+`recommended` is the cheapest option that reaches the target and protects the position.
+`MetaLLMClient.explain_rescue(plan)` returns structured output (`headline`, `recommended_option`,
+per-option `pros` / `cons`, `caveat`). A live answer is thrown away for the deterministic mock if it
+recommends an option the plan doesn't contain or quotes a dollar amount that isn't in the plan.
+
+Where it shows up:
+- **Telegram alerts:** 🛟 *Rescue options*, then one button per option for details.
+- **Telegram commands:** the same buttons on `/positions` and `/risk`.
+- **Dashboard:** the Rescue simulator panel.
+- **Simulation:** every advice card in `/demo` and the dashboard simulation.
 
 ## How We Use Meta AI
 
@@ -174,16 +250,16 @@ other, and `test_architecture.py` enforces both rules plus the absence of import
 
 | Package | Responsibility |
 |---------|----------------|
-| `models/` | Plain dataclasses: `Position`, `User`, `ExchangeBinding`, `Alert`, thresholds |
-| `risk/` | Pure calculations: liquidation distance, exact margin/reduction advice, portfolio overview |
-| `ai/` | `MetaLLMClient` (OpenAI-compatible Muse client) with deterministic mock fallback |
-| `exchanges/` | `ExchangeAdapter` interface; Binance, Hyperliquid and demo adapters; Binance key-permission policy |
+| `models/` | Plain dataclasses: `Position` (incl. margin mode), `MarginAccount`, `MaintenanceBracket`, `FundingInfo`, `User`, `ExchangeBinding`, `Alert`, thresholds |
+| `risk/` | Pure calculations: true liquidation (`liquidation.py`), funding drift and pre-funding warnings (`funding.py`), taker fees (`fees.py`), rescue simulator (`rescue.py`), `RiskContext`, advice, portfolio overview |
+| `ai/` | `MetaLLMClient` (OpenAI-compatible Muse client) with deterministic mock fallback; validated rescue explanations (`ai/rescue.py`) |
+| `exchanges/` | `ExchangeAdapter` interface (`get_positions`, `get_account`); Binance, Hyperliquid and demo adapters; public funding feeds; Binance key-permission policy |
 | `alerts/` | Per-user cooldown/dedup (`AlertManager`) and the polling `PositionMonitor` (delivers through a `Notifier`) |
 | `protect/` | Tier-1 protective actions, guardrails, kill switch, per-user audit logger |
 | `simulation/` | Deterministic market simulation and `SimulationRegistry` (one per user + one public demo) |
 | `storage/` | SQLite schema, envelope encryption (`KeyManager`), per-user repositories |
 | `auth/` | Signed session tokens, one-time login links, Telegram Login Widget verification |
-| `core/` | `AppContext` (wires everything once), `PositionService`, testnet action executor |
+| `core/` | `AppContext` (wires everything once), `PositionService.snapshot_for(user)` (positions + accounts + funding), `MarketDataService` (shared public funding cache), testnet action executor |
 | `telegram/` | aiogram handlers, Telegram notifier, owner-only simulation bridge |
 | `web/` | Dashboard app, session/CSRF guards, static frontend |
 | `config.py` · `logsafe.py` · `main.py` | Settings from env, log redaction, process entry point |
@@ -293,6 +369,12 @@ Experience all features without real money:
 ```
 
 The **Liquidation Simulation** gradually moves prices toward liquidation, firing alerts at each threshold (20%, 10%, 5%) with action buttons.
+It runs a cross-margined book:
+- BTC and SOL share one Binance cross wallet, so SOL is dragged toward liquidation by BTC's losses.
+- ETH sits in a Hyperliquid cross account.
+- Demo funding settles on a simulated clock (12 min per step, 8 h per run): BTC 8 h, SOL 4 h, ETH hourly.
+- A ⏳ pre-funding warning fires before BTC's large settlement.
+- Every alert carries a 🛟 rescue plan.
 
 ## Security Model
 
@@ -379,19 +461,30 @@ private run. Set `LIQGUARD_PUBLIC_URL` to the address users open (https in produ
 |-------|----------|
 | Muse summary banner | Overall risk level plus a one-line Muse summary naming the riskiest position (the same summary `/risk` shows) |
 | KPIs | Total notional, margin used, unrealized PnL, net exposure, closest distance to liquidation, margin needed to restore the safety buffer |
-| Chart | **Distance** tab: every position's distance to liquidation over time, with shaded warning/critical/emergency bands. **Per-symbol** tabs: mark price vs liquidation line, plus the price where each tier fires |
-| Positions | Venue, side, leverage, distance gauge with tier markers, mark/liq price, PnL |
-| Alert timeline | Three-tier alerts in order, showing which channels (Web, Telegram) received each one |
-| Muse advice | Per-alert explanation, plus exact "add $X margin" and "reduce Y%" numbers computed in code |
+| Chart | **Distance** tab: every position's distance to liquidation over simulated time, with shaded warning/critical/emergency bands and ▲ funding settlements. **Per-symbol** tabs: mark price vs the true liquidation line (which steps when the shared wallet pays funding), plus the price where each tier fires |
+| Positions | Venue, side, leverage, distance gauge with tier markers, mark and **true** liquidation price (cross wallet, other positions' PnL and maintenance), funding rate, next payment and 8 h / 24 h drift "at current rate", 🛟 Rescue button |
+| Rescue simulator | Add margin vs reduce vs hedge side by side: new liquidation, distance, fees, realized loss, 24 h funding, capital, recommended option, Muse trade-offs. Opens automatically on each alert |
+| Funding & wallets | Cross wallet per venue, each position's rate and next settlement, drift, recent settlements |
+| Alert timeline | Three-tier alerts plus ⏳ pre-funding alerts, showing which channels (Web, Telegram) received each one |
+| Muse advice | Per-alert explanation, exact "add $X margin" / "reduce Y%", and a rescue mini-comparison |
 | Audit log | Simulation start/stop, every alert, every advice card, and protective-action steps from Telegram (sanitized) |
 
 ### How the simulation works
 
 `liqguard/simulation/market.py` (`MarketSimulation`) is a deterministic price path
-(seeded, about 30 s); `SimulationRegistry` keeps one per user plus the public demo. Each position moves toward its liquidation price at a different pace, so the
-run shows warning → critical → emergency in sequence. No tier is ever skipped, and each fires
-once per position. All numbers come from `PortfolioAnalyzer` / `AdviceCalculator`; Muse
-(or the mock) only writes the wording. The web dashboard and `TelegramSimulationBridge` both
+(seeded, about 30 s of wall time, 8 simulated hours); `SimulationRegistry` keeps one per user plus the public demo.
+
+- **Cross accounts.** Positions sit in cross accounts, so their distances are coupled. One
+  position per account follows a distance path, and the others follow a price path; their
+  distance is whatever the shared wallet implies.
+- **Liquidation each step.** Liquidation prices are computed every step with `true_liquidation`.
+- **Funding.** Demo funding settlements, labelled *demo* (live rates are used for real
+  accounts), are deducted from the wallets. They emit `funding` events and ⏳ pre-funding alerts.
+- **Alert order.** The run shows warning → critical → emergency in sequence. No tier is skipped,
+  and each fires once per position.
+- **Rescue plans.** Every alert gets a rescue plan.
+
+All numbers come from `risk/`; Muse (or the mock) only writes the wording. The web dashboard and `TelegramSimulationBridge` both
 subscribe to the owning simulation's event stream.
 
 ### API
@@ -404,12 +497,14 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 | `…/snapshot` | GET | Full state: overview, summary, history, alerts, advice, audit |
 | `…/portfolio` | GET | `/risk` data layer (`PortfolioRiskOverview.to_dict()`) + Muse summary |
 | `…/alerts` · `…/advice` · `…/audit` | GET | Timeline, advice cards, audit log |
+| `…/rescue?symbol=` | GET | Rescue plan for a simulated position + Muse explanation |
+| `/api/me/rescue/live?symbol=&venue=` | GET | Rescue plan for one of *your* live (or demo-book) positions |
 | `…/simulate` · `…/simulate/stop` · `…/simulate/reset` | POST | Simulation controls (CSRF header required) |
 | `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, audit log |
-| `/api/health` · `/api/auth/config` | GET | Status; login options (no secrets) |
+| `/api/health` · `/api/auth/config` | GET | Status (incl. funding feed freshness); login options (no secrets) |
 | `/auth/login?token=` · `/auth/telegram` | GET | One-time link / Telegram widget sign-in |
 | `/auth/logout` | POST | Sign out (CSRF header required) |
-| `/ws/demo` · `/ws/me` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `summary` / `audit` / `status` events |
+| `/ws/demo` · `/ws/me` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `funding` / `summary` / `audit` / `status` events |
 
 ### Security
 
@@ -425,6 +520,9 @@ python3 -m pytest liqguard/tests/ -q
 
 | File | Covers |
 |------|--------|
+| `test_liquidation.py` | Hand-derived liquidation prices, Binance tiers (`cum` continuity, equity = maintenance at LP), cross-margin effects, Hyperliquid formula equivalence, closed form = bisection |
+| `test_funding.py` | Binance/Hyperliquid feeds with mocked HTTP (4 h/8 h intervals, failures), settlements, drift, pre-funding warnings, refresh service, adapter accounts |
+| `test_rescue.py` | Add margin / reduce / hedge math and costs, recommendation, Muse validation, sim funding + rescue, Telegram buttons, monitor, dashboard endpoints and isolation |
 | `test_risk_engine.py` | Liquidation distance, margin calculations, risk scoring |
 | `test_advice.py` | Actionable advice; added margin lands exactly on the target distance |
 | `test_portfolio.py` | `/risk` portfolio aggregation and metrics |
@@ -438,7 +536,7 @@ python3 -m pytest liqguard/tests/ -q
 | `test_architecture.py` | No framework imports in business logic, no cycles, log redaction, startup key message |
 | `test_e2e.py` | Two users from `/start` → `/bind` → monitor alerts → `/dashboard` login → private dashboard → `/unbind`, with faked exchange APIs |
 
-246 tests at the time of writing.
+396 tests at the time of writing.
 
 ## Environment Variables
 
@@ -459,6 +557,9 @@ python3 -m pytest liqguard/tests/ -q
 | `LIQGUARD_SESSION_TTL` | No | Dashboard session lifetime in seconds (default: 43200) |
 | `LIQGUARD_LOGIN_LINK_TTL` | No | One-time login link lifetime in seconds (default: 300) |
 | `LIQGUARD_PROTECT_ENABLED` | No | Enable tier-1 protective actions on testnet bindings (default: false) |
+| `LIQGUARD_TAKER_FEE_BINANCE` / `_HYPERLIQUID` | No | Taker fee rates used in rescue costs (default: 0.0005 / 0.00045) |
+| `LIQGUARD_FUNDING_REFRESH` | No | Seconds between funding-rate refreshes (default: 60, minimum 10) |
+| `LIQGUARD_PREFUNDING_LEAD_MINUTES` | No | How long before settlement pre-funding warnings fire (default: 30) |
 
 ## Demo Video Script
 
@@ -476,7 +577,11 @@ Setup: `liqguard --dashboard`, send `/dashboard` to the bot and open the link; p
 3. Distance chart: lines fall through the warning, critical and emergency bands
 4. Alerts land in the timeline (tagged Web ✓ and Telegram ✓) and in Telegram at the same moment
 5. Muse advice cards show exact "add $X margin" and "reduce Y%" numbers
-6. Click the BTCUSDT tab: price closing in on the red liquidation line
+6. Positions panel: BTC's **true** liquidation rises as SOL loses, because they share a Binance cross wallet
+7. Around +7h: ⏳ **pre-funding** alert (BTC is about to pay a large funding payment); the Funding card shows the 8 h / 24 h drift "at current rate"
+8. Rescue simulator panel: add margin vs reduce vs hedge with new liquidation, distance and full cost; Muse explains the trade-offs
+9. Click the BTCUSDT tab: price closing in on the true liquidation line, which steps up at the ▲ settlement
+10. In Telegram, tap 🛟 on the alert, then *Hedge*, to show the per-option detail
 
 ### Scene 3: Telegram Bot Commands (40s)
 1. `/risk` → Show portfolio risk overview in Telegram
@@ -508,6 +613,8 @@ Setup: `liqguard --dashboard`, send `/dashboard` to the bot and open the link; p
 - [x] Protective actions Tier 1
 - [x] Web dashboard for demo/judges
 - [x] Multi-user isolation, envelope encryption, dashboard login
+- [x] Cross-margin true liquidation price, live funding, rescue simulator
+- [ ] Portfolio-margin / multi-assets mode and Binance Hedge Mode positions as input
 - [ ] Hyperliquid testnet execution and reduce-position execution
 - [ ] Persist pending actions and kill switch across restarts
 - [ ] OKX and Bybit support
