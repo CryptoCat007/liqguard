@@ -73,7 +73,7 @@ class TestReadEndpoints:
         advice = client.get("/api/demo/advice").json()
         audit = client.get("/api/demo/audit").json()
 
-        assert {a["level"] for a in alerts} == {"warning", "critical", "emergency", "funding", "stop", "adl"}
+        assert {a["level"] for a in alerts} == {"warning", "critical", "emergency", "funding", "stop", "adl", "sizing", "correlation"}
         assert len(advice) == len([a for a in alerts if a["level"] in ("warning", "critical", "emergency")])
         events = [e["event"] for e in audit]
         assert events[0] == "simulation_started"

@@ -31,7 +31,10 @@ Event shapes (all dicts with "type" and "data"):
     status   {state, step, total_steps}
     tick     {step, timestamp, sim_time, prices: {symbol: {...}}, overview, wallets}
     alert    {id, level, symbol, venue, side, distance, mark_price, ...}
-             levels: warning/critical/emergency, "funding" (pre-funding), "stop" (stop-loss check), "adl"
+             levels: warning/critical/emergency (with "priority"), "funding" (pre-funding),
+             "stop" (stop-loss check), "adl", "triage" (several positions crossed tiers in one
+             step: one consolidated alert, most urgent first), "sizing" (oversized positions),
+             "correlation" (concentrated book / account liquidated by a small correlated move)
     escalation {id, ack_id, symbol, severity, reminder, max_reminders, urgency, text, ...}
     ack      {ack_id, symbol, severity, reminders_sent, source}
     advice   {id, alert_id, symbol, level, explanation, margin_to_add_usd, rescue, rescue_explanation, ...}
@@ -69,14 +72,17 @@ from liqguard.risk import (
     AdviceCalculator,
     FeeSchedule,
     PortfolioAnalyzer,
+    PortfolioInsights,
     PositionProtection,
     RescuePlan,
     RescueSimulator,
     RiskContext,
     adaptive_threshold,
     default_brackets,
+    factor,
     funding_payment,
     market_session,
+    portfolio_insights,
     position_protection,
     pre_funding_warning,
     true_liquidation,
@@ -84,7 +90,7 @@ from liqguard.risk import (
 from liqguard.risk.sessions import DEFAULT_LOW_LIQUIDITY_HOURS
 from liqguard.risk.stops import DEFAULT_BUFFER_PCT
 
-from .demo_data import DEMO_SIM_ORDERS, DEMO_WICKS, demo_clock_start
+from .demo_data import CROSS_LONGS_ORDERS, DEMO_SIM_ORDERS, DEMO_WICKS, demo_clock_start
 
 if TYPE_CHECKING:
     from liqguard.ai import MetaLLMClient
@@ -170,6 +176,67 @@ DEFAULT_FUNDING: tuple[SimFundingSpec, ...] = (
 )
 
 
+# "5 longs, one wallet": five correlated longs share one Binance cross wallet
+# and fall together (each by its beta × an ~8% market drop). Every platform
+# liquidation line looks 50%+ away at the start, yet the account is liquidated
+# by an ~8.8% correlated move; the run ends just short of it.
+CROSS_LONGS_MARKET_MOVE_PCT = -8.0
+CROSS_LONGS_SPECS: tuple[SimPositionSpec, ...] = tuple(
+    SimPositionSpec(symbol, Venue.BINANCE, Side.LONG, size, entry, size * entry / 10, 10,
+                    end_price_pct=round(factor(symbol).beta * CROSS_LONGS_MARKET_MOVE_PCT, 2), lag=lag)
+    for symbol, size, entry, lag in (
+        ("BTCUSDT", 0.25, 64000.0, 0.0),
+        ("ETHUSDT", 5.0, 3150.0, 0.02),
+        ("SOLUSDT", 100.0, 148.0, 0.04),
+        ("DOGEUSDT", 90000.0, 0.165, 0.06),
+        ("AVAXUSDT", 500.0, 29.0, 0.08),
+    )
+)
+CROSS_LONGS_FUNDING: tuple[SimFundingSpec, ...] = (
+    SimFundingSpec("BTCUSDT", Venue.BINANCE, 0.0001, 8, first_settlement_minutes=300),
+    SimFundingSpec("SOLUSDT", Venue.BINANCE, 0.0002, 4, first_settlement_minutes=180),
+)
+
+
+@dataclass(frozen=True)
+class Scenario:
+    key: str
+    title: str
+    description: str
+    specs: tuple[SimPositionSpec, ...]
+    wallets: dict
+    funding: tuple[SimFundingSpec, ...]
+    orders: tuple[OpenOrder, ...]
+
+    def to_dict(self) -> dict:
+        return {"key": self.key, "title": self.title, "description": self.description,
+                "symbols": [s.symbol for s in self.specs]}
+
+
+SCENARIOS: dict[str, Scenario] = {
+    "mixed": Scenario(
+        "mixed", "Mixed book",
+        "BTC + SOL cross on Binance, an ETH short on Hyperliquid and an isolated TSLA stock perp.",
+        DEFAULT_SPECS, DEFAULT_WALLETS, DEFAULT_FUNDING, DEMO_SIM_ORDERS,
+    ),
+    "cross_longs": Scenario(
+        "cross_longs", "5 longs, one wallet",
+        "BTC, ETH, SOL, DOGE and AVAX longs share one Binance cross wallet and fall together.",
+        CROSS_LONGS_SPECS, {Venue.BINANCE: 9000.0}, CROSS_LONGS_FUNDING, CROSS_LONGS_ORDERS,
+    ),
+}
+DEFAULT_SCENARIO = "mixed"
+
+# Account-level liquidation move (correlated market %) that raises the "correlation" alert to each level.
+STRESS_BANDS: tuple[tuple[str, float], ...] = (("emergency", 2.5), ("critical", 5.0), ("warning", 10.0))
+
+
+def stress_band(move_pct: Optional[float]) -> Optional[str]:
+    if move_pct is None:
+        return None
+    return next((name for name, limit in STRESS_BANDS if abs(move_pct) <= limit), None)
+
+
 def price_at_distance(side: Side, liquidation_price: float, distance_pct: float) -> float:
     """Mark price at which a position sits `distance_pct` from liquidation."""
     if side == Side.LONG:
@@ -205,8 +272,10 @@ class MarketSimulation:
         wicks: Optional[dict[str, WickProfile]] = None,
         clock_start: Optional[datetime] = None,
         escalation_seconds_per_minute: float = ESCALATION_SECONDS_PER_MINUTE,
+        scenario: Optional[str] = None,
     ):
         self.llm = llm_client
+        self.scenario = DEFAULT_SCENARIO if scenario is None else scenario
         self.owner_id = owner_id
         self.threshold = threshold or UserThreshold()
         self.specs = specs
@@ -218,6 +287,8 @@ class MarketSimulation:
         self.stop_buffer_pct = stop_buffer_pct
         self.orders = orders
         self.wick_profiles = DEMO_WICKS if wicks is None else wicks
+        if scenario is not None:
+            self._apply_scenario(SCENARIOS[scenario])
         self._clock_start = clock_start
         self.escalation_seconds_per_minute = escalation_seconds_per_minute
         self.escalation = EscalationTracker()
@@ -259,6 +330,10 @@ class MarketSimulation:
         self._stop_state: dict[str, tuple] = {}
         self._protection_cache.clear()
         self._adl_state: dict[str, int] = {}
+        self._insights_cache: Optional[tuple[tuple, PortfolioInsights]] = None
+        self._oversized: set[str] = set()
+        self._stress_band: Optional[str] = None
+        self._concentration_flagged = False
         self.wallets = dict(self.wallet_specs)
         self.funding = {
             (f.venue.value, f.symbol): FundingInfo(
@@ -282,6 +357,21 @@ class MarketSimulation:
             self.threshold = threshold
         if language:
             self.language = language
+        self.reset()
+        return True
+
+    def _apply_scenario(self, scenario: Scenario) -> None:
+        self.scenario = scenario.key
+        self.specs = scenario.specs
+        self.wallet_specs = dict(scenario.wallets)
+        self.funding_specs = scenario.funding
+        self.orders = scenario.orders
+
+    def set_scenario(self, key: str) -> bool:
+        """Switch the demo book. Ignored while a run is in progress or for an unknown key."""
+        if self.is_running or key not in SCENARIOS:
+            return False
+        self._apply_scenario(SCENARIOS[key])
         self.reset()
         return True
 
@@ -408,6 +498,17 @@ class MarketSimulation:
             cached = self._protection_cache[key] = position_protection(position, ctx or self.risk_context(), self.threshold)
         return cached
 
+    def insights(self, ctx: Optional[RiskContext] = None) -> PortfolioInsights:
+        """Triage, stress test, platform vs correlated liq, concentration and sizing for this step (cached)."""
+        key = (self.step, tuple(round(p.mark_price, 8) for p in self.positions), tuple(sorted(self.wallets.values())), id(self.threshold))
+        if self._insights_cache is not None and self._insights_cache[0] == key:
+            return self._insights_cache[1]
+        ctx = ctx or self.risk_context()
+        protections = {(p.venue.value, p.symbol): self.protection(p, ctx) for p in self.positions}
+        result = portfolio_insights(self.positions, ctx, self.threshold, protections)
+        self._insights_cache = (key, result)
+        return result
+
     def _protection_dict(self) -> dict:
         ctx = self.risk_context()
         return {p.symbol: self.protection(p, ctx).to_dict() for p in self.positions}
@@ -494,6 +595,8 @@ class MarketSimulation:
             "protection": protection,
             "session": self._session_dict(),
             "escalation": self._escalation_state(),
+            "insights": self.insights(ctx).to_dict(),
+            "scenario": self.scenario,
         }
 
     def _wallets_dict(self) -> dict:
@@ -540,6 +643,11 @@ class MarketSimulation:
             "escalation": self._escalation_state(),
             "escalation_log": self.escalation_log,
             "orders": [o.to_dict() for o in self.orders],
+            "insights": self.insights().to_dict(),
+            "risk_settings": {"risk_per_trade_pct": self.threshold.risk_per_trade_pct,
+                              "max_margin_pct": self.threshold.max_margin_pct},
+            "scenario": self.scenario,
+            "scenarios": [sc.to_dict() for sc in SCENARIOS.values()],
             "channels": sorted(self._subscribers),
             "muse_mode": "mock" if (self.llm is None or self.llm.is_mock) else "live",
             "demo": True,
@@ -612,6 +720,7 @@ class MarketSimulation:
         await self._add_audit("simulation_started", None, f"Demo price path started from {source}", source)
         await self.refresh_summary()
         await self._check_protection()
+        await self._check_portfolio()
         self._task = asyncio.create_task(self._run())
         return True
 
@@ -691,6 +800,7 @@ class MarketSimulation:
         await self._check_prefunding()
         await self._check_alerts()
         await self._check_protection()
+        await self._check_portfolio()
 
     async def _settle_funding(self) -> None:
         start = self.clock_start + timedelta(minutes=SIM_MINUTES_PER_STEP * (self.step - 1))
@@ -773,8 +883,14 @@ class MarketSimulation:
             )
 
     async def _check_alerts(self) -> None:
+        """
+        Tier crossings. When two or more positions cross tiers in the same
+        step, they go out as one consolidated "triage" alert, most urgent
+        first; only the top one gets escalation and Muse advice.
+        """
         ctx = self.risk_context()
-        fired_any = False
+        insights = self.insights(ctx)
+        crossings: list[tuple[str, Position, PositionProtection]] = []
         for pos in self.positions:
             distance = pos.distance_to_liquidation_pct
             protection = self.protection(pos, ctx)
@@ -784,10 +900,105 @@ class MarketSimulation:
                 key = (pos.symbol, tier)
                 if distance <= thresholds[tier] and key not in self._fired:
                     self._fired.add(key)
-                    await self._fire_alert(tier, pos, protection)
-                    fired_any = True
-        if fired_any:
-            self._spawn(self.refresh_summary())
+                    crossings.append((tier, pos, protection))
+        if not crossings:
+            return
+        symbols = list(dict.fromkeys(pos.symbol for _, pos, _ in crossings))
+        if len(symbols) < 2:
+            for tier, pos, protection in crossings:
+                await self._fire_alert(tier, pos, protection, insights)
+        else:
+            await self._fire_triage(crossings, insights)
+        self._spawn(self.refresh_summary())
+
+    async def _fire_triage(self, crossings: list, insights: PortfolioInsights) -> None:
+        self._alert_seq += 1
+        triage_id = f"al_{self._alert_seq:03d}"
+        top = insights.top
+        worst: dict[str, tuple[str, Position, PositionProtection]] = {}
+        for tier, pos, protection in crossings:
+            worst[pos.symbol] = (tier, pos, protection)
+        tier_alerts = []
+        for tier, pos, protection in crossings:
+            lead = top is not None and pos.symbol == top.symbol and worst[pos.symbol][0] == tier
+            tier_alerts.append(await self._fire_alert(tier, pos, protection, insights, consolidated=triage_id, advise=lead))
+        lead_alert = next((a for a in tier_alerts if a.get("ack_id")), None)
+        items = [t.to_dict() for t in insights.at_risk]
+        severity = TIERS[max(TIERS.index(t["severity"]) for t in items)] if items else crossings[-1][0]
+        top_pos = self._position(top.symbol) if top else crossings[0][1]
+        alert = {
+            "id": triage_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sim_time": self.sim_now.isoformat(),
+            "step": self.step,
+            "level": "triage",
+            "severity": severity,
+            "symbol": top_pos.symbol,
+            "venue": top_pos.venue.value,
+            "side": top_pos.side.value,
+            "distance_pct": round(top_pos.distance_to_liquidation_pct, 2),
+            "mark_price": round(top_pos.mark_price, 4),
+            "liquidation_price": round(top_pos.liquidation_price, 4),
+            "crossed": [{"symbol": pos.symbol, "tier": tier} for tier, pos, _ in crossings],
+            "items": items,
+            "handle_first": top.to_dict() if top else None,
+            "ack_id": lead_alert.get("ack_id") if lead_alert else None,
+            "channels": sorted(self._subscribers),
+        }
+        self.alerts.append(alert)
+        await self._emit("alert", alert)
+        order = " > ".join(t["symbol"] for t in items)
+        await self._add_audit("alert_triage", top_pos.symbol, f"{len(items)} positions at risk, handle in order: {order}")
+
+    async def _check_portfolio(self) -> None:
+        """Sizing and correlation/stress warnings, once per state change (like the live monitor)."""
+        insights = self.insights()
+        oversized = {s.symbol for s in insights.oversized}
+        new = oversized - self._oversized
+        self._oversized = oversized
+        if new:
+            await self._fire_portfolio_alert("sizing", insights, sorted(new))
+        worst = insights.worst_stress()
+        band = stress_band(worst.first_liquidation if worst else None)
+        flagged = insights.concentration.flagged
+        worse = band is not None and (self._stress_band is None or TIERS.index(band) > TIERS.index(self._stress_band))
+        if worse or (flagged and not self._concentration_flagged):
+            await self._fire_portfolio_alert("correlation", insights, band=band)
+        if worse:
+            self._stress_band = band
+        self._concentration_flagged = flagged
+
+    async def _fire_portfolio_alert(self, level: str, insights: PortfolioInsights,
+                                    symbols: Optional[list[str]] = None, band: Optional[str] = None) -> None:
+        self._alert_seq += 1
+        data = insights.to_dict()
+        alert = {
+            "id": f"al_{self._alert_seq:03d}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sim_time": self.sim_now.isoformat(),
+            "step": self.step,
+            "level": level,
+            "channels": sorted(self._subscribers),
+        }
+        if level == "sizing":
+            checks = [s for s in data["sizing"] if s["symbol"] in symbols]
+            alert.update(symbol=checks[0]["symbol"], venue=checks[0]["venue"], side=checks[0]["side"],
+                         symbols=symbols, sizing=checks)
+            detail = "oversized for the account: " + ", ".join(
+                f"{c['symbol']} (risk {c['risk_pct']:.1f}% of equity, suggest {c['suggested_size']:g})" for c in checks)
+        else:
+            worst = insights.worst_stress()
+            stress = worst.to_dict() if worst else None
+            comps = [c for c in data["comparisons"] if worst is None or c["symbol"] in worst.symbols]
+            alert.update(symbol=(worst.symbols[0] if worst else None), venue=(worst.venue if worst else None),
+                         severity=band, stress=stress, concentration=data["concentration"], comparisons=comps)
+            detail = (f"a {abs(worst.first_liquidation):.1f}% correlated market move liquidates the {worst.venue} account"
+                      if worst and worst.first_liquidation is not None else "concentrated book")
+            if insights.concentration.flagged:
+                detail += f"; {insights.concentration.message()}"
+        self.alerts.append(alert)
+        await self._emit("alert", alert)
+        await self._add_audit(f"{level}_warning", alert.get("symbol"), detail)
 
     async def _check_protection(self) -> None:
         """Stop-loss sanity and ADL, once per state change per position (like the live monitor)."""
@@ -931,9 +1142,14 @@ class MarketSimulation:
                               f"{ack.severity} alert acknowledged from {source} after {ack.reminders_sent} reminder(s)", source)
         return event
 
-    async def _fire_alert(self, level: str, pos: Position, protection: Optional[PositionProtection] = None) -> None:
+    async def _fire_alert(self, level: str, pos: Position, protection: Optional[PositionProtection] = None,
+                          insights: Optional[PortfolioInsights] = None, consolidated: Optional[str] = None,
+                          advise: bool = True) -> dict:
         self._alert_seq += 1
         protection = protection or self.protection(pos)
+        insights = insights or self.insights()
+        priority = insights.priority(pos)
+        top = insights.top
         plan = self.build_rescue_plan(pos.symbol)
         margin = plan.margin_advice()
         alert = {
@@ -953,16 +1169,28 @@ class MarketSimulation:
             "wicks": protection.to_dict()["wicks"],
             "mark_price": round(pos.mark_price, 4),
             "liquidation_price": round(pos.liquidation_price, 4),
+            "priority": priority.to_dict() if priority else None,
+            "handle_first": top.to_dict() if top else None,
             "channels": sorted(self._subscribers),
         }
-        self._open_escalation(level, pos, alert)
+        comparison = insights.comparison(pos)
+        if comparison is not None and comparison.correlated_market_move_pct is not None:
+            alert["liq_comparison"] = comparison.to_dict()
+        if consolidated:
+            alert["consolidated"] = consolidated
+        if advise:
+            self._open_escalation(level, pos, alert)
         self.alerts.append(alert)
         await self._emit("alert", alert)
         await self._add_audit(
             f"alert_{level}", pos.symbol,
-            f"{pos.distance_to_liquidation_pct:.1f}% from liquidation → sent to {', '.join(alert['channels']) or 'no channels'}",
+            f"{pos.distance_to_liquidation_pct:.1f}% from liquidation"
+            + (f" (#{priority.rank} of {priority.of})" if priority else "")
+            + f" → sent to {', '.join(alert['channels']) or 'no channels'}",
         )
-        self._spawn(self._generate_advice(alert, pos, margin, plan))
+        if advise:
+            self._spawn(self._generate_advice(alert, pos, margin, plan))
+        return alert
 
     async def _generate_advice(self, alert: dict, pos: Position, margin, plan: RescuePlan) -> None:
         explanation, summary, mock = None, None, True

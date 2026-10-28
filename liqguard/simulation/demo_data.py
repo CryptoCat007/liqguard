@@ -34,6 +34,8 @@ DEMO_WICKS: dict[str, WickProfile] = {
     "ETHUSDT": _profile(Venue.BINANCE, "ETHUSDT", (0.24, 2.4, 0.22, 2.6), (0.58, 4.4, 0.55, 4.9)),
     "SOLUSDT": _profile(Venue.BINANCE, "SOLUSDT", (0.35, 5.8, 0.33, 4.1), (0.85, 11.5, 0.80, 7.9)),
     "TSLAUSDT": _profile(Venue.BINANCE, "TSLAUSDT", (0.12, 1.4, 0.12, 1.2), (0.30, 2.9, 0.28, 2.4)),
+    "DOGEUSDT": _profile(Venue.BINANCE, "DOGEUSDT", (0.32, 4.6, 0.30, 3.8), (0.78, 9.2, 0.74, 7.1)),
+    "AVAXUSDT": _profile(Venue.BINANCE, "AVAXUSDT", (0.30, 4.1, 0.29, 3.5), (0.74, 8.4, 0.70, 6.6)),
 }
 
 # BTC's stop sits below its liquidation price from the start; ETH has no stop;
@@ -43,6 +45,14 @@ DEMO_SIM_ORDERS: tuple[OpenOrder, ...] = (
     OpenOrder(Venue.BINANCE, "BTCUSDT", Side.SHORT, STOP_MARKET, trigger_price=45_000.0, close_position=True, order_id="demo-1"),
     OpenOrder(Venue.BINANCE, "SOLUSDT", Side.SHORT, STOP_MARKET, trigger_price=128.0, quantity=150.0, reduce_only=True, order_id="demo-2"),
     OpenOrder(Venue.BINANCE, "TSLAUSDT", Side.SHORT, STOP_MARKET, trigger_price=236.0, quantity=40.0, reduce_only=True, order_id="demo-3"),
+)
+
+
+# "5 longs, one wallet": BTC's stop starts far above its (displayed) liquidation
+# price, but as all five coins fall together the shared wallet drains and the
+# liquidation price climbs through it. The other four have no stop at all.
+CROSS_LONGS_ORDERS: tuple[OpenOrder, ...] = (
+    OpenOrder(Venue.BINANCE, "BTCUSDT", Side.SHORT, STOP_MARKET, trigger_price=55_500.0, close_position=True, order_id="demo-11"),
 )
 
 
