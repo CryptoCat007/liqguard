@@ -97,7 +97,7 @@ def register_auth_routes(app: FastAPI, ctx: Optional[AppContext], auth: SessionA
         if identity is None:
             return RedirectResponse("/login?error=widget", status_code=303)
         if await ctx.storage.get_user(identity.user_id) is None:
-            await ctx.storage.save_user(User(telegram_id=identity.user_id, username=identity.username))
+            await ctx.storage.save_user(User(telegram_id=identity.user_id, username=identity.username, threshold=ctx.settings.default_threshold()))
         logger.info("Dashboard login via Telegram widget for user %s", identity.user_id)
         return await auth.start_session(identity.user_id, identity.username)
 

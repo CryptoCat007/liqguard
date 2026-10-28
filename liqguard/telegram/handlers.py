@@ -68,7 +68,7 @@ class BotHandlers:
     async def get_or_create_user(self, message: Message) -> User:
         user = await self.storage.get_user(message.from_user.id)
         if not user:
-            user = User(telegram_id=message.from_user.id, username=message.from_user.username)
+            user = User(telegram_id=message.from_user.id, username=message.from_user.username, threshold=self.ctx.settings.default_threshold())
             await self.storage.save_user(user)
         return user
 

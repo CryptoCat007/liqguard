@@ -13,10 +13,14 @@ from liqguard.risk import (
     RiskAssessment,
     RiskContext,
     RiskEngine,
+    StopCheck,
+    position_protection,
     pre_funding_warning,
 )
 
+from .escalation import ESCALATING, EscalationService, ack_action
 from .manager import AlertManager
+from .messages import format_adl_message, format_stop_message, thresholds_line, wick_line
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +53,18 @@ def rescue_action(position: Position) -> Action:
     return ("🛟 Rescue options", f"rescue:{position.venue.value}:{position.symbol}")
 
 
-def format_alert_message(position: Position, assessment: RiskAssessment, explanation: str) -> str:
+def format_alert_message(position: Position, assessment: RiskAssessment, explanation: str,
+                         protection: Optional[dict] = None) -> str:
     emoji = SEVERITY_EMOJI.get(assessment.risk_level_str, "❓")
     message = (
         f"{emoji} **{assessment.risk_level_str} ALERT**\n\n"
         f"**{position.symbol}** {position.side.value.upper()}\n"
-        f"Distance to liquidation: **{assessment.distance_to_liquidation_pct:.1f}%**\n\n"
-        f"{explanation}\n\n"
+        f"Distance to liquidation: **{assessment.distance_to_liquidation_pct:.1f}%**\n"
     )
+    for line in (wick_line((protection or {}).get("wicks")), thresholds_line((protection or {}).get("thresholds"))):
+        if line:
+            message += f"{line}\n"
+    message += f"\n{explanation}\n\n"
     if assessment.margin_to_safety > 0:
         message += f"💰 Add **${assessment.margin_to_safety:,.2f}** margin for safety"
     return message
@@ -100,6 +108,7 @@ class PositionMonitor:
         explainer: Explainer,
         poll_interval: int = 30,
         prefunding_lead_minutes: float = 30.0,
+        escalation: Optional[EscalationService] = None,
     ):
         self._users = users
         self._positions = positions
@@ -110,6 +119,9 @@ class PositionMonitor:
         self.prefunding_lead_minutes = prefunding_lead_minutes
         self._task: Optional[asyncio.Task] = None
         self._prefunding_sent: dict[tuple[int, str, str, datetime], datetime] = {}
+        self.escalation = escalation
+        self._stop_state: dict[tuple[int, str, str], tuple] = {}
+        self._adl_state: dict[tuple[int, str, str], int] = {}
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -147,10 +159,26 @@ class PositionMonitor:
             positions, context = result, None
         else:
             positions, context = result.positions, result.context
-        engine = RiskEngine(user.threshold, context)
+        ctx = context if context is not None else RiskContext()
         sent = 0
         for position in positions:
+            protection = position_protection(position, ctx, user.threshold)
+            info = protection.to_dict()
+            engine = RiskEngine(protection.adaptive.threshold, context)
             assessment = engine.assess_position(position)
+            severity = assessment.severity.value if assessment.severity else None
+            if self.escalation is not None:
+                if severity in ESCALATING:
+                    self.escalation.tracker.update(user.telegram_id, position.venue.value, position.symbol,
+                                                   assessment.distance_to_liquidation_pct)
+                else:
+                    self.escalation.tracker.resolve(user.telegram_id, position.venue.value, position.symbol)
+            if protection.stop is not None:
+                sent += await self._check_stop(user, position, protection.stop)
+            if protection.adl.warn:
+                sent += await self._check_adl(user, position, info["adl"])
+            else:
+                self._adl_state.pop((user.telegram_id, position.venue.value, position.symbol), None)
             if assessment.severity is None:
                 continue
             alert = engine.create_alert(assessment)
@@ -162,15 +190,48 @@ class PositionMonitor:
                     assessment.severity,
                     user.language,
                 )
-                await self.notifier.notify(
-                    user.telegram_id,
-                    format_alert_message(position, assessment, explanation),
-                    actions=[rescue_action(position)],
-                )
+                text = format_alert_message(position, assessment, explanation, info)
+                actions = [rescue_action(position)]
+                if self.escalation is not None and severity in ESCALATING:
+                    ack = self.escalation.open(user.telegram_id, position.venue.value, position.symbol, severity, text,
+                                               user.threshold, assessment.distance_to_liquidation_pct)
+                    if ack is not None:
+                        actions.insert(0, ack_action(ack))
+                await self.notifier.notify(user.telegram_id, text, actions=actions)
                 sent += 1
         if context is not None:
             sent += await self._check_prefunding(user, positions, context)
         return sent
+
+    async def _check_stop(self, user: User, position: Position, check: StopCheck) -> int:
+        """Warn as soon as a position has no stop or a stop the liquidation engine beats; again only if that changes."""
+        key = (user.telegram_id, position.venue.value, position.symbol)
+        if not check.needs_warning:
+            self._stop_state.pop(key, None)
+            return 0
+        state = (check.status, None if check.stop_price is None else round(check.stop_price, 6))
+        if self._stop_state.get(key) == state:
+            return 0
+        self._stop_state[key] = state
+        explanation = None
+        explain = getattr(self.explainer, "explain_stop_fix", None)
+        if explain is not None:
+            try:
+                explanation = await explain(check, user.language)
+            except Exception as e:
+                logger.error("Stop-loss explanation failed: %s", type(e).__name__)
+        await self.notifier.notify(user.telegram_id, format_stop_message(check.to_dict(), explanation),
+                                   actions=[rescue_action(position)])
+        return 1
+
+    async def _check_adl(self, user: User, position: Position, adl: dict) -> int:
+        key = (user.telegram_id, position.venue.value, position.symbol)
+        if self._adl_state.get(key, 0) >= adl["lights"]:
+            return 0
+        self._adl_state[key] = adl["lights"]
+        await self.notifier.notify(user.telegram_id, format_adl_message(
+            position.symbol, position.venue.value, position.side.value, adl, position.unrealized_pnl))
+        return 1
 
     async def _check_prefunding(self, user: User, positions: list[Position], context: RiskContext) -> int:
         """One pre-funding warning per position per settlement."""
