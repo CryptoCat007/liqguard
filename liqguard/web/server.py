@@ -21,14 +21,14 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from liqguard.ai import MetaLLMClient
 from liqguard.auth import SessionClaims
 from liqguard.core import AppContext
-from liqguard.risk import PortfolioAnalyzer
+from liqguard.risk import PortfolioAnalyzer, RescueSimulator
 from liqguard.simulation import MarketSimulation
 
 from .auth import SessionAuth, register_auth_routes
@@ -152,13 +152,16 @@ def create_app(
 
     @app.get("/api/health")
     async def health():
-        return {
+        body = {
             "status": "ok",
             "demo": True,
             "muse_mode": public_sim.snapshot()["muse_mode"],
             "state": public_sim.state,
             "login_enabled": ctx is not None,
         }
+        if ctx is not None:
+            body["funding_feeds"] = ctx.market.status()
+        return body
 
     # ---------------------------------------------------------------- simulation routes
 
@@ -184,6 +187,13 @@ def create_app(
         @app.get(f"{prefix}/audit")
         async def audit(sim: MarketSimulation = Depends(resolve)):
             return JSONResponse(sim.audit)
+
+        @app.get(f"{prefix}/rescue")
+        async def rescue(symbol: str = Query(..., max_length=32), sim: MarketSimulation = Depends(resolve)):
+            result = await sim.rescue_plan(symbol)
+            if result is None:
+                raise HTTPException(404, "No such position in this simulation")
+            return JSONResponse(result)
 
         @app.post(f"{prefix}/simulate", dependencies=[Depends(require_csrf)])
         async def simulate(sim: MarketSimulation = Depends(guard)):
@@ -227,8 +237,12 @@ def create_app(
             user = await ctx.storage.get_user(claims.user_id)
             if user is None:
                 return {"bindings": [], "positions": None, "label": "", "actions": [], "demo_mode": False}
-            positions, label = await ctx.positions.positions_for(user)
-            overview = PortfolioAnalyzer(user.threshold).analyze_portfolio(positions).to_dict() if positions else None
+            snapshot = await ctx.positions.snapshot_for(user)
+            positions, label = snapshot.positions, snapshot.label
+            overview = (
+                PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(positions).to_dict()
+                if positions else None
+            )
             return {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
@@ -237,6 +251,27 @@ def create_app(
                 "actions": await ctx.storage.list_audit(claims.user_id, limit=50),
                 "protect_enabled": ctx.actions.is_enabled(),
             }
+
+        @app.get("/api/me/rescue/live")
+        async def my_live_rescue(
+            symbol: str = Query(..., max_length=32),
+            venue: str = Query(..., max_length=16),
+            claims: SessionClaims = Depends(auth.required),
+        ):
+            """Rescue options for one of the signed-in user's own positions (their demo book or exchange bindings)."""
+            user = await ctx.storage.get_user(claims.user_id)
+            if user is None:
+                raise HTTPException(404, "No such position")
+            snapshot = await ctx.positions.snapshot_for(user)
+            position = next((p for p in snapshot.positions if p.symbol == symbol and p.venue.value == venue), None)
+            if position is None:
+                raise HTTPException(404, "No such position")
+            context = snapshot.context
+            plan = RescueSimulator(context.fees, user.threshold.safety_target_pct).simulate(
+                position, context.account_for(position), context.funding_for(position), context.now
+            )
+            explanation = await ctx.llm.explain_rescue(plan, user.language)
+            return JSONResponse({"plan": plan.to_dict(), "explanation": explanation})
 
     # ---------------------------------------------------------------- websockets
 

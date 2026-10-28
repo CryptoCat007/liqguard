@@ -1,13 +1,18 @@
 "use strict";
 
 const COLORS = {
-  safe: "#34d399", warning: "#fbbf24", critical: "#fb923c", emergency: "#f43f5e",
+  safe: "#34d399", warning: "#fbbf24", critical: "#fb923c", emergency: "#f43f5e", funding: "#a78bfa",
   grid: "rgba(148,163,184,0.08)", tick: "#5b667a", text: "#8a96ab",
 };
 const SYMBOL_COLORS = { BTCUSDT: "#f7931a", ETH: "#8b9cff", ETHUSDT: "#8b9cff", SOLUSDT: "#14f195" };
 const FALLBACK_COLORS = ["#38bdf8", "#f472b6", "#a3e635", "#facc15"];
 const TIERS = ["warning", "critical", "emergency"];
-const LEVEL_ICON = { warning: "⚠️", critical: "🚨", emergency: "🆘" };
+const LEVEL_ICON = { warning: "⚠️", critical: "🚨", emergency: "🆘", funding: "⏳" };
+const OPTION_META = {
+  add_margin: { icon: "💰", label: "Add margin" },
+  reduce: { icon: "✂️", label: "Reduce" },
+  hedge: { icon: "🛡", label: "Hedge" },
+};
 const MODE = location.pathname.startsWith("/me") ? "me" : "demo";
 const API = MODE === "me" ? "/api/me" : "/api/demo";
 const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
@@ -15,7 +20,8 @@ const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
 const S = {
   history: {}, tierPrices: {}, thresholds: { warning: 20, critical: 10, emergency: 5 },
   totalSteps: 40, tick: 0.75, step: 0, state: "idle", order: [], view: "distance",
-  overview: null, counts: { warning: 0, critical: 0, emergency: 0 }, lastSeverity: {},
+  overview: null, counts: { warning: 0, critical: 0, emergency: 0, funding: 0 }, lastSeverity: {},
+  minutesPerStep: null, wallets: {}, fundingEvents: [], fundingSteps: {}, rescue: null,
 };
 let chart = null;
 let ws = null;
@@ -71,7 +77,13 @@ function tierFor(distance) {
   if (distance <= t.warning) return "warning";
   return "safe";
 }
-function venueLabel(v) { return v === "hyperliquid" ? "Hyperliquid" : v === "binance" ? "Binance" : v; }
+function venueLabel(v) { return v === "hyperliquid" ? "Hyperliquid" : v === "binance" ? "Binance" : v === "demo" ? "Demo" : v; }
+function duration(minutes) {
+  if (minutes == null) return "—";
+  const m = Math.max(0, Math.round(minutes));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`;
+}
+function distText(d, noLiq) { return noLiq || d == null ? "no liq" : pct(d); }
 function empty(glyph, title, body) {
   return el("div", { class: "empty" }, el("div", { class: "glyph" }, glyph), el("b", {}, title), el("div", {}, body));
 }
@@ -88,8 +100,16 @@ function applySnapshot(snap) {
   S.tierPrices = snap.tier_prices || {};
   S.safetyTarget = snap.safety_target_pct;
   S.order = Object.keys(S.history);
-  S.counts = { warning: 0, critical: 0, emergency: 0 };
+  S.counts = { warning: 0, critical: 0, emergency: 0, funding: 0 };
   S.lastSeverity = {};
+  S.minutesPerStep = snap.minutes_per_step || null;
+  S.wallets = snap.wallets || {};
+  S.fundingEvents = snap.funding_events || [];
+  S.fundingSteps = {};
+  for (const [sym, pts] of Object.entries(S.history)) {
+    S.fundingSteps[sym] = new Set(pts.filter((p) => p.funding_paid_usd != null).map((p) => p.step));
+  }
+  S.rescue = null;
   if (S.view !== "distance" && !S.order.includes(S.view)) S.view = "distance";
 
   $("musePill").textContent = snap.muse_mode === "live" ? "Muse · live" : "Muse · mock";
@@ -114,6 +134,9 @@ function applySnapshot(snap) {
 
   buildTabs();
   buildChart();
+  renderFunding();
+  buildRescueTabs();
+  renderRescue();
   setStatus({ state: snap.state, step: snap.step, total_steps: snap.total_steps });
 }
 
@@ -139,6 +162,10 @@ function handle(msg) {
     case "audit":
       addAudit(data);
       break;
+    case "funding":
+      S.fundingEvents.push(data);
+      renderFunding();
+      break;
     case "status":
       setStatus(data);
       break;
@@ -150,8 +177,11 @@ function onTick(data) {
   for (const [sym, p] of Object.entries(data.prices)) {
     (S.history[sym] ||= []).push(p);
     S.tierPrices[sym] = p.tier_prices;
+    if (p.funding_paid_usd != null) (S.fundingSteps[sym] ||= new Set()).add(p.step);
   }
+  if (data.wallets) S.wallets = data.wallets;
   renderOverview(data.overview);
+  renderFunding();
   updateChart(data);
   setProgress();
 }
@@ -270,23 +300,83 @@ function renderPositions(positions) {
       el("div", { class: "gauge-labels" }, ...labels),
       el("div", { class: "pos-meta" },
         el("span", {}, `mark ${price(p.mark_price)}`),
-        el("span", {}, `liq ${price(p.liquidation_price)}`),
+        el("span", {}, `liq ${price(p.true_liquidation?.price ?? p.liquidation_price)}`),
         el("span", { class: p.unrealized_pnl >= 0 ? "pos" : "neg" }, money(p.unrealized_pnl, { signed: true })),
+      ),
+      liqDetail(p),
+      fundingDetail(p.funding),
+      el("div", { class: "pos-actions" },
+        el("button", {
+          class: "mini-btn", type: "button", title: "Compare add margin, reduce and hedge",
+          onclick: (ev) => { ev.stopPropagation(); loadRescue(sym); },
+        }, "🛟 Rescue"),
       ),
     );
     return node;
   }));
 }
 
+function liqDetail(p) {
+  const t = p.true_liquidation;
+  if (!t) return null;
+  const parts = t.margin_mode === "cross"
+    ? [`cross wallet ${money(t.wallet_balance)}`, `other PnL ${money(t.other_upnl, { signed: true })}`, `other maint. ${money(t.other_maintenance)}`]
+    : [`isolated margin ${money(t.wallet_balance)}`];
+  const ex = t.exchange_price, diff = ex && t.price ? Math.abs(ex - t.price) / ex : 0;
+  if (diff > 0.0005) parts.push(`exchange ${price(ex)}`);
+  return el("div", { class: "pos-detail" },
+    el("span", { class: `mode mode-${t.margin_mode}` }, t.margin_mode.toUpperCase()),
+    el("span", {}, `true liq ${t.price ? price(t.price) : "none"} · ${parts.join(" · ")}`),
+  );
+}
+
+function fundingDetail(f) {
+  if (!f) return null;
+  const pays = f.next_payment_usd > 0;
+  const drift = (f.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ");
+  return el("div", { class: "pos-detail funding-line" },
+    el("span", { class: "mode mode-funding" }, `${f.rate_pct >= 0 ? "+" : ""}${f.rate_pct.toFixed(4)}%/${f.interval_hours}h`),
+    el("span", {}, `${pays ? "pays" : "receives"} ${money(Math.abs(f.next_payment_usd), { dp: 2 })} in ${duration(f.minutes_to_settlement)} · drift ${drift} `,
+      el("i", {}, f.label)),
+  );
+}
+
 /* ---------------- timeline / advice / audit ---------------- */
 
 function clearEmpty(box) { const e = box.querySelector(".empty"); if (e) e.remove(); }
+
+function addFundingAlert(a, opts) {
+  const f = a.funding;
+  const box = $("timeline");
+  box.prepend(el("li", { class: "tl-item tl-funding" },
+    el("span", { class: "tl-node" }),
+    el("div", { class: "tl-head" },
+      el("span", { class: "lvl lvl-funding-b" }, "PRE-FUNDING"),
+      el("span", { class: "tl-sym", style: { color: symbolColor(a.symbol) } }, a.symbol),
+      el("span", { class: `side side-${a.side}` }, a.side.toUpperCase()),
+      el("span", { class: "tl-time" }, clock(a.timestamp)),
+    ),
+    el("div", { class: "tl-body" },
+      "Pays ", el("b", {}, money(f.payment_usd, { dp: 2 })), ` in ${duration(f.minutes_to_settlement)} (${f.rate_pct.toFixed(4)}%/${f.interval_hours}h) — distance `,
+      el("b", {}, pct(f.distance_before_pct)), " → ", el("b", {}, pct(f.distance_after_pct)),
+      ` · ${f.buffer_share_pct.toFixed(1)}% of the margin buffer`,
+    ),
+    el("div", { class: "chips" },
+      ...(a.channels || []).map((c) => el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c)),
+      el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(a.symbol) }, "🛟 Rescue"),
+    ),
+  ));
+  if (!opts.quiet) {
+    toast("⏳", `PRE-FUNDING · ${a.symbol}`, `Pays ${money(f.payment_usd, { dp: 2 })} in ${duration(f.minutes_to_settlement)} → ${pct(f.distance_after_pct)} from liquidation`, COLORS.funding);
+  }
+}
 
 function addAlert(a, opts = {}) {
   const box = $("timeline");
   clearEmpty(box);
   S.counts[a.level] = (S.counts[a.level] || 0) + 1;
   updateCounts();
+  if (a.level === "funding") { addFundingAlert(a, opts); return; }
   const chips = (a.channels || []).map((c) => el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c));
   box.prepend(el("li", { class: `tl-item tl-${a.level}` },
     el("span", { class: "tl-node" }),
@@ -317,6 +407,7 @@ function updateCounts() {
   $("cntWarning").textContent = S.counts.warning;
   $("cntCritical").textContent = S.counts.critical;
   $("cntEmergency").textContent = S.counts.emergency;
+  $("cntFunding").textContent = S.counts.funding;
 }
 
 function addAdvice(c) {
@@ -346,8 +437,24 @@ function addAdvice(c) {
     c.summary ? el("div", { class: "adv-summary" }, c.summary) : null,
     el("div", { class: "adv-text" }, c.explanation),
     actions.length ? el("div", { class: "adv-actions" }, ...actions) : null,
+    c.rescue ? rescueMini(c) : null,
     el("div", { class: "adv-foot" }, "Suggestion only · confirm in Telegram · testnet execution"),
   ));
+  if (c.rescue && (!S.rescue || S.rescue.auto)) showRescue(c.symbol, { plan: c.rescue, explanation: c.rescue_explanation }, { auto: true });
+}
+
+function rescueMini(c) {
+  const plan = c.rescue;
+  return el("div", { class: "adv-rescue" },
+    el("div", { class: "adv-act-label" }, "Rescue options · cost incl. fees + 24h funding"),
+    ...plan.options.map((o) => el("div", { class: `rm-row${o.kind === plan.recommended ? " best" : ""}` },
+      el("span", {}, `${OPTION_META[o.kind].icon} ${OPTION_META[o.kind].label}`),
+      el("span", {}, distText(o.new_distance_pct, o.no_liquidation)),
+      el("span", {}, money(o.costs.total_cost_usd, { dp: 2 })),
+      o.kind === plan.recommended ? el("span", { class: "star" }, "★") : el("span", {}),
+    )),
+    el("button", { class: "mini-btn", type: "button", onclick: () => showRescue(c.symbol, { plan, explanation: c.rescue_explanation }) }, "Open in rescue simulator"),
+  );
 }
 
 function addAudit(e) {
@@ -373,6 +480,165 @@ function toast(icon, title, body, color) {
   box.append(t);
   while (box.children.length > 4) box.firstChild.remove();
   setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 320); }, 4200);
+}
+
+/* ---------------- funding & wallets ---------------- */
+
+function renderFunding() {
+  const wallets = $("wallets");
+  const entries = Object.entries(S.wallets || {});
+  wallets.replaceChildren(...entries.map(([venue, w]) => el("div", { class: "wallet" },
+    el("span", { class: `venue venue-${venue}` }, venueLabel(venue)),
+    el("span", { class: "wallet-label" }, "cross wallet"),
+    el("b", {}, money(w, { dp: 2 })),
+  )));
+  wallets.hidden = !entries.length;
+
+  const box = $("funding");
+  const positions = (S.overview?.positions || []).filter((p) => p.funding);
+  const sources = new Set(positions.map((p) => p.funding.source));
+  $("fundingTag").textContent = sources.has("live") ? "LIVE RATES" : "DEMO RATES";
+  $("fundingTag").className = `tag${sources.has("live") ? " tag-ro" : ""}`;
+  const rows = positions.map((p) => {
+    const f = p.funding, pays = f.next_payment_usd > 0;
+    return el("div", { class: "fund-row" },
+      el("div", { class: "fund-top" },
+        el("b", { style: { color: symbolColor(p.symbol) } }, p.symbol),
+        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
+        el("span", { class: "fund-rate" }, `${f.rate_pct >= 0 ? "+" : ""}${f.rate_pct.toFixed(4)}% / ${f.interval_hours}h`),
+        el("span", { class: "fund-apr" }, `${f.annualized_pct.toFixed(1)}% APR`),
+      ),
+      el("div", { class: "fund-meta" },
+        `next settlement in ${duration(f.minutes_to_settlement)} · `,
+        el("span", { class: pays ? "neg" : "pos" }, `${pays ? "pays" : "receives"} ${money(Math.abs(f.next_payment_usd), { dp: 2 })}`),
+      ),
+      el("div", { class: "fund-drift" },
+        el("span", {}, "liq distance now ", el("b", {}, pct(p.distance_to_liquidation_pct))),
+        ...(f.drift || []).map((d) => el("span", {}, `${d.horizon_hours}h `, el("b", {}, distText(d.distance_pct, d.liquidation_price == null)),
+          ` (${d.settlements}× · pool ${money(d.pool_payment_usd, { signed: true })})`)),
+        el("i", {}, f.label),
+      ),
+    );
+  });
+  const events = S.fundingEvents.slice(-6).reverse().map((e) => el("div", { class: "fund-ev" },
+    el("span", { class: "fund-ev-sym", style: { color: symbolColor(e.symbol) } }, `▲ ${e.symbol}`),
+    el("span", {}, `${e.payment_usd > 0 ? "paid" : "received"} ${money(Math.abs(e.payment_usd), { dp: 2 })}`),
+    el("span", { class: "fund-ev-liq" }, `liq ${price(e.liquidation_before)} → ${price(e.liquidation_after)}`),
+  ));
+  box.replaceChildren(...rows);
+  if (!rows.length) box.append(empty("💸", "No funding data", "Funding rates appear once positions have a rate."));
+  if (events.length) box.append(el("div", { class: "account-label fund-ev-head" }, "Recent settlements"), ...events);
+}
+
+/* ---------------- rescue simulator ---------------- */
+
+function buildRescueTabs() {
+  const tabs = $("rescueTabs");
+  const active = S.rescue?.symbol;
+  tabs.replaceChildren(...S.order.map((sym) => el("button", {
+    class: `tab${active === sym && !S.rescue?.live ? " active" : ""}`, type: "button", role: "tab", onclick: () => loadRescue(sym),
+  }, sym)));
+}
+
+async function loadRescue(symbol) {
+  S.rescue = { symbol, loading: true };
+  buildRescueTabs();
+  renderRescue();
+  $("rescueCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  try {
+    const r = await fetch(`${API}/rescue?symbol=${encodeURIComponent(symbol)}`, { credentials: "same-origin" });
+    if (r.status === 401) { toLogin(); return; }
+    if (!r.ok) throw new Error(`${r.status}`);
+    showRescue(symbol, await r.json());
+  } catch (err) {
+    S.rescue = { symbol, error: "Could not load rescue options. Try again in a moment." };
+    renderRescue();
+  }
+}
+
+async function loadLiveRescue(symbol, venue) {
+  S.rescue = { symbol, loading: true, live: true };
+  renderRescue();
+  $("rescueCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  try {
+    const r = await fetch(`/api/me/rescue/live?symbol=${encodeURIComponent(symbol)}&venue=${encodeURIComponent(venue)}`, { credentials: "same-origin" });
+    if (r.status === 401) { toLogin(); return; }
+    if (!r.ok) throw new Error(`${r.status}`);
+    showRescue(symbol, await r.json(), { live: true });
+  } catch (err) {
+    S.rescue = { symbol, live: true, error: "Could not load rescue options for this position." };
+    renderRescue();
+  }
+}
+
+function showRescue(symbol, data, opts = {}) {
+  S.rescue = { symbol, plan: data.plan, explanation: data.explanation, auto: !!opts.auto, live: !!opts.live };
+  buildRescueTabs();
+  renderRescue();
+}
+
+function renderRescue() {
+  const body = $("rescueBody");
+  const r = S.rescue;
+  if (!r) {
+    body.replaceChildren(empty("🛟", "Pick a position", "Choose a symbol above, tap 🛟 on a position, or wait for the first alert — its rescue plan opens here."));
+    return;
+  }
+  if (r.loading) { body.replaceChildren(empty("⏳", `Simulating ${r.symbol}…`, "Computing add margin, reduce and hedge.")); return; }
+  if (r.error) { body.replaceChildren(empty("⚠️", "Rescue unavailable", r.error)); return; }
+
+  const plan = r.plan, cur = plan.current, ex = r.explanation;
+  $("rescueSub").textContent = `${r.live ? "Your account · live data" : "Demo position"} · target ${plan.target_distance_pct}% from liquidation · funding ${plan.funding_label}`;
+  const trade = Object.fromEntries((ex?.trade_offs || []).map((t) => [t.option, t]));
+
+  const head = el("div", { class: "rs-head" },
+    el("span", { class: "pos-sym", style: { color: symbolColor(plan.symbol) } }, plan.symbol),
+    el("span", { class: `venue venue-${plan.venue}` }, venueLabel(plan.venue)),
+    el("span", { class: `side side-${plan.side}` }, plan.side.toUpperCase()),
+    el("span", { class: `mode mode-${plan.margin_mode}` }, plan.margin_mode.toUpperCase()),
+    el("span", { class: "rs-now" }, `mark ${price(plan.mark_price)} · liq ${price(cur.price)} · `,
+      el("b", { class: `c-${tierFor(cur.distance_pct)}` }, distText(cur.distance_pct, cur.price == null)), " away"),
+  );
+
+  const cols = plan.options.map((o) => {
+    const best = o.kind === plan.recommended;
+    const c = o.costs, t = trade[o.kind];
+    return el("div", { class: `rs-opt${best ? " best" : ""}${o.protects_liquidation ? "" : " weak"}` },
+      el("div", { class: "rs-opt-head" },
+        el("span", { class: "rs-kind" }, `${OPTION_META[o.kind].icon} ${OPTION_META[o.kind].label}`),
+        best ? el("span", { class: "tag tag-best" }, "RECOMMENDED") : null,
+        !o.protects_liquidation ? el("span", { class: "tag" }, "DOESN'T MOVE LIQ") : null,
+      ),
+      el("div", { class: "rs-title" }, o.title),
+      el("div", { class: "rs-liq" },
+        el("div", {}, el("div", { class: "adv-act-label" }, "New liquidation"), el("div", { class: "rs-big" }, o.new_liquidation_price ? price(o.new_liquidation_price) : "none")),
+        el("div", {}, el("div", { class: "adv-act-label" }, "Distance"), el("div", { class: `rs-big c-${o.reaches_target ? "safe" : tierFor(o.new_distance_pct)}` }, distText(o.new_distance_pct, o.no_liquidation))),
+      ),
+      el("dl", { class: "rs-costs" },
+        el("dt", {}, "Fees"), el("dd", {}, money(c.fees_usd, { dp: 2 })),
+        el("dt", {}, "Realized loss"), el("dd", {}, money(c.realized_loss_usd, { dp: 2 })),
+        el("dt", {}, "Funding 24h"), el("dd", {}, money(c.funding_24h_usd, { dp: 2, signed: true })),
+        el("dt", { class: "total" }, "Total cost"), el("dd", { class: "total" }, money(c.total_cost_usd, { dp: 2 })),
+        el("dt", {}, "Capital needed"), el("dd", {}, money(c.capital_required_usd, { dp: 2 })),
+      ),
+      t ? el("ul", { class: "rs-pc" },
+        ...t.pros.map((x) => el("li", { class: "pro" }, x)),
+        ...t.cons.map((x) => el("li", { class: "con" }, x)),
+      ) : null,
+      o.notes.length ? el("div", { class: "rs-notes" }, o.notes.join(" ")) : null,
+    );
+  });
+
+  body.replaceChildren(
+    head,
+    ex ? el("div", { class: "rs-muse" },
+      el("span", { class: "muse-glyph" }, "✦"),
+      el("div", {}, el("b", {}, ex.headline), el("div", { class: "rs-caveat" }, ex.caveat)),
+      el("span", { class: "tag" }, ex.mock ? "MUSE · MOCK" : "MUSE"),
+    ) : null,
+    el("div", { class: "rs-grid" }, ...cols),
+    el("div", { class: "adv-foot" }, "Simulation only · costs use taker fees and funding at the current rate · nothing is executed from the dashboard"),
+  );
 }
 
 /* ---------------- controls ---------------- */
@@ -450,7 +716,16 @@ function setView(v) {
 }
 
 function labels() {
+  if (S.minutesPerStep) {
+    return Array.from({ length: S.totalSteps + 1 }, (_, i) => {
+      const m = i * S.minutesPerStep;
+      return `+${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
+    });
+  }
   return Array.from({ length: S.totalSteps + 1 }, (_, i) => `${Math.round(i * S.tick)}s`);
+}
+function fundingPoint(sym, size) {
+  return (ctx) => (S.fundingSteps[sym]?.has(ctx.dataIndex) ? size : 0);
 }
 function series(sym, key) {
   const arr = new Array(S.totalSteps + 1).fill(null);
@@ -481,10 +756,13 @@ function buildChart() {
 
   if (S.view === "distance") {
     $("chartTitle").textContent = "Distance to liquidation";
-    $("chartSub").textContent = "All positions · shaded bands are the warning / critical / emergency tiers";
+    $("chartSub").textContent = S.minutesPerStep
+      ? `All positions · tier bands · ▲ funding settlement · simulated clock (${S.minutesPerStep} min per step)`
+      : "All positions · shaded bands are the warning / critical / emergency tiers";
     const datasets = S.order.map((sym) => ({
       label: sym, data: series(sym, "distance_pct"), borderColor: symbolColor(sym),
-      backgroundColor: symbolColor(sym), borderWidth: 2.5, pointRadius: 0, tension: 0.35, spanGaps: true,
+      backgroundColor: symbolColor(sym), borderWidth: 2.5, tension: 0.35, spanGaps: true,
+      pointRadius: fundingPoint(sym, 5), pointStyle: "triangle", pointBackgroundColor: COLORS.funding, pointBorderColor: COLORS.funding,
     }));
     const maxStart = Math.max(30, ...S.order.flatMap((s) => (S.history[s] || []).map((p) => p.distance_pct)));
     common.scales.y.min = 0;
@@ -492,7 +770,10 @@ function buildChart() {
     common.scales.y.ticks.callback = (v) => `${v}%`;
     common.plugins.tooltip.callbacks = { label: (i) => ` ${i.dataset.label}: ${i.raw?.toFixed(2)}%` };
     chart = new Chart($("chart"), { type: "line", data: { labels: labels(), datasets }, options: common, plugins: [tierBands] });
-    legend.replaceChildren(...S.order.map((s) => el("span", {}, el("i", { style: { background: symbolColor(s) } }), s)));
+    legend.replaceChildren(
+      ...S.order.map((s) => el("span", {}, el("i", { style: { background: symbolColor(s) } }), s)),
+      el("span", { style: { color: COLORS.funding } }, "▲ funding paid"),
+    );
     return;
   }
 
@@ -504,7 +785,7 @@ function buildChart() {
   const tp = S.tierPrices[sym] || {};
   const flat = (v) => new Array(S.totalSteps + 1).fill(v);
   $("chartTitle").textContent = `${sym} · price vs liquidation`;
-  $("chartSub").textContent = last ? `Liquidation at ${price(liq)} · tier lines show where each alert fires` : "";
+  $("chartSub").textContent = last ? `True liquidation now ${price(liq)} (moves with the shared wallet and funding) · ▲ settlement` : "";
 
   const ctx = $("chart").getContext("2d");
   const grad = ctx.createLinearGradient(0, 0, 0, 380);
@@ -513,10 +794,11 @@ function buildChart() {
 
   const datasets = [
     { label: "Mark price", data: series(sym, "mark_price"), borderColor: col, backgroundColor: grad, fill: { target: 1 }, borderWidth: 2.5, pointRadius: 0, tension: 0.35, spanGaps: true },
-    { label: "Liquidation", data: flat(liq), borderColor: COLORS.emergency, borderWidth: 2, borderDash: [6, 5], pointRadius: 0, fill: false },
+    { label: "True liquidation", data: series(sym, "liquidation_price"), borderColor: COLORS.emergency, borderWidth: 2, borderDash: [6, 5], fill: false, spanGaps: true, stepped: true,
+      pointRadius: fundingPoint(sym, 6), pointStyle: "triangle", pointBackgroundColor: COLORS.funding, pointBorderColor: COLORS.funding },
     ...TIERS.map((t) => ({ label: `${t[0].toUpperCase() + t.slice(1)} (${S.thresholds[t]}%)`, data: flat(tp[t]), borderColor: alpha(COLORS[t], 0.55), borderWidth: 1, borderDash: [3, 4], pointRadius: 0, fill: false })),
   ];
-  const vals = [...h.map((p) => p.mark_price), liq].filter((v) => v != null);
+  const vals = [...h.map((p) => p.mark_price), ...h.map((p) => p.liquidation_price)].filter((v) => v != null);
   const lo = Math.min(...vals), hi = Math.max(...vals), pad = (hi - lo) * 0.08 || hi * 0.02;
   common.scales.y.min = lo - pad;
   common.scales.y.max = hi + pad;
@@ -525,7 +807,8 @@ function buildChart() {
   chart = new Chart($("chart"), { type: "line", data: { labels: labels(), datasets }, options: common });
   legend.replaceChildren(
     el("span", {}, el("i", { style: { background: col } }), "Mark price"),
-    el("span", { style: { color: COLORS.emergency } }, el("i", { class: "dashed" }), "Liquidation"),
+    el("span", { style: { color: COLORS.emergency } }, el("i", { class: "dashed" }), "True liquidation"),
+    el("span", { style: { color: COLORS.funding } }, "▲ funding paid"),
     ...TIERS.map((t) => el("span", { style: { color: COLORS[t] } }, el("i", { class: "dashed" }), `${t} tier`)),
   );
 }
@@ -541,8 +824,10 @@ function updateChart(tick) {
     const p = tick.prices[S.view];
     if (!p) return;
     chart.data.datasets[0].data[p.step] = p.mark_price;
+    chart.data.datasets[1].data[p.step] = p.liquidation_price;
     const y = chart.options.scales.y;
-    if (p.mark_price > y.max || p.mark_price < y.min) { buildChart(); return; }
+    const out = (v) => v > y.max || v < y.min;
+    if (out(p.mark_price) || out(p.liquidation_price)) { buildChart(); return; }
   }
   chart.update("none");
 }
@@ -624,9 +909,17 @@ async function refreshAccount() {
   const positions = data.positions?.positions || [];
   box.replaceChildren(...positions.map((p) => el("div", { class: "acct-pos" },
     el("span", {}, el("b", {}, p.symbol), " ", el("span", { class: `side side-${p.side}` }, p.side.toUpperCase()), " ",
-      el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue))),
-    el("span", {}, `mark ${price(p.mark_price)} · liq ${price(p.liquidation_price)}`),
+      el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
+      p.margin_mode ? el("span", { class: `mode mode-${p.margin_mode}` }, p.margin_mode.toUpperCase()) : null),
+    el("span", {}, `mark ${price(p.mark_price)} · liq ${price(p.liquidation_price)}`,
+      p.true_liquidation?.price && Math.abs(p.true_liquidation.price - p.liquidation_price) / (p.liquidation_price || 1) > 0.0005
+        ? ` · true ${price(p.true_liquidation.price)}` : ""),
     el("span", { class: `d c-${tierFor(p.distance_to_liquidation_pct)}` }, pct(p.distance_to_liquidation_pct)),
+    el("button", { class: "mini-btn", type: "button", onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
+    p.funding ? el("span", { class: "acct-fund" },
+      `funding ${p.funding.rate_pct >= 0 ? "+" : ""}${p.funding.rate_pct.toFixed(4)}%/${p.funding.interval_hours}h · next ${duration(p.funding.minutes_to_settlement)} · `
+      + (p.funding.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ")
+      + ` (${p.funding.label})`) : null,
   )));
   if (!positions.length) box.append(empty("📭", "No open positions", data.label ? "Nothing open right now." : "Connect an exchange or enable /demo in Telegram."));
 

@@ -117,10 +117,35 @@
         <div class="card-head">
           <div>
             <div class="card-title">Positions</div>
-            <div class="card-sub">Distance to liquidation per position</div>
+            <div class="card-sub">True liquidation (cross margin aware) · funding drift at current rate</div>
           </div>
         </div>
         <div class="positions" id="positions"></div>
+      </div>
+    </section>
+
+    <section class="row-rescue">
+      <div class="card rescue-card" id="rescueCard">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Rescue simulator</div>
+            <div class="card-sub" id="rescueSub">Add margin vs reduce vs hedge · new liquidation, distance and full cost of each</div>
+          </div>
+          <div class="tabs" id="rescueTabs" role="tablist"></div>
+        </div>
+        <div class="rescue-body" id="rescueBody"></div>
+      </div>
+
+      <div class="card funding-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Funding &amp; wallets</div>
+            <div class="card-sub" id="fundingSub">Rates, next settlement and liquidation drift at current rate</div>
+          </div>
+          <span class="tag" id="fundingTag">DEMO RATES</span>
+        </div>
+        <div class="wallets" id="wallets"></div>
+        <div class="funding scroll" id="funding"></div>
       </div>
     </section>
 
@@ -129,9 +154,10 @@
         <div class="card-head">
           <div>
             <div class="card-title">Alert timeline</div>
-            <div class="card-sub">Three-tier alerts · same events as Telegram</div>
+            <div class="card-sub">Three-tier + pre-funding alerts · same events as Telegram</div>
           </div>
           <div class="tier-counts">
+            <span class="tc tc-funding" title="Pre-funding"><i></i><b id="cntFunding">0</b></span>
             <span class="tc tc-warning" title="Warning"><i></i><b id="cntWarning">0</b></span>
             <span class="tc tc-critical" title="Critical"><i></i><b id="cntCritical">0</b></span>
             <span class="tc tc-emergency" title="Emergency"><i></i><b id="cntEmergency">0</b></span>
