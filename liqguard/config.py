@@ -14,6 +14,13 @@ def _bool(value: Optional[str], default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _float(value: Optional[str], default: float) -> float:
+    try:
+        return float(value) if value not in (None, "") else default
+    except ValueError:
+        return default
+
+
 def _int(value: Optional[str], default: int) -> int:
     try:
         return int(value) if value not in (None, "") else default
@@ -41,6 +48,12 @@ class Settings:
 
     protect_enabled: bool = False
 
+    taker_fee_binance: float = 0.0005
+    taker_fee_hyperliquid: float = 0.00045
+    funding_refresh: int = 60
+    prefunding_lead_minutes: int = 30
+    rescue_target_pct: float = 30.0
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
         key_file = env.get("LIQGUARD_KEY_FILE")
@@ -59,7 +72,16 @@ class Settings:
             session_ttl=_int(env.get("LIQGUARD_SESSION_TTL"), 12 * 3600),
             login_link_ttl=_int(env.get("LIQGUARD_LOGIN_LINK_TTL"), 300),
             protect_enabled=_bool(env.get("LIQGUARD_PROTECT_ENABLED")),
+            taker_fee_binance=_float(env.get("LIQGUARD_TAKER_FEE_BINANCE"), 0.0005),
+            taker_fee_hyperliquid=_float(env.get("LIQGUARD_TAKER_FEE_HYPERLIQUID"), 0.00045),
+            funding_refresh=max(10, _int(env.get("LIQGUARD_FUNDING_REFRESH"), 60)),
+            prefunding_lead_minutes=_int(env.get("LIQGUARD_PREFUNDING_LEAD_MINUTES"), 30),
+            rescue_target_pct=_float(env.get("LIQGUARD_RESCUE_TARGET_PCT"), 30.0),
         )
+
+    @property
+    def taker_fees(self) -> dict[str, float]:
+        return {"binance": self.taker_fee_binance, "hyperliquid": self.taker_fee_hyperliquid, "demo": self.taker_fee_binance}
 
     @property
     def dashboard_url(self) -> str:

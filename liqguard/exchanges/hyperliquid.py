@@ -5,13 +5,26 @@ from typing import Optional
 
 import httpx
 
-from liqguard.models import Position, Side, Venue
+from liqguard.models import (
+    CROSS,
+    ISOLATED,
+    MaintenanceBracket,
+    MarginAccount,
+    Position,
+    Side,
+    Venue,
+)
 
 from .base import ExchangeAdapter, KeyCheck
 
 logger = logging.getLogger(__name__)
 
 HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
+
+
+def hyperliquid_maintenance(max_leverage: float) -> tuple[MaintenanceBracket, ...]:
+    """Maintenance margin = notional / (2 × max leverage)."""
+    return (MaintenanceBracket(0.0, float("inf"), 1 / (2 * max_leverage), 0.0),)
 
 
 class HyperliquidAdapter(ExchangeAdapter):
@@ -51,72 +64,72 @@ class HyperliquidAdapter(ExchangeAdapter):
         self._meta_cache = response.json()
         return self._meta_cache
 
+    async def _clearinghouse(self) -> dict:
+        response = await self.client.post(HYPERLIQUID_API_URL, json={"type": "clearinghouseState", "user": self.wallet_address})
+        response.raise_for_status()
+        return response.json()
+
+    async def _mids(self) -> dict:
+        response = await self.client.post(HYPERLIQUID_API_URL, json={"type": "allMids"})
+        response.raise_for_status()
+        return response.json()
+
+    def _parse_positions(self, state: dict, mids: dict) -> list[Position]:
+        positions = []
+        for entry in state.get("assetPositions", []):
+            pos = entry.get("position", {})
+            size = float(pos.get("szi", 0) or 0)
+            if size == 0:
+                continue
+            coin = pos.get("coin", "")
+            if coin not in mids:
+                logger.warning("No mark price for %s", coin)
+                continue
+            lev = pos.get("leverage", {})
+            lev_value = float(lev.get("value", 1)) if isinstance(lev, dict) else float(lev or 1)
+            isolated = isinstance(lev, dict) and lev.get("type") == "isolated"
+            margin = float(pos.get("marginUsed", 0) or 0)
+            upnl = float(pos.get("unrealizedPnl", 0) or 0)
+            positions.append(Position(
+                venue=Venue.HYPERLIQUID,
+                symbol=f"{coin}-PERP",
+                side=Side.LONG if size > 0 else Side.SHORT,
+                size=abs(size),
+                entry_price=float(pos.get("entryPx", 0) or 0),
+                mark_price=float(mids[coin]),
+                liquidation_price=float(pos["liquidationPx"]) if pos.get("liquidationPx") else 0.0,
+                margin=margin,
+                leverage=lev_value,
+                unrealized_pnl=upnl,
+                margin_ratio=(abs(upnl) / margin * 100 if upnl < 0 else 0) if margin > 0 else None,
+                margin_mode=ISOLATED if isolated else CROSS,
+                isolated_wallet=margin - upnl if isolated else None,
+            ))
+        return positions
+
     async def get_positions(self) -> list[Position]:
         """Fetch all open positions for the wallet address."""
         try:
-            response = await self.client.post(
-                HYPERLIQUID_API_URL,
-                json={
-                    "type": "clearinghouseState",
-                    "user": self.wallet_address
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            positions = []
-            asset_positions = data.get("assetPositions", [])
-
-            meta = await self._get_meta()
-            {asset["name"]: asset for asset in meta.get("universe", [])}
-
-            for pos_data in asset_positions:
-                pos = pos_data.get("position", {})
-
-                if float(pos.get("szi", 0)) == 0:
-                    continue
-
-                coin = pos.get("coin", "")
-                size = float(pos.get("szi", 0))
-                entry_price = float(pos.get("entryPx", 0))
-
-                mark_price = await self.get_mark_price(coin)
-                if mark_price is None:
-                    logger.warning(f"Could not get mark price for {coin}")
-                    continue
-
-                liquidation_price = float(pos.get("liquidationPx", 0)) if pos.get("liquidationPx") else 0
-                margin = float(pos.get("marginUsed", 0))
-                leverage = float(pos.get("leverage", {}).get("value", 1)) if isinstance(pos.get("leverage"), dict) else float(pos.get("leverage", 1))
-                unrealized_pnl = float(pos.get("unrealizedPnl", 0))
-
-                margin_ratio = None
-                if margin > 0:
-                    margin_ratio = (abs(unrealized_pnl) / margin) * 100 if unrealized_pnl < 0 else 0
-
-                position = Position(
-                    venue=Venue.HYPERLIQUID,
-                    symbol=f"{coin}-PERP",
-                    side=Side.LONG if size > 0 else Side.SHORT,
-                    size=abs(size),
-                    entry_price=entry_price,
-                    mark_price=mark_price,
-                    liquidation_price=liquidation_price,
-                    margin=margin,
-                    leverage=leverage,
-                    unrealized_pnl=unrealized_pnl,
-                    margin_ratio=margin_ratio,
-                )
-                positions.append(position)
-
-            return positions
-
+            return self._parse_positions(await self._clearinghouse(), await self._mids())
         except httpx.HTTPError as e:
-            logger.error(f"HTTP error fetching Hyperliquid positions: {e}")
+            logger.error("HTTP error fetching Hyperliquid positions: %s", type(e).__name__)
             raise
-        except Exception as e:
-            logger.error(f"Error fetching Hyperliquid positions: {e}")
-            raise
+
+    async def get_account(self) -> MarginAccount:
+        """Positions, cross wallet (account value minus cross unrealized PnL) and per-asset maintenance."""
+        state = await self._clearinghouse()
+        positions = self._parse_positions(state, await self._mids())
+        account_value = float(state.get("crossMarginSummary", {}).get("accountValue", 0) or 0)
+        wallet = account_value - sum(p.unrealized_pnl for p in positions if p.margin_mode == CROSS)
+        schedules = {}
+        try:
+            meta = await self._get_meta()
+            for asset in meta.get("universe", []):
+                if asset.get("maxLeverage"):
+                    schedules[asset["name"]] = hyperliquid_maintenance(float(asset["maxLeverage"]))
+        except httpx.HTTPError as e:
+            logger.warning("Hyperliquid meta failed (%s); using default maintenance", type(e).__name__)
+        return MarginAccount(Venue.HYPERLIQUID, wallet, positions, schedules)
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         """Get current mark price for a symbol."""

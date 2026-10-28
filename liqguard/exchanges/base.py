@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 
-from liqguard.models import MAINNET, Position
+from liqguard.models import MAINNET, MarginAccount, Position
 
 
 class ReadOnlyViolation(RuntimeError):
@@ -40,6 +40,14 @@ class ExchangeAdapter(ABC):
     @abstractmethod
     async def get_positions(self) -> list[Position]:
         """Open positions, normalized."""
+
+    async def get_account(self) -> Optional[MarginAccount]:
+        """
+        Positions plus what exact liquidation math needs (cross wallet balance,
+        maintenance tiers). Adapters that cannot provide it return None and
+        callers fall back to per-position (isolated) math.
+        """
+        return None
 
     @abstractmethod
     async def get_mark_price(self, symbol: str) -> Optional[float]:

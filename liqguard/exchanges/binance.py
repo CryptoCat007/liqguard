@@ -16,7 +16,17 @@ from urllib.parse import urlencode
 
 import httpx
 
-from liqguard.models import MAINNET, TESTNET, Position, Side, Venue
+from liqguard.models import (
+    CROSS,
+    ISOLATED,
+    MAINNET,
+    TESTNET,
+    MaintenanceBracket,
+    MarginAccount,
+    Position,
+    Side,
+    Venue,
+)
 
 from .base import ExchangeAdapter, KeyCheck, ReadOnlyViolation
 from .permissions import evaluate_binance_restrictions
@@ -123,8 +133,9 @@ class BinanceAdapter(ExchangeAdapter):
             margin = float(row.get("isolatedMargin", 0)) or float(row.get("isolatedWallet", 0))
             if margin == 0:
                 margin = abs(amount * mark) / leverage
+            isolated = row.get("marginType") == "isolated"
             margin_ratio = None
-            if row.get("marginType") == "isolated" and margin > 0:
+            if isolated and margin > 0:
                 margin_ratio = float(row.get("maintMargin", 0)) / margin * 100
             positions.append(Position(
                 venue=Venue.BINANCE,
@@ -139,8 +150,44 @@ class BinanceAdapter(ExchangeAdapter):
                 unrealized_pnl=float(row.get("unRealizedProfit", 0)),
                 margin_ratio=margin_ratio,
                 network=self.network,
+                margin_mode=ISOLATED if isolated else CROSS,
+                isolated_wallet=float(row.get("isolatedWallet", 0)) if isolated else None,
             ))
         return positions
+
+    async def _cross_wallet_balance(self) -> float:
+        account = await self._request("GET", "/fapi/v2/account", signed=True)
+        for asset in account.get("assets", []):
+            if asset.get("asset") == "USDT":
+                return float(asset.get("crossWalletBalance", 0))
+        return float(account.get("totalCrossWalletBalance", 0))
+
+    async def _brackets(self, symbols: set[str]) -> dict[str, tuple[MaintenanceBracket, ...]]:
+        rows = await self._request("GET", "/fapi/v1/leverageBracket", signed=True)
+        if isinstance(rows, dict):
+            rows = [rows]
+        out = {}
+        for row in rows:
+            if row.get("symbol") not in symbols:
+                continue
+            tiers = sorted(row.get("brackets", []), key=lambda b: float(b["notionalFloor"]))
+            out[row["symbol"]] = tuple(
+                MaintenanceBracket(float(b["notionalFloor"]), float(b["notionalCap"]), float(b["maintMarginRatio"]), float(b.get("cum", 0)))
+                for b in tiers
+            )
+        return out
+
+    async def get_account(self) -> MarginAccount:
+        """Positions, USDT cross wallet balance and this account's maintenance tiers (all read-only GETs)."""
+        positions = await self.get_positions()
+        wallet = await self._cross_wallet_balance()
+        schedules = {}
+        if positions:
+            try:
+                schedules = await self._brackets({p.symbol for p in positions})
+            except httpx.HTTPError as e:
+                logger.warning("Binance leverageBracket failed (%s); using fallback tiers", type(e).__name__)
+        return MarginAccount(Venue.BINANCE, wallet, positions, schedules, network=self.network)
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         try:
