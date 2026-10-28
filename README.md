@@ -536,7 +536,7 @@ python3 -m pytest liqguard/tests/ -q
 | `test_architecture.py` | No framework imports in business logic, no cycles, log redaction, startup key message |
 | `test_e2e.py` | Two users from `/start` → `/bind` → monitor alerts → `/dashboard` login → private dashboard → `/unbind`, with faked exchange APIs |
 
-396 tests at the time of writing.
+399 tests at the time of writing.
 
 ## Environment Variables
 
