@@ -11,16 +11,29 @@ The path is deterministic (seeded) so demo recordings are reproducible. All
 numbers are computed here; the LLM only phrases explanations.
 
 The demo book is margined like a real one: BTC and SOL share a Binance cross
-wallet, ETH sits in a Hyperliquid cross account. Liquidation prices are
+wallet, ETH sits in a Hyperliquid cross account, and a TSLA stock perp sits in
+isolated margin on Binance. Liquidation prices are
 computed (`risk.true_liquidation`) every tick from the wallet, the other
 positions' PnL and maintenance tiers. A simulated clock (12 min per step, so
 a 40-step run covers 8 h) drives demo funding settlements that are paid out of
-the wallets, pre-funding warnings, and rescue plans.
+the wallets, pre-funding warnings, and rescue plans. The clock starts on a
+Saturday at 20:00 UTC, so the adaptive tiers widen for the weekend, then again
+for the thin 21:00–01:00 UTC hours, and TSLA's for the closed US stock market.
+
+Each tick also runs the protection checks on demo orders and demo wick
+statistics: stop-loss sanity (BTC's stop sits beyond liquidation, ETH has
+none, SOL's is overtaken by its rising liquidation price), the ADL light of
+the profitable TSLA position, and wake-up escalation of critical/emergency
+alerts (demo time: one escalation minute lasts `escalation_seconds_per_minute`
+seconds of wall time).
 
 Event shapes (all dicts with "type" and "data"):
     status   {state, step, total_steps}
     tick     {step, timestamp, sim_time, prices: {symbol: {...}}, overview, wallets}
-    alert    {id, level, symbol, venue, side, distance, mark_price, ...}  (level "funding" = pre-funding warning)
+    alert    {id, level, symbol, venue, side, distance, mark_price, ...}
+             levels: warning/critical/emergency, "funding" (pre-funding), "stop" (stop-loss check), "adl"
+    escalation {id, ack_id, symbol, severity, reminder, max_reminders, urgency, text, ...}
+    ack      {ack_id, symbol, severity, reminders_sent, source}
     advice   {id, alert_id, symbol, level, explanation, margin_to_add_usd, rescue, rescue_explanation, ...}
     funding  {sim_time, symbol, venue, rate, payment_usd, wallet_after, liquidation_before, liquidation_after}
     summary  {headline, riskiest_symbol, risk_level, ...}
@@ -34,23 +47,44 @@ import dataclasses
 import logging
 import math
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
-from liqguard.models import CROSS, FundingInfo, MarginAccount, Position, Side, UserThreshold, Venue
+from liqguard.alerts.escalation import ESCALATING, EscalationTracker, reminder_text, urgency
+from liqguard.models import (
+    CROSS,
+    ISOLATED,
+    FundingInfo,
+    MarginAccount,
+    OpenOrder,
+    Position,
+    Side,
+    UserThreshold,
+    Venue,
+    WickProfile,
+)
 from liqguard.risk import (
     AdviceCalculator,
     FeeSchedule,
     PortfolioAnalyzer,
+    PositionProtection,
     RescuePlan,
     RescueSimulator,
     RiskContext,
+    adaptive_threshold,
     default_brackets,
     funding_payment,
+    market_session,
+    position_protection,
     pre_funding_warning,
     true_liquidation,
 )
+from liqguard.risk.sessions import DEFAULT_LOW_LIQUIDITY_HOURS
+from liqguard.risk.stops import DEFAULT_BUFFER_PCT
+
+from .demo_data import DEMO_SIM_ORDERS, DEMO_WICKS, demo_clock_start
 
 if TYPE_CHECKING:
     from liqguard.ai import MetaLLMClient
@@ -65,6 +99,7 @@ TIERS = ("warning", "critical", "emergency")
 
 SIM_MINUTES_PER_STEP = 12
 PREFUNDING_LEAD_MINUTES = 30
+ESCALATION_SECONDS_PER_MINUTE = 1.5
 
 
 @dataclass(frozen=True)
@@ -90,6 +125,8 @@ class SimPositionSpec:
     lag: float = 0.0
     end_price_pct: Optional[float] = None
     margin_mode: str = CROSS
+    start_price_pct: float = 0.0
+    adl_quantiles: Optional[tuple[int, int]] = None
 
     @property
     def is_driver(self) -> bool:
@@ -111,11 +148,14 @@ class SimFundingSpec:
 # toward liquidation by BTC through the shared wallet.
 DEFAULT_SPECS: tuple[SimPositionSpec, ...] = (
     SimPositionSpec("BTCUSDT", Venue.BINANCE, Side.LONG, 0.8, 64200.0, 10272.0, 5,
-                    start_distance_pct=29.0, end_distance_pct=3.2, lag=0.0),
+                    start_distance_pct=29.0, end_distance_pct=3.2, lag=0.0, adl_quantiles=(1, 1)),
     SimPositionSpec("ETH", Venue.HYPERLIQUID, Side.SHORT, 12.0, 3150.0, 9450.0, 4,
                     start_distance_pct=27.5, end_distance_pct=8.1, lag=0.15),
     SimPositionSpec("SOLUSDT", Venue.BINANCE, Side.LONG, 150.0, 148.0, 4440.0, 5,
-                    end_price_pct=-5.0, lag=0.3),
+                    end_price_pct=-5.0, lag=0.3, adl_quantiles=(0, 0)),
+    # Profitable stock perp in isolated margin: far from liquidation, but its ADL light climbs to 5/5.
+    SimPositionSpec("TSLAUSDT", Venue.BINANCE, Side.LONG, 40.0, 248.0, 3306.67, 3,
+                    start_price_pct=4.0, end_price_pct=9.0, margin_mode=ISOLATED, adl_quantiles=(2, 4)),
 )
 
 DEFAULT_WALLETS: dict[Venue, float] = {Venue.BINANCE: 15500.0, Venue.HYPERLIQUID: 11300.0}
@@ -159,6 +199,12 @@ class MarketSimulation:
         funding: tuple[SimFundingSpec, ...] = DEFAULT_FUNDING,
         fees: Optional[FeeSchedule] = None,
         prefunding_lead_minutes: float = PREFUNDING_LEAD_MINUTES,
+        low_liquidity_hours: tuple[int, int] = DEFAULT_LOW_LIQUIDITY_HOURS,
+        stop_buffer_pct: float = DEFAULT_BUFFER_PCT,
+        orders: tuple[OpenOrder, ...] = DEMO_SIM_ORDERS,
+        wicks: Optional[dict[str, WickProfile]] = None,
+        clock_start: Optional[datetime] = None,
+        escalation_seconds_per_minute: float = ESCALATION_SECONDS_PER_MINUTE,
     ):
         self.llm = llm_client
         self.owner_id = owner_id
@@ -168,6 +214,15 @@ class MarketSimulation:
         self.funding_specs = funding
         self.fees = fees or FeeSchedule()
         self.prefunding_lead_minutes = prefunding_lead_minutes
+        self.low_liquidity_hours = low_liquidity_hours
+        self.stop_buffer_pct = stop_buffer_pct
+        self.orders = orders
+        self.wick_profiles = DEMO_WICKS if wicks is None else wicks
+        self._clock_start = clock_start
+        self.escalation_seconds_per_minute = escalation_seconds_per_minute
+        self.escalation = EscalationTracker()
+        self._protection_cache: dict[tuple, PositionProtection] = {}
+        self._escalation_task: Optional[asyncio.Task] = None
         self.steps = steps
         self.tick_interval = tick_interval
         self.seed = seed
@@ -190,7 +245,7 @@ class MarketSimulation:
 
         self.step = 0
         self.state = "idle"
-        self.clock_start = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        self.clock_start = self._clock_start or demo_clock_start(datetime.now(timezone.utc))
         self.history: dict[str, list[dict]] = {s.symbol: [] for s in self.specs}
         self.alerts: list[dict] = []
         self.advice: list[dict] = []
@@ -199,6 +254,11 @@ class MarketSimulation:
         self.summary: Optional[dict] = None
         self._fired: set[tuple[str, str]] = set()
         self._alert_seq = 0
+        self.escalation.clear()
+        self.escalation_log: list[dict] = []
+        self._stop_state: dict[str, tuple] = {}
+        self._protection_cache.clear()
+        self._adl_state: dict[str, int] = {}
         self.wallets = dict(self.wallet_specs)
         self.funding = {
             (f.venue.value, f.symbol): FundingInfo(
@@ -247,8 +307,15 @@ class MarketSimulation:
 
     def _follower_mark(self, spec: SimPositionSpec, step: int) -> float:
         eased = _smoothstep(self._progress(spec, step))
-        move_pct = (spec.end_price_pct or 0.0) * eased + 0.3 * self._wiggle(spec, step)
+        start, end = spec.start_price_pct, spec.end_price_pct or 0.0
+        move_pct = start + (end - start) * eased + 0.3 * self._wiggle(spec, step)
         return spec.entry_price * (1 + move_pct / 100)
+
+    def _adl_at(self, spec: SimPositionSpec, step: int) -> Optional[int]:
+        if spec.venue != Venue.BINANCE or spec.adl_quantiles is None:
+            return None
+        start, end = spec.adl_quantiles
+        return int(round(start + (end - start) * _smoothstep(step / self.steps)))
 
     @property
     def sim_now(self) -> datetime:
@@ -310,11 +377,48 @@ class MarketSimulation:
 
     def _positions_at(self, step: int) -> list[Position]:
         positions, self.accounts = self._build(self._marks[step], self.wallets)
+        for spec, pos in zip(self.specs, positions):
+            pos.adl_quantile = self._adl_at(spec, step)
         return positions
 
     def risk_context(self, fees: Optional[FeeSchedule] = None) -> RiskContext:
-        """Accounts, demo funding and fees at the simulated time (what /risk, /positions and the dashboard use)."""
-        return RiskContext(accounts=list(self.accounts), funding=dict(self.funding), fees=fees or self.fees, now=self.sim_now)
+        """Accounts, demo funding, orders, wick stats and fees at the simulated time (what /risk, /positions and the dashboard use)."""
+        venues = {s.venue for s in self.specs}
+        return RiskContext(
+            accounts=list(self.accounts),
+            funding=dict(self.funding),
+            fees=fees or self.fees,
+            now=self.sim_now,
+            orders={(v.value, "mainnet"): [o for o in self.orders if o.venue == v] for v in venues},
+            wicks={
+                (s.venue.value, s.symbol.removesuffix("-PERP")): self.wick_profiles[s.symbol]
+                for s in self.specs if s.symbol in self.wick_profiles
+            },
+            low_liquidity_hours=self.low_liquidity_hours,
+            stop_buffer_pct=self.stop_buffer_pct,
+        )
+
+    def protection(self, position: Position, ctx: Optional[RiskContext] = None) -> PositionProtection:
+        """Cached per step and wallet state: alerts, ticks and snapshots of one step all see the same checks."""
+        key = (self.step, position.symbol, round(position.mark_price, 8), tuple(sorted(self.wallets.values())), id(self.threshold))
+        cached = self._protection_cache.get(key)
+        if cached is None:
+            if len(self._protection_cache) > 256:
+                self._protection_cache.clear()
+            cached = self._protection_cache[key] = position_protection(position, ctx or self.risk_context(), self.threshold)
+        return cached
+
+    def _protection_dict(self) -> dict:
+        ctx = self.risk_context()
+        return {p.symbol: self.protection(p, ctx).to_dict() for p in self.positions}
+
+    def _tiers_for(self, position: Position, ctx: Optional[RiskContext] = None) -> dict[str, float]:
+        ctx = ctx or self.risk_context()
+        return adaptive_threshold(self.threshold, position, ctx.wicks_for(position), ctx.session(position)).tiers()
+
+    def _session_dict(self) -> dict:
+        info = market_session(self.sim_now, "", self.low_liquidity_hours)
+        return {"sim_time": self.sim_now.isoformat(), "weekday": self.sim_now.strftime("%A"), **info.to_dict()}
 
     def _analyze(self):
         return PortfolioAnalyzer(self.threshold, self.risk_context()).analyze_portfolio(self.positions)
@@ -349,18 +453,16 @@ class MarketSimulation:
             logger.error("Rescue explanation failed: %s", type(e).__name__)
             return None
 
-    def tier_prices(self, position: Position) -> dict[str, float]:
-        """Mark prices at which each alert tier fires for `position`."""
-        t = self.threshold
-        return {
-            "warning": price_at_distance(position.side, position.liquidation_price, t.warning_distance_pct),
-            "critical": price_at_distance(position.side, position.liquidation_price, t.critical_distance_pct),
-            "emergency": price_at_distance(position.side, position.liquidation_price, t.emergency_distance_pct),
-        }
+    def tier_prices(self, position: Position, ctx: Optional[RiskContext] = None) -> dict[str, float]:
+        """Mark prices at which each (adaptive) alert tier fires for `position`."""
+        tiers = self._tiers_for(position, ctx)
+        return {k: price_at_distance(position.side, position.liquidation_price, tiers[k]) for k in TIERS}
 
     def _record_tick(self) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         sim_time = self.sim_now.isoformat()
+        ctx = self.risk_context()
+        protection = {p.symbol: self.protection(p, ctx).to_dict() for p in self.positions}
         prices = {}
         for pos in self.positions:
             point = {
@@ -370,6 +472,7 @@ class MarketSimulation:
                 "mark_price": round(pos.mark_price, 4),
                 "liquidation_price": round(pos.liquidation_price, 4),
                 "distance_pct": round(pos.distance_to_liquidation_pct, 3),
+                "thresholds": protection[pos.symbol]["thresholds"]["effective"],
             }
             if pos.symbol in self._settled_this_step:
                 point["funding_paid_usd"] = round(self._settled_this_step[pos.symbol], 2)
@@ -378,7 +481,8 @@ class MarketSimulation:
                 **point,
                 "venue": pos.venue.value,
                 "side": pos.side.value,
-                "tier_prices": {k: round(v, 4) for k, v in self.tier_prices(pos).items()},
+                "tier_prices": {k: round(v, 4) for k, v in self.tier_prices(pos, ctx).items()},
+                "adl_quantile": pos.adl_quantile,
             }
         return {
             "step": self.step,
@@ -387,6 +491,9 @@ class MarketSimulation:
             "prices": prices,
             "overview": self.overview.to_dict(),
             "wallets": self._wallets_dict(),
+            "protection": protection,
+            "session": self._session_dict(),
+            "escalation": self._escalation_state(),
         }
 
     def _wallets_dict(self) -> dict:
@@ -428,6 +535,11 @@ class MarketSimulation:
             "wallets": self._wallets_dict(),
             "sim_time": self.sim_now.isoformat(),
             "minutes_per_step": SIM_MINUTES_PER_STEP,
+            "protection": self._protection_dict(),
+            "session": self._session_dict(),
+            "escalation": self._escalation_state(),
+            "escalation_log": self.escalation_log,
+            "orders": [o.to_dict() for o in self.orders],
             "channels": sorted(self._subscribers),
             "muse_mode": "mock" if (self.llm is None or self.llm.is_mock) else "live",
             "demo": True,
@@ -499,10 +611,21 @@ class MarketSimulation:
         await self._emit("reset", self.snapshot())
         await self._add_audit("simulation_started", None, f"Demo price path started from {source}", source)
         await self.refresh_summary()
+        await self._check_protection()
         self._task = asyncio.create_task(self._run())
         return True
 
+    async def _stop_escalation(self) -> None:
+        task, self._escalation_task = self._escalation_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     async def stop(self, source: str = "web") -> None:
+        await self._stop_escalation()
         if not self.is_running:
             return
         self._task.cancel()
@@ -516,6 +639,7 @@ class MarketSimulation:
 
     async def reset_and_notify(self) -> None:
         await self.stop()
+        await self._stop_escalation()
         self.reset()
         await self._emit("reset", self.snapshot())
         await self.refresh_summary()
@@ -566,6 +690,7 @@ class MarketSimulation:
         await self._emit("tick", self._record_tick())
         await self._check_prefunding()
         await self._check_alerts()
+        await self._check_protection()
 
     async def _settle_funding(self) -> None:
         start = self.clock_start + timedelta(minutes=SIM_MINUTES_PER_STEP * (self.step - 1))
@@ -612,7 +737,8 @@ class MarketSimulation:
         ctx = self.risk_context()
         for pos in self.positions:
             warning = pre_funding_warning(
-                pos, ctx.account_for(pos), ctx.funding_for, ctx.now, self.threshold, self.prefunding_lead_minutes
+                pos, ctx.account_for(pos), ctx.funding_for, ctx.now,
+                self.protection(pos, ctx).adaptive.threshold, self.prefunding_lead_minutes,
             )
             if warning is None:
                 continue
@@ -632,7 +758,7 @@ class MarketSimulation:
                 "side": pos.side.value,
                 "leverage": pos.leverage,
                 "distance_pct": round(pos.distance_to_liquidation_pct, 2),
-                "threshold_pct": self.threshold.warning_distance_pct,
+                "threshold_pct": round(self.protection(pos, ctx).adaptive.tiers()["warning"], 2),
                 "mark_price": round(pos.mark_price, 4),
                 "liquidation_price": round(pos.liquidation_price, 4),
                 "funding": warning.to_dict(),
@@ -647,21 +773,167 @@ class MarketSimulation:
             )
 
     async def _check_alerts(self) -> None:
-        thresholds = self._thresholds()
+        ctx = self.risk_context()
         fired_any = False
         for pos in self.positions:
             distance = pos.distance_to_liquidation_pct
+            protection = self.protection(pos, ctx)
+            thresholds = protection.adaptive.tiers()
+            self.escalation.update(self.owner_id, pos.venue.value, pos.symbol, distance)
             for tier in TIERS:
                 key = (pos.symbol, tier)
                 if distance <= thresholds[tier] and key not in self._fired:
                     self._fired.add(key)
-                    await self._fire_alert(tier, pos)
+                    await self._fire_alert(tier, pos, protection)
                     fired_any = True
         if fired_any:
             self._spawn(self.refresh_summary())
 
-    async def _fire_alert(self, level: str, pos: Position) -> None:
+    async def _check_protection(self) -> None:
+        """Stop-loss sanity and ADL, once per state change per position (like the live monitor)."""
+        ctx = self.risk_context()
+        for pos in self.positions:
+            protection = self.protection(pos, ctx)
+            check = protection.stop
+            if check is not None and check.needs_warning:
+                state = (check.status, None if check.stop_price is None else round(check.stop_price, 6))
+                if self._stop_state.get(pos.symbol) != state:
+                    self._stop_state[pos.symbol] = state
+                    await self._fire_protection_alert("stop", pos, protection, ctx)
+            elif check is not None:
+                self._stop_state.pop(pos.symbol, None)
+            adl = protection.adl
+            if adl.warn and self._adl_state.get(pos.symbol, 0) < adl.lights:
+                self._adl_state[pos.symbol] = adl.lights
+                await self._fire_protection_alert("adl", pos, protection, ctx)
+
+    async def _fire_protection_alert(self, level: str, pos: Position, protection: PositionProtection, ctx: RiskContext) -> None:
         self._alert_seq += 1
+        info = protection.to_dict()
+        alert = {
+            "id": f"al_{self._alert_seq:03d}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sim_time": ctx.now.isoformat(),
+            "step": self.step,
+            "level": level,
+            "symbol": pos.symbol,
+            "venue": pos.venue.value,
+            "side": pos.side.value,
+            "leverage": pos.leverage,
+            "distance_pct": round(pos.distance_to_liquidation_pct, 2),
+            "mark_price": round(pos.mark_price, 4),
+            "liquidation_price": round(pos.liquidation_price, 4),
+            "unrealized_pnl": round(pos.unrealized_pnl, 2),
+            "channels": sorted(self._subscribers),
+        }
+        if level == "stop":
+            alert["stop"] = info["stop"]
+            alert["explanation"] = await self._explain_stop(protection.stop)
+            detail = f"stop check: {protection.stop.status.replace('_', ' ')}"
+            if protection.stop.stop_price is not None:
+                detail += f" (stop ${protection.stop.stop_price:,.2f} vs liq ${pos.liquidation_price:,.2f})"
+        else:
+            alert["adl"] = info["adl"]
+            detail = f"ADL {protection.adl.lights}/5 on a profitable position (+${pos.unrealized_pnl:,.2f})"
+        self.alerts.append(alert)
+        await self._emit("alert", alert)
+        await self._add_audit(f"{level}_warning", pos.symbol, detail)
+
+    async def _explain_stop(self, check) -> Optional[dict]:
+        if self.llm is None or check is None:
+            return None
+        try:
+            return await self.llm.explain_stop_fix(check, self.language)
+        except Exception as e:
+            logger.error("Stop-loss explanation failed: %s", type(e).__name__)
+            return None
+
+    # ------------------------------------------------------------------ escalation
+
+    def _escalation_state(self) -> dict:
+        t = self.threshold
+        return {
+            "enabled": t.escalation_enabled,
+            "interval_minutes": t.escalation_interval_minutes,
+            "max_reminders": t.escalation_max_reminders,
+            "seconds_per_minute": self.escalation_seconds_per_minute,
+            "pending": [a.to_dict() for a in self.escalation.pending_for(self.owner_id)],
+        }
+
+    def _open_escalation(self, level: str, pos: Position, alert: dict) -> None:
+        t = self.threshold
+        if level not in ESCALATING or not t.escalation_enabled:
+            return
+        text = f"{level.upper()} alert: {pos.symbol} {pos.distance_to_liquidation_pct:.1f}% from liquidation"
+        ack = self.escalation.open(
+            self.owner_id, pos.venue.value, pos.symbol, level, text, time.monotonic(),
+            interval_seconds=t.escalation_interval_minutes * self.escalation_seconds_per_minute,
+            max_reminders=t.escalation_max_reminders, distance_pct=pos.distance_to_liquidation_pct,
+            meta={"alert_id": alert["id"]},
+        )
+        if ack is None:
+            return
+        alert["ack_id"] = ack.id
+        if self._escalation_task is None or self._escalation_task.done():
+            self._escalation_task = asyncio.create_task(self._escalation_loop())
+
+    async def _escalation_loop(self) -> None:
+        tick = max(0.05, min(0.25, self.escalation_seconds_per_minute / 4))
+        while True:
+            await asyncio.sleep(tick)
+            now = time.monotonic()
+            for ack in self.escalation.due(now):
+                n = ack.reminders_sent + 1
+                minutes = (now - ack.opened_at) / self.escalation_seconds_per_minute
+                event = {
+                    "id": f"esc_{len(self.escalation_log) + 1:03d}",
+                    "ack_id": ack.id,
+                    "alert_id": ack.meta.get("alert_id"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sim_time": self.sim_now.isoformat(),
+                    "symbol": ack.symbol,
+                    "venue": ack.venue,
+                    "severity": ack.severity,
+                    "reminder": n,
+                    "max_reminders": ack.max_reminders,
+                    "urgency": urgency(n, ack.max_reminders),
+                    "minutes_since_alert": round(minutes, 1),
+                    "distance_pct": None if ack.distance_pct is None else round(ack.distance_pct, 2),
+                    "text": reminder_text(ack, n, minutes, demo=True),
+                    "channels": sorted(self._subscribers),
+                }
+                self.escalation.mark_sent(ack, now)
+                self.escalation_log.append(event)
+                await self._emit("escalation", event)
+                await self._add_audit(
+                    "escalation_reminder", ack.symbol,
+                    f"{event['urgency']} {n}/{ack.max_reminders}: {ack.severity} alert unacknowledged for {minutes:.0f} demo min",
+                )
+            if not self.escalation.pending_for(self.owner_id) and not self.is_running:
+                return
+
+    async def acknowledge(self, ack_id: str, source: str = "web") -> Optional[dict]:
+        """The owner tapped "I'm awake": stop reminders for that alert."""
+        ack = self.escalation.acknowledge(self.owner_id, ack_id, time.monotonic())
+        if ack is None:
+            return None
+        event = {
+            "ack_id": ack.id,
+            "alert_id": ack.meta.get("alert_id"),
+            "symbol": ack.symbol,
+            "severity": ack.severity,
+            "reminders_sent": ack.reminders_sent,
+            "source": source,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await self._emit("ack", event)
+        await self._add_audit("alert_acknowledged", ack.symbol,
+                              f"{ack.severity} alert acknowledged from {source} after {ack.reminders_sent} reminder(s)", source)
+        return event
+
+    async def _fire_alert(self, level: str, pos: Position, protection: Optional[PositionProtection] = None) -> None:
+        self._alert_seq += 1
+        protection = protection or self.protection(pos)
         plan = self.build_rescue_plan(pos.symbol)
         margin = plan.margin_advice()
         alert = {
@@ -675,11 +947,15 @@ class MarketSimulation:
             "side": pos.side.value,
             "leverage": pos.leverage,
             "distance_pct": round(pos.distance_to_liquidation_pct, 2),
-            "threshold_pct": self._thresholds()[level],
+            "threshold_pct": round(protection.adaptive.tiers()[level], 2),
+            "base_threshold_pct": self._thresholds()[level],
+            "adaptive_reasons": protection.adaptive.reasons,
+            "wicks": protection.to_dict()["wicks"],
             "mark_price": round(pos.mark_price, 4),
             "liquidation_price": round(pos.liquidation_price, 4),
             "channels": sorted(self._subscribers),
         }
+        self._open_escalation(level, pos, alert)
         self.alerts.append(alert)
         await self._emit("alert", alert)
         await self._add_audit(

@@ -1,5 +1,6 @@
 """Multi-user isolation: user A must never see or receive user B's data."""
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -362,7 +363,11 @@ class TestDashboardIsolation:
         await save_users(ctx)
         sign_in(dashboard, ctx, ALICE)
         assert dashboard.post("/api/me/simulate", headers=CSRF).status_code == 200
-        await ctx.simulations.get(ALICE).wait()
+        sim = ctx.simulations.get(ALICE)
+        for _ in range(400):
+            if sim.state == "finished":
+                break
+            await asyncio.sleep(0.05)
 
         assert dashboard.get("/api/me/alerts").json()
         assert ctx.simulations.get(BOB) is None

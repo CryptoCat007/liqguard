@@ -77,7 +77,8 @@ class TestAlerts:
     async def test_alert_distance_within_threshold(self, sim):
         await run(sim)
         for a in sim.alerts:
-            assert a["distance_pct"] <= a["threshold_pct"]
+            if a["level"] in TIERS:
+                assert a["distance_pct"] <= a["threshold_pct"]
 
     async def test_every_alert_gets_advice_with_code_numbers(self, sim):
         await run(sim)
@@ -91,7 +92,8 @@ class TestAlerts:
     async def test_skipped_tiers_are_backfilled(self):
         sim = MarketSimulation(None, tick_interval=0, steps=2)
         events = await run(sim)
-        btc = [e["data"]["level"] for e in events if e["type"] == "alert" and e["data"]["symbol"] == "BTCUSDT"]
+        btc = [e["data"]["level"] for e in events
+               if e["type"] == "alert" and e["data"]["symbol"] == "BTCUSDT" and e["data"]["level"] in TIERS]
         assert btc == list(TIERS)
 
     async def test_alert_lists_delivery_channels(self, sim):

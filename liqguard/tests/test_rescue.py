@@ -267,7 +267,7 @@ class TestSimulation:
         btc = sim._position("BTCUSDT")
         assert btc.margin_mode == CROSS
         account = sim._account(btc)
-        assert {p.symbol for p in account.positions} == {"BTCUSDT", "SOLUSDT"}
+        assert {p.symbol for p in account.cross_positions()} == {"BTCUSDT", "SOLUSDT"}
         assert btc.liquidation_price == pytest.approx(true_liquidation(btc, account).price)
 
     async def test_sol_is_dragged_by_btc_through_the_shared_wallet(self):

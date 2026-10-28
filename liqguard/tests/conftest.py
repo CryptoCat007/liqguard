@@ -7,6 +7,7 @@ import pytest
 from liqguard.ai import MetaLLMClient
 from liqguard.config import Settings
 from liqguard.core import AppContext
+from liqguard.core.wicks import WickService
 from liqguard.storage import EncryptedStorage
 
 BOT_TOKEN = "123456789:AAH-test-token-for-widget-hmac-checks"
@@ -28,7 +29,8 @@ def settings(tmp_path) -> Settings:
 async def ctx(settings):
     storage = EncryptedStorage(db_path=settings.db_path, encryption_key=EncryptedStorage.generate_key())
     context = await AppContext.create(
-        settings, storage=storage, llm=MetaLLMClient(use_mock=True), simulation_options={"tick_interval": 0}
+        settings, storage=storage, llm=MetaLLMClient(use_mock=True),
+        simulation_options={"tick_interval": 0, "escalation_seconds_per_minute": 0.05}, wicks=WickService(sources=[]),
     )
     yield context
     await context.close()

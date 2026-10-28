@@ -52,7 +52,7 @@ class TestReadEndpoints:
         assert snap["state"] == "idle"
         assert snap["demo"] is True
         assert snap["thresholds"] == {"warning": 20.0, "critical": 10.0, "emergency": 5.0}
-        assert set(snap["history"]) == {"BTCUSDT", "ETH", "SOLUSDT"}
+        assert set(snap["history"]) == {"BTCUSDT", "ETH", "SOLUSDT", "TSLAUSDT"}
         assert snap["summary"]["riskiest_symbol"] in snap["history"]
         assert snap["channels"] == ["web"]
         assert snap["scope"] == "public"
@@ -61,7 +61,7 @@ class TestReadEndpoints:
         body = client.get("/api/demo/portfolio").json()
         ov = body["overview"]
         assert ov["venues"] == ["binance", "hyperliquid"]
-        assert ov["summary"]["total_positions"] == 3
+        assert ov["summary"]["total_positions"] == 4
         notional = sum(p["notional_value"] for p in ov["positions"])
         assert ov["summary"]["total_notional_value"] == pytest.approx(notional, abs=0.05)
         assert body["summary"]["headline"]
@@ -73,8 +73,8 @@ class TestReadEndpoints:
         advice = client.get("/api/demo/advice").json()
         audit = client.get("/api/demo/audit").json()
 
-        assert {a["level"] for a in alerts} == {"warning", "critical", "emergency", "funding"}
-        assert len(advice) == len([a for a in alerts if a["level"] != "funding"])
+        assert {a["level"] for a in alerts} == {"warning", "critical", "emergency", "funding", "stop", "adl"}
+        assert len(advice) == len([a for a in alerts if a["level"] in ("warning", "critical", "emergency")])
         events = [e["event"] for e in audit]
         assert events[0] == "simulation_started"
         assert "advice_generated" in events
