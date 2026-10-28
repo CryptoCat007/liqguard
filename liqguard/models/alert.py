@@ -98,6 +98,10 @@ class UserThreshold:
     adaptive_thresholds: bool = True
     stop_loss_checks: bool = True
 
+    # Position sizing: max loss at the exit (stop, else liquidation) and max margin per position, as % of account equity.
+    risk_per_trade_pct: float = 2.0
+    max_margin_pct: float = 25.0
+
     def get_severity_for_distance(self, distance_pct: float) -> Optional[AlertSeverity]:
         """Get alert severity based on distance to liquidation."""
         if distance_pct <= self.emergency_distance_pct:
@@ -124,6 +128,8 @@ class UserThreshold:
             "escalation_max_reminders": self.escalation_max_reminders,
             "adaptive_thresholds": self.adaptive_thresholds,
             "stop_loss_checks": self.stop_loss_checks,
+            "risk_per_trade_pct": self.risk_per_trade_pct,
+            "max_margin_pct": self.max_margin_pct,
         }
 
     @classmethod
@@ -143,4 +149,6 @@ class UserThreshold:
             escalation_max_reminders=int(data.get("escalation_max_reminders", 5)),
             adaptive_thresholds=bool(data.get("adaptive_thresholds", True)),
             stop_loss_checks=bool(data.get("stop_loss_checks", True)),
+            risk_per_trade_pct=float(data.get("risk_per_trade_pct", 2.0)),
+            max_margin_pct=float(data.get("max_margin_pct", 25.0)),
         )

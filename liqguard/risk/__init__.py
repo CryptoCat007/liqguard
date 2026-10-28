@@ -7,6 +7,7 @@ from .adaptive import AdaptiveThreshold, adaptive_threshold
 from .adl import ADL_WARN_LIGHTS, AdlStatus, adl_status, lights_from_quantile
 from .advice import ActionableAdvice, ActionType, AdviceCalculator
 from .context import RiskContext
+from .correlation import CORRELATED, Factor, correlation, factor
 from .engine import RiskAssessment, RiskEngine, exact_margin_to_target
 from .fees import DEFAULT_TAKER_FEES, FeeSchedule
 from .funding import (
@@ -19,6 +20,7 @@ from .funding import (
     project_funding,
     settlements_within,
 )
+from .insights import PortfolioInsights, portfolio_insights
 from .liquidation import (
     LiquidationResult,
     build_brackets,
@@ -46,6 +48,7 @@ from .sessions import (
     underlying,
     us_equity_market_open,
 )
+from .sizing import OVERSIZED, SizingCheck, account_equity, size_check
 from .stops import (
     BEYOND_LIQUIDATION,
     NO_STOP,
@@ -55,9 +58,47 @@ from .stops import (
     check_stop_loss,
     protective_stops,
 )
+from .stress import (
+    SHOCKS_PCT,
+    AccountStress,
+    Concentration,
+    LiqComparison,
+    Shock,
+    account_surplus,
+    concentration,
+    liq_comparison,
+    liquidating_move,
+    stress_account,
+)
+from .triage import HANDLE_FIRST, TriageItem, sigma_5m, time_to_liquidation_minutes, triage
 from .wicks import WickExposure, aggregate, stress_summary, wick_exposure, wick_stat
 
 __all__ = [
+    "CORRELATED",
+    "Factor",
+    "correlation",
+    "factor",
+    "PortfolioInsights",
+    "portfolio_insights",
+    "OVERSIZED",
+    "SizingCheck",
+    "account_equity",
+    "size_check",
+    "SHOCKS_PCT",
+    "AccountStress",
+    "Concentration",
+    "LiqComparison",
+    "Shock",
+    "account_surplus",
+    "concentration",
+    "liq_comparison",
+    "liquidating_move",
+    "stress_account",
+    "HANDLE_FIRST",
+    "TriageItem",
+    "sigma_5m",
+    "time_to_liquidation_minutes",
+    "triage",
     "AdaptiveThreshold",
     "adaptive_threshold",
     "ADL_WARN_LIGHTS",
