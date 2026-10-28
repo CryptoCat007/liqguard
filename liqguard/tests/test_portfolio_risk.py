@@ -685,3 +685,13 @@ class TestPrivateDashboard:
         assert snap["risk_settings"]["risk_per_trade_pct"] == 0.5
         assert all(s["max_risk_pct"] == 0.5 for s in snap["insights"]["sizing"])
         await asyncio.sleep(0)
+
+
+class TestConfig:
+    def test_sizing_defaults_come_from_the_environment_and_are_clamped(self):
+        from liqguard.config import Settings
+
+        s = Settings.from_env({"TELEGRAM_BOT_TOKEN": "x", "LIQGUARD_RISK_PER_TRADE_PCT": "1", "LIQGUARD_MAX_MARGIN_PCT": "500"})
+        t = s.default_threshold()
+        assert t.risk_per_trade_pct == 1.0 and t.max_margin_pct == 100.0
+        assert Settings.from_env({"TELEGRAM_BOT_TOKEN": "x"}).default_threshold().risk_per_trade_pct == 2.0

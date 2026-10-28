@@ -69,6 +69,8 @@ class Settings:
     stop_buffer_pct: float = 0.5
     escalation_interval_minutes: float = 2.0
     escalation_max_reminders: int = 5
+    risk_per_trade_pct: float = 2.0
+    max_margin_pct: float = 25.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -98,13 +100,17 @@ class Settings:
             stop_buffer_pct=max(0.0, _float(env.get("LIQGUARD_STOP_BUFFER_PCT"), 0.5)),
             escalation_interval_minutes=max(0.5, _float(env.get("LIQGUARD_ESCALATION_INTERVAL_MINUTES"), 2.0)),
             escalation_max_reminders=max(1, _int(env.get("LIQGUARD_ESCALATION_MAX_REMINDERS"), 5)),
+            risk_per_trade_pct=min(max(_float(env.get("LIQGUARD_RISK_PER_TRADE_PCT"), 2.0), 0.1), 20.0),
+            max_margin_pct=min(max(_float(env.get("LIQGUARD_MAX_MARGIN_PCT"), 25.0), 1.0), 100.0),
         )
 
     def default_threshold(self) -> UserThreshold:
-        """Thresholds for a new user (escalation defaults come from the environment)."""
+        """Thresholds for a new user (escalation and sizing defaults come from the environment)."""
         return UserThreshold(
             escalation_interval_minutes=self.escalation_interval_minutes,
             escalation_max_reminders=self.escalation_max_reminders,
+            risk_per_trade_pct=self.risk_per_trade_pct,
+            max_margin_pct=self.max_margin_pct,
         )
 
     @property

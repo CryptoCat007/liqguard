@@ -22,9 +22,26 @@ Built for the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/m
 - 🛑 **Stop-Loss Sanity Check**: Reads open orders and warns when there is no stop, or the liquidation price is hit before the stop triggers; Muse suggests a stop or size fix
 - ⏰ **Wake-up Escalation**: Critical/emergency alerts repeat every N minutes, louder each time, until you tap **✅ I'm awake**
 - ⚡ **ADL Indicator**: Binance auto-deleverage rank as 1–5 lights, with a warning when a profitable position reaches 4–5
+- 🎯 **Priority Triage**: With several positions in trouble, one consolidated alert ranks them by urgency (distance, volatility-adjusted time to liquidation, size) and labels the top one **Handle this first**
+- 📏 **Position Sizing Check**: Warns when a position's loss at its exit or its margin is too large for the account (configurable risk % per trade) and suggests a size
+- 📉 **Portfolio Stress Test**: "If everything moves −5 / −10 / −20 % together, is the account liquidated?" Correlated coins move by their beta; shows the account-level liquidation move
+- 🧲 **Concentration Warning & Real Liq Line**: Flags one-directional exposure across correlated coins, and shows the platform's displayed liquidation price next to LiqGuard's correlated cross-margin liquidation, with the gap highlighted
 - 🛡️ **Protective Actions**: User-confirmed risk reduction (testnet only)
 - 🖥️ **Web Dashboard**: Public demo page plus a private per-user view behind Telegram login
 - 👥 **Multi-user**: Every position, key, alert, action, audit entry and simulation is scoped to its owner
+
+## Real user feedback
+
+Several features come straight from traders' posts on Threads (paraphrased, no usernames):
+
+| What traders said | What LiqGuard does about it |
+|-------------------|-----------------------------|
+| "With several positions open, in a fast move I can't tell which one to deal with first." | **Priority triage.** Positions are ranked by urgency and one consolidated alert lists them in order, with **🎯 Handle this first** on the top one. The same ranking appears in `/risk`, `/positions` and the dashboard. |
+| "People open positions far too big for their account." | **Position sizing check.** Each position's loss at its exit (stop, else liquidation) and its margin are compared with account equity. Your limits default to 2 % risk per trade and 25 % margin per position (`/settings risk 2`, `/settings maxmargin 25`). Oversized positions get a suggested size. |
+| "Cross margin, five coins, all long. They were liquidated together in one fast move." | **Portfolio stress test** (−5 / −10 / −20 % with correlated coins moving together) and the **account-level liquidation move**. A **concentration warning** fires when most exposure points one way across coins that move together. |
+| "The real liquidation was nowhere near the liquidation line the platform showed." | **Platform liq vs LiqGuard liq.** The exchange's line assumes your other positions stand still. LiqGuard also computes the liquidation price when they fall together, and highlights the gap in points of distance. |
+
+Try it with `/demo` → **🎬 5 longs, one wallet**, or pick that scenario on the dashboard.
 
 ## Quick Start
 
@@ -85,11 +102,11 @@ liqguard
 | `/bind` | Connect an exchange: Binance (read-only key), Hyperliquid (wallet address) or Binance testnet (for protective actions) |
 | `/unbind` | Disconnect an exchange |
 | `/dashboard` | One-time login link to your private web dashboard (`/dashboard revoke` signs out everywhere) |
-| `/positions` | All positions: exchange vs true liquidation price, funding, 8 h / 24 h drift, wicks away, adaptive tiers, stop-loss status, ADL lights, 🛟 rescue buttons |
-| `/risk` | Portfolio risk overview + Muse summary; protection checks (no stop, stop beyond liq, one wick from liq, ADL 4–5); liquidation, funding and stress test for the riskiest position |
+| `/positions` | All positions: exchange vs true liquidation price, correlated liquidation when it is closer, priority rank, sizing, funding, 8 h / 24 h drift, wicks away, adaptive tiers, stop-loss status, ADL lights, 🛟 rescue buttons |
+| `/risk` | Portfolio risk overview + Muse summary; 🎯 priority triage (handle in this order); 📉 portfolio stress test per cross account with platform vs correlated liquidation; 🧲 concentration; 📏 oversized positions with suggested sizes; protection checks (no stop, stop beyond liq, one wick from liq, ADL 4–5); liquidation, funding and wick stress test for the riskiest position |
 | `/threshold` | Configure alert thresholds (base tiers; adaptive tiers widen from these) |
-| `/settings` | Wake-up escalation (interval 1/2/5/10 min or `/settings interval 3`, max reminders, on/off), adaptive tiers on/off, stop-loss checks on/off |
-| `/demo` | Demo mode with price simulation |
+| `/settings` | Wake-up escalation (interval 1/2/5/10 min or `/settings interval 3`, max reminders, on/off), adaptive tiers on/off, stop-loss checks on/off, sizing limits (`/settings risk 2`, `/settings maxmargin 25`) |
+| `/demo` | Demo mode with price simulation: the mixed book or **🎬 5 longs, one wallet** |
 | `/ask <question>` | Ask AI about your positions |
 | `/actions` | View pending protective actions |
 | `/killswitch` | Emergency stop for all actions |
@@ -255,6 +272,66 @@ Alerts show the effective tier, the base tier and the reasons. You can switch th
 >   allow notifications from the LiqGuard chat if your system supports per-contact exceptions.
 >
 > `/settings` shows this tip too.
+
+## Triage, Sizing & Portfolio Stress
+
+All four checks are pure functions in `risk/` and run on every position check, simulation
+step and dashboard refresh. `risk/insights.py` (`portfolio_insights`) combines them for one
+user's book.
+
+### Priority triage (`risk/triage.py`)
+
+Each position gets an urgency score from 0 to 100:
+
+| Weight | Input | How |
+|--------|-------|-----|
+| 55 % | Time to liquidation at typical volatility | σ₅ₘ = the symbol's typical 5m adverse wick ÷ 1.645 (a default per asset class when no klines are cached). A random walk needs about (distance ÷ σ₅ₘ)² five-minute steps, so a volatile coin 6 % away can be more urgent than a calm one 4 % away. u = 1 ÷ (1 + minutes ÷ 720) |
+| 30 % | Distance against the position's own adaptive warning tier | u = 1 − distance ÷ warning tier, clamped to 0…1 |
+| 15 % | Size | Notional relative to the largest position. In one cross wallet every position's loss at liquidation is the same shared buffer, so notional is what tells them apart |
+
+Positions inside a tier rank above those outside. The top one is labelled **🎯 Handle this
+first**. When two or more positions are due an alert in the same check, the monitor sends
+**one** message listing them in order. Only the top position starts wake-up escalation and
+carries the 🛟 rescue button. A single tier alert still shows its rank, e.g.
+"Priority #2 of 3 — handle SOLUSDT first".
+
+### Position sizing check (`risk/sizing.py`)
+
+- **Equity** is the venue account's cross wallet plus cross unrealized PnL, plus isolated margin and PnL.
+- **Exit** is the protective stop if it fires before liquidation (see the stop-loss check).
+  Otherwise it is the liquidation price. For cross positions that is the correlated
+  liquidation below, because that is where a fast move really ends the position.
+- **Risk** is size × |mark − exit| ÷ equity. **Margin share** is margin ÷ equity.
+- **Suggested size** is min(risk % × equity ÷ |mark − exit|, max margin % × equity ÷ margin per unit).
+
+Both limits are per user (`/settings risk 0.1–20`, `/settings maxmargin 1–100`). New users
+get `LIQGUARD_RISK_PER_TRADE_PCT` and `LIQGUARD_MAX_MARGIN_PCT` (defaults 2 and 25). One
+consolidated 📏 alert lists newly oversized positions.
+
+### Portfolio stress test and correlated liquidation (`risk/correlation.py`, `risk/stress.py`)
+
+- **Factors.** Each coin has a beta to BTC and a correlation to the market (`FACTORS`; crypto
+  and stock-perp defaults for unknown symbols). Two positions on the same underlying, e.g.
+  `ETHUSDT` and Hyperliquid `ETH`, have correlation 1.
+- **Shock.** The market moves m %, and every cross position in the account moves β × m %. The
+  account is liquidated when wallet + PnL ≤ the maintenance margin of the shocked positions
+  (Binance tiers / Hyperliquid model, as in `true_liquidation`).
+- **Shocks shown.** −5 / −10 / −20 % and +5 / +10 / +20 %, each with "margin left" or
+  **LIQUIDATED**.
+- **Account liquidation move.** Found by scan plus bisection, both down and up. It is shown
+  with coins moving by their beta and with "all move equally" for comparison.
+- **Platform vs LiqGuard liquidation.** For each cross position, LiqGuard shows the price at the
+  account's adverse liquidation move next to the exchange's displayed price (others frozen).
+  The gap is shown in points of distance; isolated positions keep their own price.
+- **Alerts.** A 🧲 stress alert fires when the first liquidation move drops to ≤ 10 % (warning),
+  ≤ 5 % (critical) or ≤ 2.5 % (emergency), each band once. It also fires when the
+  concentration flag first appears.
+
+### Concentration (`risk/stress.py`)
+
+A book is flagged when ≥ 75 % of notional points one way across ≥ 2 positions whose average
+pairwise correlation is ≥ 0.6. It also reports **effective independent bets**,
+(Σ|wᵢ|)² ÷ ΣΣ wᵢ wⱼ ρᵢⱼ: five correlated longs behave like about 1.4 bets.
 
 ## How We Use Meta AI
 
@@ -459,6 +536,7 @@ Experience all features without real money:
           • Critical Risk
           • Safe Portfolio
           • 🎬 Liquidation Simulation
+          • 🎬 5 longs, one wallet (cross margin)
 ```
 
 The **Liquidation Simulation** gradually moves prices toward liquidation, firing alerts at each threshold (20%, 10%, 5%) with action buttons.
@@ -480,6 +558,23 @@ It runs a cross-margined book:
   closed. It is profitable while its ADL rank climbs to 4/5 and then 5/5 (⚡ warnings).
 - Critical and emergency alerts start wake-up reminders (one demo minute is 1.5 s), so you see
   reminder → URGENT → FINAL unless you tap **✅ I'm awake**.
+
+**🎬 5 longs, one wallet** is the scenario from the [user feedback](#real-user-feedback):
+
+- **The book.** BTC, ETH, SOL, DOGE and AVAX are 10× longs (~$76k notional) sharing one
+  $9,000 Binance cross wallet. Over the run each falls by its beta × an 8 % market drop.
+- **At the start.** Every platform liquidation line looks 50 %+ away. The stress test already
+  shows that −10 % liquidates the account, and that a ~8.8 % correlated drop is enough. 🧲
+  Concentration ("100 % long across 5 coins… like 1.4 independent bets"), 📏 sizing (all five
+  oversized, with suggested sizes) and 🛑 stop-loss alerts (four have no stop) arrive first.
+- **Stress bands.** The 🧲 stress alert escalates warning → critical → emergency as the account
+  liquidation move shrinks below 10 / 5 / 2.5 %. The platform lines still show 10 %+.
+- **Tier crossings.** Positions cross tiers within a step or two of each other. Each batch
+  arrives as one 🎯 **N POSITIONS AT RISK — HANDLE IN THIS ORDER** alert. SOL ranks first: its
+  wicks are fattest, so its time to liquidation at typical volatility is shortest.
+- **BTC's stop.** BTC's stop at $55,500 starts far above its displayed liquidation price. As
+  the wallet drains, the liquidation price climbs through it (🛑 *beyond liquidation*).
+- **End of the run.** It stops just short of account liquidation (< 1 % correlated move left).
 
 ## Security Model
 
@@ -531,7 +626,8 @@ Per-user isolation and per-user encryption are hard requirements. Details are in
 
 ## Web Dashboard
 
-Two views on one page:
+Two views on one page. The **scenario switch** next to *Simulate market* picks the demo book
+(*Mixed book* or *5 longs, one wallet*); it is disabled while a run is in progress.
 
 - **`/` – public demo**, clearly labelled **DEMO DATA**. It shows the demo portfolio that
   Telegram `/demo` uses (BTC + SOL on Binance, ETH on Hyperliquid). No login is needed, and
@@ -570,10 +666,15 @@ private run. Set `LIQGUARD_PUBLIC_URL` to the address users open (https in produ
 | Positions | Venue, side, leverage, distance gauge with tier markers, mark and **true** liquidation price (cross wallet, other positions' PnL and maintenance), funding rate, next payment and 8 h / 24 h drift "at current rate", 🛟 Rescue button |
 | Rescue simulator | Add margin vs reduce vs hedge side by side: new liquidation, distance, fees, realized loss, 24 h funding, capital, recommended option, Muse trade-offs. Opens automatically on each alert |
 | Funding & wallets | Cross wallet per venue, each position's rate and next settlement, drift, recent settlements |
+| Concentration banner | Appears when exposure is concentrated one way across correlated coins: share, coins, average correlation, effective independent bets, and the market move that liquidates the account |
+| Priority triage | Every position ranked by urgency score with a bar, severity, distance, time to liquidation at typical volatility, σ₅ₘ and notional; the top at-risk row is highlighted **🎯 Handle this first** |
+| Portfolio stress test | Per cross account: the market move that liquidates it (beta-weighted, and "all move equally"), and −5 / −10 / −20 % (and upside) cells showing margin left or **LIQUIDATED** |
+| Platform liq vs real liq | For each position: the platform's displayed liquidation price and distance next to LiqGuard's correlated liquidation price and distance, as two bars, with a red "N pts closer than shown" badge |
+| Position sizing | Equity and your limits; for each position, loss at exit vs risk limit and margin share vs margin limit as meters, "cut N %" and the suggested size |
 | Wake-up banner | Unacknowledged critical/emergency alerts, reminders sent / cap, **✅ I'm awake** buttons; shakes on each reminder |
 | Wick stress & adaptive tiers | Session strip (demo clock, weekend / thin hours / US stocks closed). For each position: max wicks away, 1m and 5m max and typical wicks, base → effective tiers with reasons |
 | Stop-loss sanity & ADL | For each position: stop status, stop vs liquidation price, gap vs required gap, the computed fixes with Muse's pick ★ and explanation, and 1–5 ADL lights (Hyperliquid: n/a) |
-| Alert timeline | Adaptive-tier alerts (effective vs base tier, wicks away, reasons), 🛑 stop-loss, ⚡ ADL, ⏳ pre-funding, ⏰ reminders and ✅ acknowledgements, showing which channels (Web, Telegram) received each one |
+| Alert timeline | 🎯 Consolidated triage alerts (positions in order), 🧲 stress/concentration, 📏 sizing, adaptive-tier alerts (with priority rank) (effective vs base tier, wicks away, reasons), 🛑 stop-loss, ⚡ ADL, ⏳ pre-funding, ⏰ reminders and ✅ acknowledgements, showing which channels (Web, Telegram) received each one |
 | Muse advice | Per-alert explanation, exact "add $X margin" / "reduce Y%", and a rescue mini-comparison |
 | Audit log | Simulation start/stop, every alert, every advice card, and protective-action steps from Telegram (sanitized) |
 
@@ -609,7 +710,9 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 | `/api/me/rescue/live?symbol=&venue=` | GET | Rescue plan for one of *your* live (or demo-book) positions |
 | `…/simulate` · `…/simulate/stop` · `…/simulate/reset` | POST | Simulation controls (CSRF header required) |
 | `…/ack` | POST | `{"ack_id": …}`: "I'm awake" for one of this simulation's alerts (CSRF header required) |
-| `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, per-position protection (wicks, tiers, stop, ADL), pending live reminders, audit log |
+| `…/insights` | GET | Priority triage, per-account stress test, platform vs correlated liquidation, concentration and sizing for this simulation |
+| `…/scenario` | POST | `{"scenario": "mixed" \| "cross_longs"}`: switch the demo book (CSRF header required; 409 while running) |
+| `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, per-position protection (wicks, tiers, stop, ADL), portfolio insights (triage, stress, liq comparison, concentration, sizing), pending live reminders, audit log |
 | `/api/me/live/ack` | POST | Acknowledge one of *your* live monitor's reminders (CSRF header required) |
 | `/api/health` · `/api/auth/config` | GET | Status (incl. funding and wick feed freshness/errors); login options (no secrets) |
 | `/auth/login?token=` · `/auth/telegram` | GET | One-time link / Telegram widget sign-in |
@@ -618,7 +721,7 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 
 ### Security
 
-- **No trading from the web.** The only write endpoints are simulation controls, alert acknowledgements and logout. Binding accounts and confirming actions stay in Telegram (tier 1, testnet only).
+- **No trading from the web.** The only write endpoints are simulation controls (including the scenario switch), alert acknowledgements and logout. Binding accounts and confirming actions stay in Telegram (tier 1, testnet only).
 - **No secrets in the browser.** Responses carry no API keys, secrets or ciphertexts; bindings show a masked hint. Tests check this.
 - **Hardened by default.** Binds to `127.0.0.1`, strict Content-Security-Policy, `X-Frame-Options: DENY`, `Cache-Control: no-store`. Chart.js (jsDelivr) and, on `/login`, the Telegram widget script are the only external scripts.
 
@@ -648,8 +751,9 @@ python3 -m pytest liqguard/tests/ -q
 | `test_protection.py` | Wick stats and 5m aggregation, kline pagination and request weights, rate limiter, wick cache (incremental refresh, errors), sessions and stock-market hours, adaptive floors and caps, stop-loss statuses and fixes, Muse fix validation, order parsers, open-orders / ADL adapters, ADL lights, escalation tracker and service, monitor integration |
 | `test_telegram_protection.py` | `/positions` and `/risk` protection lines, `/settings` (buttons, text args, validation, per-user), "I'm awake" for live and simulated alerts (owner only) |
 | `test_dashboard_protection.py` | Snapshot protection data, stop/ADL/escalation events, `…/ack` (CSRF, id validation, once only), live ack and cross-user isolation, account protection payload |
+| `test_portfolio_risk.py` | Correlation factors, account surplus and liquidation move, ±5/10/20 % shocks, platform vs correlated liquidation gap, concentration and effective bets, sizing (equity, stop vs liquidation exit, both limits), triage ordering and labels, consolidated monitor alert and dedupe, the 5-long scenario, Telegram `/risk` / `/positions` / `/settings` / `/demo`, dashboard insights and scenario endpoints, per-user isolation, env defaults |
 
-466 tests at the time of writing.
+532 tests at the time of writing.
 
 ## Environment Variables
 
@@ -679,6 +783,8 @@ python3 -m pytest liqguard/tests/ -q
 | `LIQGUARD_STOP_BUFFER_PCT` | No | Minimum gap between stop and liquidation price, % (default: 0.5; the typical 5m wick is used when larger) |
 | `LIQGUARD_ESCALATION_INTERVAL_MINUTES` | No | Default reminder interval for new users (default: 2, minimum 0.5) |
 | `LIQGUARD_ESCALATION_MAX_REMINDERS` | No | Default reminder cap for new users (default: 5) |
+| `LIQGUARD_RISK_PER_TRADE_PCT` | No | Default max loss per position at its exit, % of equity, for new users (default: 2, range 0.1–20) |
+| `LIQGUARD_MAX_MARGIN_PCT` | No | Default max margin per position, % of equity, for new users (default: 25, range 1–100) |
 
 ## Demo Video Script
 
@@ -709,6 +815,13 @@ Setup: `liqguard --dashboard`, send `/dashboard` to the bot and open the link; p
 4. BTC turns critical. Don't tap anything: ⏰ reminders arrive in Telegram and the dashboard banner (1/5 → URGENT → FINAL)
 5. Tap **✅ I'm awake** in Telegram. The dashboard shows *acknowledged from telegram* and the reminders stop
 6. `/settings`: change the interval to 5 min and point at the notification-exception tip
+
+### Scene 2c: Five longs, one wallet (45s)
+1. Switch the dashboard scenario to **5 longs, one wallet** (or `/demo` → 🎬 5 longs, one wallet)
+2. Before pressing Simulate: the 🧲 banner reads "100 % long across 5 correlated coins". **Platform liq vs real liq** shows BTC's line 52 % away, but LiqGuard's correlated line only ~9 % away. The stress test shows −10 % = LIQUIDATED
+3. Position sizing: all five are oversized for a $9k wallet, each with a suggested size
+4. Simulate: the 🧲 stress alert escalates while the platform lines still look far away. Then one 🎯 alert in Telegram lists the five positions in the order to handle them, with **Handle this first** on SOL
+5. `/risk` in Telegram shows the same triage, stress table and gap
 
 ### Scene 3: Telegram Bot Commands (40s)
 1. `/risk` → Show portfolio risk overview in Telegram
@@ -742,6 +855,8 @@ Setup: `liqguard --dashboard`, send `/dashboard` to the bot and open the link; p
 - [x] Multi-user isolation, envelope encryption, dashboard login
 - [x] Cross-margin true liquidation price, live funding, rescue simulator
 - [x] Wick stress test, adaptive tiers, stop-loss sanity check, ADL lights, wake-up escalation
+- [x] Priority triage, position sizing, correlated portfolio stress test, concentration warning
+- [ ] Rolling correlations and betas from klines instead of fixed factors
 - [ ] Exchange holiday calendars for stock perps; Hyperliquid ADL once an API exposes it
 - [ ] Portfolio-margin / multi-assets mode and Binance Hedge Mode positions as input
 - [ ] Hyperliquid testnet execution and reduce-position execution
