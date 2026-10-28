@@ -6,6 +6,20 @@ from typing import Optional
 
 from liqguard.models import Alert, AlertSeverity, AlertType, Position, Side, UserThreshold
 
+from .context import RiskContext
+from .liquidation import target_liquidation_price, true_liquidation, wallet_for_target
+
+
+def exact_margin_to_target(position: Position, context: RiskContext, target_distance_pct: float) -> float:
+    """Margin to add (to the cross wallet or the isolated position) so the computed distance reaches the target."""
+    account = context.account_for(position)
+    current = true_liquidation(position, account)
+    if current.distance_pct >= target_distance_pct:
+        return 0.0
+    target = target_liquidation_price(position.side, position.mark_price, target_distance_pct)
+    return max(0.0, wallet_for_target(position, account, target) - current.wallet_balance)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,14 +59,17 @@ class RiskEngine:
     3. Risk scoring for prioritization
     """
 
-    def __init__(self, threshold: Optional[UserThreshold] = None):
+    def __init__(self, threshold: Optional[UserThreshold] = None, context: Optional[RiskContext] = None):
         """
         Initialize risk engine.
 
         Args:
             threshold: User's alert thresholds. Uses defaults if not provided.
+            context: Margin accounts and funding. When given, alerts use the closer of the
+                exchange-reported and the computed (cross-margin aware) liquidation distance.
         """
         self.threshold = threshold or UserThreshold()
+        self.context = context
 
     @staticmethod
     def calculate_distance_to_liquidation(
@@ -145,7 +162,7 @@ class RiskEngine:
         else:
             return current_liq_price + price_shift
 
-    def calculate_risk_score(self, position: Position) -> float:
+    def calculate_risk_score(self, position: Position, distance: Optional[float] = None) -> float:
         """
         Calculate a risk score from 0 to 100.
 
@@ -156,7 +173,8 @@ class RiskEngine:
         - Leverage (higher = more risk)
         - Position size / notional value
         """
-        distance = position.distance_to_liquidation_pct
+        if distance is None:
+            distance = position.distance_to_liquidation_pct
 
         if distance <= 0:
             return 100.0
@@ -189,20 +207,26 @@ class RiskEngine:
         Returns:
             RiskAssessment with all calculated metrics
         """
-        distance = self.calculate_distance_to_liquidation(
-            position.mark_price,
-            position.liquidation_price,
-            position.side
-        )
+        if self.context is not None:
+            distance = self.context.effective_distance(position)
+        else:
+            distance = self.calculate_distance_to_liquidation(
+                position.mark_price,
+                position.liquidation_price,
+                position.side
+            )
 
         severity = self.threshold.get_severity_for_distance(distance)
 
-        margin_to_safety = self.calculate_margin_to_reach_distance(
-            position,
-            self.threshold.safety_target_pct
-        )
+        if self.context is not None and self.context.computable(position):
+            margin_to_safety = exact_margin_to_target(position, self.context, self.threshold.safety_target_pct)
+        else:
+            margin_to_safety = self.calculate_margin_to_reach_distance(
+                position,
+                self.threshold.safety_target_pct
+            )
 
-        risk_score = self.calculate_risk_score(position)
+        risk_score = self.calculate_risk_score(position, distance)
 
         is_at_risk = distance <= self.threshold.warning_distance_pct
         is_critical = distance <= self.threshold.critical_distance_pct

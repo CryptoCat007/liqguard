@@ -19,6 +19,10 @@ class Side(str, Enum):
     SHORT = "short"
 
 
+CROSS = "cross"
+ISOLATED = "isolated"
+
+
 @dataclass
 class Position:
     """
@@ -39,6 +43,10 @@ class Position:
     margin_ratio: Optional[float] = None
     timestamp: datetime = None
     network: str = "mainnet"
+    margin_mode: str = ISOLATED
+    # Isolated positions only: margin allocated to the position, excluding unrealized PnL.
+    # Falls back to `margin` when the venue does not report it separately.
+    isolated_wallet: Optional[float] = None
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -114,4 +122,14 @@ class Position:
             "distance_to_liquidation_pct": self.distance_to_liquidation_pct,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "network": self.network,
+            "margin_mode": self.margin_mode,
         }
+
+    @property
+    def sign(self) -> int:
+        return 1 if self.side == Side.LONG else -1
+
+    @property
+    def base_symbol(self) -> str:
+        """Venue-neutral asset key used for funding lookups (`ETH-PERP` → `ETH`)."""
+        return self.symbol.removesuffix("-PERP")
