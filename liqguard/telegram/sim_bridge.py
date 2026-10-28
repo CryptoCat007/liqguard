@@ -8,7 +8,13 @@ from typing import Callable, Optional
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from liqguard.alerts import format_prefunding_message
+from liqguard.alerts import (
+    ACK_PREFIX,
+    format_adl_message,
+    format_prefunding_message,
+    format_stop_message,
+    wick_line,
+)
 from liqguard.simulation import MarketSimulation
 
 logger = logging.getLogger(__name__)
@@ -24,8 +30,16 @@ def format_advice_message(card: dict) -> str:
         f"{LEVEL_EMOJI.get(level, '❓')} **{level.upper()} ALERT** · demo",
         "",
         f"**{card['symbol']}** {card['side'].upper()} on {card['venue'].title()}",
-        f"Distance to liq: **{card['distance_pct']:.1f}%**",
+        f"Distance to liq: **{card['distance_pct']:.1f}%**"
+        + (f" (tier {card['threshold_pct']:.1f}%)" if card.get("threshold_pct") else ""),
         f"Mark: ${card['mark_price']:,.2f} · Liq: ${card['liquidation_price']:,.2f}",
+    ]
+    stress = wick_line(card.get("wicks"))
+    if stress:
+        lines.append(stress)
+    if card.get("adaptive_reasons"):
+        lines.append(f"Tiers widened: {'; '.join(card['adaptive_reasons'])}")
+    lines += [
         "",
         f"🧠 _{muse}:_ {card['explanation']}",
     ]
@@ -46,8 +60,13 @@ def format_advice_message(card: dict) -> str:
     return "\n".join(lines)
 
 
+def ack_row(ack_id: str) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text="✅ I'm awake", callback_data=f"{ACK_PREFIX}{ack_id}")]
+
+
 def advice_keyboard(card: dict) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="🛟 Compare rescue options", callback_data=f"rescue:sim:{card['symbol']}")]]
+    rows = [ack_row(card["ack_id"])] if card.get("ack_id") else []
+    rows.append([InlineKeyboardButton(text="🛟 Compare rescue options", callback_data=f"rescue:sim:{card['symbol']}")])
     rescue = card.get("rescue")
     if rescue:
         labels = {"add_margin": "💰 Add margin", "reduce": "✂️ Reduce", "hedge": "🛡 Hedge"}
@@ -103,15 +122,43 @@ class TelegramSimulationBridge:
             ]])
             await self._send(format_prefunding_message(data["funding"], demo=True), keyboard)
 
+        elif kind == "alert" and data["level"] == "stop":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}"),
+            ]])
+            await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True), keyboard)
+
+        elif kind == "alert" and data["level"] == "adl":
+            await self._send(format_adl_message(data["symbol"], data["venue"], data["side"], data["adl"],
+                                                data.get("unrealized_pnl", 0.0), demo=True))
+
+        elif kind == "escalation":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                ack_row(data["ack_id"]),
+                [InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}")],
+            ])
+            await self._send(data["text"], keyboard)
+
+        elif kind == "ack" and data.get("source") != "telegram":
+            await self._send(f"✅ {data['symbol']} alert acknowledged on the {data['source']} — reminders stopped.")
+
         elif kind == "audit" and data["event"] == "simulation_started":
             t = self.simulation.threshold
+            session = self.simulation._session_dict()
+            esc = (f"⏰ Critical/emergency alerts repeat every {t.escalation_interval_minutes:g} demo min "
+                   f"(×{self.simulation.escalation_seconds_per_minute:g}s) until you tap ✅ I'm awake, "
+                   f"up to {t.escalation_max_reminders}." if t.escalation_enabled else "⏰ Wake-up escalation is off (/settings).")
             await self._send(
                 "🎬 **Market simulation started** (demo data)\n\n"
-                "Prices will walk toward liquidation. Alerts fire at "
+                "Prices will walk toward liquidation. Your tiers: "
                 f"⚠️ {t.warning_distance_pct:.0f}% · 🚨 {t.critical_distance_pct:.0f}% · "
-                f"🆘 {t.emergency_distance_pct:.0f}%.\n"
+                f"🆘 {t.emergency_distance_pct:.0f}%"
+                + (f", widened per symbol for 30-day wicks and the session (demo clock {session['weekday']}: {'; '.join(session['reasons'])})"
+                   if t.adaptive_thresholds and session["reasons"] else "")
+                + ".\n"
                 "Liquidation prices are computed for cross margin (BTC + SOL share one Binance wallet); "
-                "demo funding settles on a simulated clock (12 min per step) and ⏳ warns before large payments."
+                "demo funding settles on a simulated clock (12 min per step) and ⏳ warns before large payments.\n"
+                "🛑 Stop-losses are checked against liquidation, ⚡ ADL lights are watched, and " + esc
             )
 
         elif kind == "status" and data["state"] in ("finished", "stopped"):

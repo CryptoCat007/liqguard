@@ -15,7 +15,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-from liqguard.alerts import PositionMonitor
+from liqguard.alerts import EscalationService, PositionMonitor
 from liqguard.config import Settings
 from liqguard.core import AppContext
 from liqguard.logsafe import install_log_redaction
@@ -91,14 +91,17 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
     dp = Dispatcher(storage=MemoryStorage())
     BotHandlers(ctx).register(dp, bot)
 
+    notifier = TelegramNotifier(bot)
+    escalation = EscalationService(notifier, ctx.escalations)
     monitor = PositionMonitor(
         users=ctx.storage.get_all_users_with_bindings,
         positions=ctx.positions.snapshot_for,
-        notifier=TelegramNotifier(bot),
+        notifier=notifier,
         alert_manager=ctx.alerts,
         explainer=ctx.llm,
         poll_interval=settings.poll_interval,
         prefunding_lead_minutes=settings.prefunding_lead_minutes,
+        escalation=escalation,
     )
 
     dashboard_server = None
@@ -126,8 +129,10 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
     try:
         ctx.market.start()
         await monitor.start()
+        escalation.start()
         await dp.start_polling(bot)
     finally:
+        await escalation.stop()
         await monitor.stop()
         await ctx.close()
         await bot.session.close()

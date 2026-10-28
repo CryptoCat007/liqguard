@@ -1,5 +1,6 @@
 """Tests for the demo market simulation, its owner-only Telegram bridge and handler integration."""
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -200,10 +201,32 @@ class TestTelegramBridge:
         assert calls and {c.args[0] for c in calls} == {42}
         texts = [c.args[1] for c in calls]
         assert any("simulation started" in t for t in texts)
-        alert_texts = [t for t in texts if "ALERT" in t]
-        assert len(alert_texts) == len(sim.alerts)
+        alert_texts = [t for t in texts if any(f"{tier.upper()} ALERT" in t for tier in TIERS)]
+        assert len(alert_texts) == len([a for a in sim.alerts if a["level"] in TIERS])
         assert any("EMERGENCY ALERT" in t for t in alert_texts)
         assert "telegram" in sim.alerts[0]["channels"]
+        assert any("stop" in t.lower() and "BTCUSDT" in t for t in texts if t not in alert_texts)
+        assert any("ADL" in t and "TSLAUSDT" in t for t in texts)
+
+        critical = [c for c in calls if "CRITICAL ALERT" in c.args[1]]
+        buttons = [b.callback_data for row in critical[0].kwargs["reply_markup"].inline_keyboard for b in row]
+        assert buttons[0].startswith("ack:")
+
+    async def test_escalation_reminders_and_web_ack_reach_telegram(self):
+        sim = MarketSimulation(MetaLLMClient(use_mock=True), owner_id=42, tick_interval=0, escalation_seconds_per_minute=0.01)
+        bot = AsyncMock()
+        TelegramSimulationBridge(bot, sim)
+        await sim.start()
+        await sim.wait()
+        for _ in range(100):
+            if sim.escalation_log:
+                break
+            await asyncio.sleep(0.02)
+        reminder = sim.escalation_log[0]
+        await sim.acknowledge(reminder["ack_id"], source="dashboard")
+        texts = [c.args[1] for c in bot.send_message.call_args_list]
+        assert reminder["text"] in texts
+        assert any("acknowledged on the dashboard" in t for t in texts)
 
     def test_public_simulation_cannot_be_bridged(self, sim):
         with pytest.raises(ValueError):

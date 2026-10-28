@@ -143,3 +143,68 @@ def plan_summary_line(plan: RescuePlan) -> str:
         return ""
     best = plan.option(plan.recommended)
     return f"🛟 Cheapest rescue: {best.title} ({_money(best.total_cost_usd)})" if best else ""
+
+
+STOP_STATUS = {
+    "ok": "✅",
+    "partial": "⚠️ partial",
+    "no_stop": "🛑 none",
+    "beyond_liquidation": "🛑 beyond liq (never fires)",
+    "too_close": "⚠️ too close to liq",
+}
+
+
+def protection_lines(info: dict) -> list[str]:
+    """Wick stress, adaptive tiers, stop-loss and ADL lines from `PositionProtection.to_dict()`."""
+    lines = []
+    wicks = info.get("wicks")
+    if wicks and wicks.get("exposures"):
+        parts = [
+            f"{e['interval']} {e['max_wicks_away']:.1f}× max ({e['max_pct']:.2f}%) / {e['typical_wicks_away']:.1f}× typical"
+            for e in wicks["exposures"] if e["max_wicks_away"] is not None
+        ]
+        if parts:
+            flag = " ⚠️ one max wick liquidates" if wicks.get("one_max_wick_liquidates") else ""
+            demo = " (demo)" if wicks.get("source") == "demo" else ""
+            lines.append(f"├ Wicks away{demo}: {'; '.join(parts)}{flag}")
+    t = info.get("thresholds") or {}
+    if t.get("adapted"):
+        e = t["effective"]
+        lines.append(f"├ Tiers: {e['warning']:.1f}/{e['critical']:.1f}/{e['emergency']:.1f}% · {'; '.join(t['reasons'])}")
+    stop = info.get("stop")
+    if stop is None:
+        lines.append("├ Stop: — (orders not available)")
+    else:
+        label = STOP_STATUS.get(stop["status"], stop["status"])
+        if stop.get("stop_price") is not None:
+            gap = f", {stop['gap_pct']:.2f}% before liq" if stop.get("gap_pct") is not None and stop["gap_pct"] > 0 else ""
+            lines.append(f"├ Stop: {label} {_money(stop['stop_price'])}{gap}")
+        else:
+            lines.append(f"├ Stop: {label}")
+        move = next((f for f in stop.get("fixes", []) if f["kind"] == "move_stop"), None)
+        if stop["needs_warning"] and move:
+            lines.append(f"│  ↳ safe stop ≥ {_money(move['stop_price'])} (keeps {stop['required_gap_pct']:.2f}% before liq)")
+    adl = info.get("adl") or {}
+    if adl.get("supported") and adl.get("lights"):
+        warn = " ⚡ profitable: near the front of the ADL queue" if adl["warn"] else ""
+        lines.append(f"├ ADL: {'●' * adl['lights']}{'○' * (5 - adl['lights'])} {adl['lights']}/5{warn}")
+    elif adl and not adl.get("supported"):
+        lines.append("├ ADL: n/a (Hyperliquid publishes no ADL rank)")
+    return lines
+
+
+def protection_summary(infos: list[dict]) -> Optional[str]:
+    no_stop = [i["symbol"] for i in infos if (i.get("stop") or {}).get("status") == "no_stop"]
+    useless = [i["symbol"] for i in infos if (i.get("stop") or {}).get("status") in ("beyond_liquidation", "too_close")]
+    adl = [i["symbol"] for i in infos if (i.get("adl") or {}).get("warn")]
+    one_wick = [i["symbol"] for i in infos if (i.get("wicks") or {}).get("one_max_wick_liquidates")]
+    parts = []
+    if no_stop:
+        parts.append(f"🛑 no stop: {', '.join(no_stop)}")
+    if useless:
+        parts.append(f"🛑 stop beyond/at liq: {', '.join(useless)}")
+    if one_wick:
+        parts.append(f"🕯 one max wick from liq: {', '.join(one_wick)}")
+    if adl:
+        parts.append(f"⚡ ADL 4–5/5: {', '.join(adl)}")
+    return "\n".join(parts) if parts else None

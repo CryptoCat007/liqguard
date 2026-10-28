@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
+import time
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -14,6 +16,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from liqguard.ai import get_news_stub
+from liqguard.alerts import ACK_PREFIX
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.positions import LABEL_SIMULATION
 from liqguard.exchanges import SCENARIOS, BinanceAdapter, HyperliquidAdapter
@@ -25,6 +28,7 @@ from liqguard.risk import (
     RescueSimulator,
     RiskEngine,
     format_portfolio_overview_text,
+    position_protection,
 )
 from liqguard.simulation import MarketSimulation
 
@@ -33,6 +37,8 @@ from .views import (
     format_rescue_text,
     funding_lines,
     liquidation_lines,
+    protection_lines,
+    protection_summary,
     rescue_keyboard,
 )
 
@@ -97,6 +103,7 @@ class BotHandlers:
         r.message.register(self.cmd_actions, Command("actions"))
         r.message.register(self.cmd_killswitch, Command("killswitch"))
         r.message.register(self.cmd_dashboard, Command("dashboard"))
+        r.message.register(self.cmd_settings, Command("settings"))
 
         r.callback_query.register(self.callback_venue_selected, F.data.startswith("venue:"))
         r.callback_query.register(self.callback_unbind_venue, F.data.startswith("unbind:"))
@@ -108,6 +115,8 @@ class BotHandlers:
         r.callback_query.register(self.callback_demo_control, F.data.startswith("democtl:"))
         r.callback_query.register(self.callback_risk, F.data.startswith("risk:"))
         r.callback_query.register(self.callback_rescue, F.data.startswith("rescue:"))
+        r.callback_query.register(self.callback_ack, F.data.startswith(ACK_PREFIX))
+        r.callback_query.register(self.callback_settings, F.data.startswith("settings:"))
 
         r.message.register(self.process_binance_api_key, BindingStates.waiting_for_binance_api_key)
         r.message.register(self.process_binance_api_secret, BindingStates.waiting_for_binance_api_secret)
@@ -129,7 +138,7 @@ class BotHandlers:
             "**Quick start**\n"
             "1. /bind to connect an exchange\n"
             "2. /positions or /risk to see your risk\n"
-            "3. /threshold to set alert levels\n"
+            "3. /threshold to set alert levels, /settings for wake-up reminders\n"
             "4. /demo to try it with simulated positions\n"
             "5. /dashboard for a private web dashboard link\n\n"
             "Type /help for all commands.",
@@ -143,7 +152,7 @@ class BotHandlers:
                 "🛡️ **LiqGuard 指令**\n\n"
                 "**連接交易所**\n/bind - 連接交易所\n/unbind - 移除連接\n\n"
                 "**監控倉位**\n/positions - 倉位與風險\n/risk - 投資組合風險總覽\n/status - 帳戶狀態\n\n"
-                "**設定**\n/threshold - 警報閾值\n/language - 切換語言\n/demo - 演示模式\n\n"
+                "**設定**\n/threshold - 警報閾值\n/settings - 喚醒提醒、自適應閾值、止損檢查\n/language - 切換語言\n/demo - 演示模式\n\n"
                 "**AI 功能**\n/ask <問題> - 詢問倉位\n📸 發送截圖 - 解析倉位\n\n"
                 "**網頁儀表板**\n/dashboard - 取得一次性登入連結\n/dashboard revoke - 登出所有裝置\n\n"
                 "**保護操作（僅測試網）**\n/actions - 待處理操作\n/killswitch - 緊急停止\n\n"
@@ -155,7 +164,8 @@ class BotHandlers:
                 "**Connect exchanges**\n/bind - Connect Binance or Hyperliquid\n/unbind - Remove a connection\n\n"
                 "**Monitor**\n/positions - Positions with risk assessment\n/risk - Portfolio risk overview\n"
                 "/status - Account status\n\n"
-                "**Settings**\n/threshold - Alert thresholds\n/language - Change language\n/demo - Demo mode\n\n"
+                "**Settings**\n/threshold - Alert thresholds\n/settings - Wake-up reminders, adaptive tiers, stop-loss checks\n"
+                "/language - Change language\n/demo - Demo mode\n\n"
                 "**AI**\n/ask <question> - Ask about your positions\n📸 Send a screenshot - Parse a position\n\n"
                 "**Web dashboard**\n/dashboard - One-time login link\n/dashboard revoke - Sign out everywhere\n\n"
                 "**Protective actions (testnet only)**\n/actions - Pending actions\n/killswitch - Emergency stop\n\n"
@@ -319,11 +329,22 @@ class BotHandlers:
     async def _snapshot(self, user: User) -> BookSnapshot:
         return await self.positions.snapshot_for(user)
 
+    @staticmethod
+    def _assess(user: User, snapshot: BookSnapshot) -> list[tuple]:
+        """(assessment, protection dict) per position, riskiest first, each assessed against its adaptive tiers."""
+        out = []
+        for pos in snapshot.positions:
+            protection = position_protection(pos, snapshot.context, user.threshold)
+            assessment = RiskEngine(protection.adaptive.threshold, snapshot.context).assess_position(pos)
+            out.append((assessment, protection.to_dict()))
+        return sorted(out, key=lambda x: x[0].distance_to_liquidation_pct)
+
     def _positions_text(self, user: User, snapshot: BookSnapshot) -> tuple[str, list]:
         context = snapshot.context
-        assessments = RiskEngine(user.threshold, context).assess_positions(snapshot.positions)
+        assessed = self._assess(user, snapshot)
+        assessments = [a for a, _ in assessed]
         response = f"**{snapshot.label}**\n\n"
-        for a in assessments:
+        for a, info in assessed:
             pos = a.position
             mode = f" · {pos.margin_mode}" if pos.venue.value != "demo" else ""
             response += (
@@ -336,6 +357,7 @@ class BotHandlers:
             response += f"├ Distance: **{a.distance_to_liquidation_pct:.1f}%**\n"
             response += "".join(line + "\n" for line in funding_lines(pos, context))
             response += f"├ PnL: ${pos.unrealized_pnl:,.2f}\n├ Leverage: {pos.leverage}x\n"
+            response += "".join(line + "\n" for line in protection_lines(info))
             if a.margin_to_safety > 0:
                 response += (
                     f"└ Add **${a.margin_to_safety:,.2f}** margin → {user.threshold.safety_target_pct:.0f}% from liq "
@@ -391,11 +413,16 @@ class BotHandlers:
         text = await self._risk_overview_text(overview, user.language)
         buttons = []
         riskiest = overview.riskiest_position
+        infos = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in snapshot.positions]
+        summary = protection_summary(infos)
+        if summary:
+            text += f"\n\n**Protection checks**\n{summary}"
         if riskiest:
             pos = next((p for p in snapshot.positions if p.symbol == riskiest.symbol and p.venue.value == riskiest.venue), None)
             if pos is not None:
-                extra = liquidation_lines(pos, snapshot.context) + funding_lines(pos, snapshot.context)
-                text += f"\n\n**{pos.symbol} liquidation & funding**\n" + "\n".join(extra)
+                info = next(i for i, p in zip(infos, snapshot.positions) if p is pos)
+                extra = liquidation_lines(pos, snapshot.context) + funding_lines(pos, snapshot.context) + protection_lines(info)
+                text += f"\n\n**{pos.symbol} liquidation & funding · stress test**\n" + "\n".join(extra)
                 if riskiest.severity is not None:
                     buttons.append([InlineKeyboardButton(
                         text=f"🛟 Rescue options for {riskiest.symbol}", callback_data=self._rescue_callback(snapshot, pos),
@@ -485,17 +512,139 @@ class BotHandlers:
                 await callback.answer("No positions found")
                 return
             response = f"**{snapshot.label}**\n\n"
-            for a in RiskEngine(user.threshold, snapshot.context).assess_positions(snapshot.positions):
+            for a, info in self._assess(user, snapshot):
                 pos = a.position
+                adl = info["adl"]
+                lights = f" | ADL {adl['lights']}/5" if adl.get("lights") else ""
                 response += (
                     f"{RISK_EMOJI.get(a.risk_level_str, '❓')} **{pos.symbol}** {pos.side.value.upper()}\n"
-                    f"  Distance: {a.distance_to_liquidation_pct:.1f}% | PnL: ${pos.unrealized_pnl:,.2f}\n"
+                    f"  Distance: {a.distance_to_liquidation_pct:.1f}% | PnL: ${pos.unrealized_pnl:,.2f}{lights}\n"
                 )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📊 Back to Overview", callback_data="risk:refresh")],
             ])
             await callback.message.edit_text(response, parse_mode="Markdown", reply_markup=keyboard)
             await callback.answer()
+
+    # ------------------------------------------------------------------ wake-up escalation & settings
+
+    async def callback_ack(self, callback: CallbackQuery) -> None:
+        """"I'm awake": stops reminders for the caller's own alert (live monitor or their simulation)."""
+        ack_id = callback.data[len(ACK_PREFIX):]
+        user_id = callback.from_user.id
+        ack = self.ctx.escalations.acknowledge(user_id, ack_id, time.time())
+        symbol = ack.symbol if ack else None
+        if ack is None:
+            sim = self.simulations.get(user_id)
+            event = await sim.acknowledge(ack_id, source="telegram") if sim is not None else None
+            symbol = event["symbol"] if event else None
+        if symbol is None:
+            await callback.answer("Already acknowledged or expired.")
+            return
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await callback.message.answer(f"✅ Acknowledged — reminders for **{symbol}** stopped. Stay safe.", parse_mode="Markdown")
+        await callback.answer("Reminders stopped")
+
+    @staticmethod
+    def _settings_text(user: User) -> str:
+        t = user.threshold
+        onoff = {True: "ON", False: "OFF"}
+        return (
+            "⚙️ **Settings**\n\n"
+            f"⏰ Wake-up escalation: **{onoff[t.escalation_enabled]}**\n"
+            f"   Critical/emergency alerts repeat every **{t.escalation_interval_minutes:g} min** until you tap "
+            f"✅ I'm awake, up to **{t.escalation_max_reminders}** reminders, louder each time.\n"
+            f"📈 Adaptive tiers: **{onoff[t.adaptive_thresholds]}** (widen for wicks, weekends, thin hours, closed stock market)\n"
+            f"🛑 Stop-loss checks: **{onoff[t.stop_loss_checks]}**\n\n"
+            "Text form: `/settings interval 3`, `/settings max 5`, `/settings escalation off`, "
+            "`/settings adaptive on`, `/settings stops off`\n\n"
+            "💡 Make sure reminders can wake you: open this chat → bot name → Notifications → turn sound on "
+            "(and add LiqGuard as a notification exception / allowed in Do Not Disturb). See the README."
+        )
+
+    @staticmethod
+    def _settings_keyboard(user: User) -> InlineKeyboardMarkup:
+        t = user.threshold
+
+        def mark(cond: bool) -> str:
+            return "• " if cond else ""
+
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{mark(t.escalation_interval_minutes == m)}every {m}m", callback_data=f"settings:interval:{m}")
+             for m in (1, 2, 5, 10)],
+            [InlineKeyboardButton(text=f"{mark(t.escalation_max_reminders == n)}max {n}", callback_data=f"settings:max:{n}")
+             for n in (3, 5, 10)],
+            [InlineKeyboardButton(text=f"⏰ Escalation {'ON' if t.escalation_enabled else 'OFF'}", callback_data="settings:escalation:toggle"),
+             InlineKeyboardButton(text=f"📈 Adaptive {'ON' if t.adaptive_thresholds else 'OFF'}", callback_data="settings:adaptive:toggle")],
+            [InlineKeyboardButton(text=f"🛑 Stop checks {'ON' if t.stop_loss_checks else 'OFF'}", callback_data="settings:stops:toggle")],
+        ])
+
+    @staticmethod
+    def apply_setting(threshold, key: str, value: str):
+        """New `UserThreshold` with one setting changed, or None if the input is invalid."""
+        fields = {"escalation": "escalation_enabled", "adaptive": "adaptive_thresholds", "stops": "stop_loss_checks"}
+        try:
+            if key == "interval":
+                minutes = float(value)
+                if not 0.5 <= minutes <= 60:
+                    return None
+                return dataclasses.replace(threshold, escalation_interval_minutes=minutes)
+            if key == "max":
+                n = int(value)
+                if not 1 <= n <= 20:
+                    return None
+                return dataclasses.replace(threshold, escalation_max_reminders=n)
+        except ValueError:
+            return None
+        if key in fields:
+            current = getattr(threshold, fields[key])
+            if value == "toggle":
+                new = not current
+            elif value in ("on", "off"):
+                new = value == "on"
+            else:
+                return None
+            return dataclasses.replace(threshold, **{fields[key]: new})
+        return None
+
+    async def _save_settings(self, user: User, threshold) -> None:
+        user.threshold = threshold
+        await self.storage.update_threshold(user.telegram_id, threshold)
+        sim = self.simulations.get(user.telegram_id)
+        if sim is not None and not sim.is_running:
+            sim.configure(threshold, user.language)
+
+    async def cmd_settings(self, message: Message, command: Optional[CommandObject] = None) -> None:
+        user = await self.get_or_create_user(message)
+        args = (command.args if command else "") or ""
+        parts = args.lower().split()
+        if len(parts) == 2:
+            updated = self.apply_setting(user.threshold, parts[0], parts[1])
+            if updated is None:
+                await message.answer("❌ Unknown or out-of-range setting. Interval 0.5–60 min, max 1–20, on/off for toggles.")
+                return
+            await self._save_settings(user, updated)
+        await message.answer(self._settings_text(user), parse_mode="Markdown", reply_markup=self._settings_keyboard(user))
+
+    async def callback_settings(self, callback: CallbackQuery) -> None:
+        parts = callback.data.split(":")
+        user = await self.storage.get_user(callback.from_user.id)
+        if user is None or len(parts) != 3:
+            await callback.answer("Send /start first")
+            return
+        updated = self.apply_setting(user.threshold, parts[1], parts[2])
+        if updated is None:
+            await callback.answer("Invalid setting")
+            return
+        await self._save_settings(user, updated)
+        try:
+            await callback.message.edit_text(self._settings_text(user), parse_mode="Markdown", reply_markup=self._settings_keyboard(user))
+        except Exception:
+            pass
+        await callback.answer("Saved")
 
     # ------------------------------------------------------------------ thresholds & language
 
