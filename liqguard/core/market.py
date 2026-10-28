@@ -65,7 +65,8 @@ class MarketDataService:
                 try:
                     rows = await feed.fetch()
                 except Exception as e:
-                    self._errors[venue] = type(e).__name__
+                    response = getattr(e, "response", None)
+                    self._errors[venue] = f"HTTP {response.status_code}" if response is not None else type(e).__name__
                     logger.warning("Funding refresh for %s failed (%s); keeping last data", venue, type(e).__name__)
                     continue
                 if not rows:
