@@ -1,6 +1,7 @@
 """Meta AI LLM client using OpenAI SDK with mock fallback."""
 
 import base64
+import dataclasses
 import json
 import logging
 import os
@@ -11,6 +12,9 @@ from openai import AsyncOpenAI
 from liqguard.models import Alert, AlertSeverity, Position
 from liqguard.risk.advice import ActionableAdvice, AdviceCalculator
 from liqguard.risk.portfolio import PortfolioRiskOverview
+from liqguard.risk.rescue import RescuePlan
+
+from .rescue import RESCUE_EXPLANATION_SCHEMA, mock_rescue_explanation, validate_rescue_explanation
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +111,10 @@ RISK_ANALYSIS_TOOLS = [
 class MetaLLMClient:
     """
     Client for Meta AI's LLM API (Muse Spark).
-    
+
     When API key is not available, uses deterministic mock responses
     so demo and tests work without credentials.
-    
+
     Features:
     - Tool calling for risk calculations (numbers computed deterministically)
     - Structured output for risk assessments
@@ -118,7 +122,7 @@ class MetaLLMClient:
     - Image understanding for screenshot parsing
     - Mock mode for demo/testing
     """
-    
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -128,7 +132,7 @@ class MetaLLMClient:
     ):
         """
         Initialize Meta LLM client.
-        
+
         Args:
             api_key: Meta API key. If not provided, reads from META_API_KEY env var.
             model: Model to use. Reads from META_MODEL env var or defaults to muse-spark.
@@ -138,12 +142,12 @@ class MetaLLMClient:
         api_key = api_key or os.environ.get("META_API_KEY")
         self.model = model or os.environ.get("META_MODEL", DEFAULT_MODEL)
         self.base_url = base_url
-        
+
         if use_mock is not None:
             self._use_mock = use_mock
         else:
             self._use_mock = not bool(api_key)
-        
+
         if self._use_mock:
             logger.info("MetaLLMClient running in mock mode (deterministic responses)")
             self.client = None
@@ -155,17 +159,17 @@ class MetaLLMClient:
 
     def __repr__(self) -> str:
         return f"MetaLLMClient(model={self.model!r}, mock={self._use_mock})"
-    
+
     @property
     def is_available(self) -> bool:
         """Check if the LLM client is available (includes mock mode)."""
         return True
-    
+
     @property
     def is_mock(self) -> bool:
         """Check if running in mock mode."""
         return self._use_mock
-    
+
     async def explain_risk_with_advice(
         self,
         position: Position,
@@ -174,14 +178,14 @@ class MetaLLMClient:
     ) -> dict:
         """
         Generate explanation for pre-computed advice using LLM.
-        
+
         Numbers come from advice (deterministic), LLM only explains.
         """
         if self._use_mock:
             return self._mock_explain_advice(position, advice, language)
-        
+
         system_prompt = self._get_advice_system_prompt(language)
-        
+
         user_content = f"""Position and pre-calculated advice:
 
 Position:
@@ -191,7 +195,7 @@ Calculated Advice (use these exact numbers):
 {json.dumps(advice.to_dict(), indent=2)}
 
 Explain this advice to the user. Use the exact numbers provided - do not calculate new ones."""
-        
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -203,15 +207,15 @@ Explain this advice to the user. Use the exact numbers provided - do not calcula
                 max_tokens=400,
                 temperature=0.3
             )
-            
+
             result = json.loads(response.choices[0].message.content)
             result["advice"] = advice.to_dict()
             return result
-            
+
         except Exception as e:
             logger.error(f"Error calling Meta API: {e}")
             return self._mock_explain_advice(position, advice, language)
-    
+
     def _get_advice_system_prompt(self, language: str) -> str:
         """Get system prompt for advice explanation."""
         if language == "zh-TW":
@@ -248,7 +252,7 @@ Response format:
     "recommended_action": {"action_type": "add_margin|reduce_position|none", "reason": "reason"},
     "urgency": "none|low|medium|high|immediate"
 }"""
-    
+
     def _mock_explain_advice(
         self,
         position: Position,
@@ -257,7 +261,7 @@ Response format:
     ) -> dict:
         """Generate deterministic mock explanation."""
         distance = position.distance_to_liquidation_pct
-        
+
         if distance <= 5:
             severity = "emergency"
             urgency = "immediate"
@@ -270,7 +274,7 @@ Response format:
         else:
             severity = "safe"
             urgency = "none"
-        
+
         if language == "zh-TW":
             if severity == "emergency":
                 summary = f"{position.symbol} 距離清算僅 {distance:.1f}%，需立即行動"
@@ -319,9 +323,9 @@ Response format:
             else:
                 summary = f"{position.symbol} is safe at {distance:.1f}% from liquidation"
                 explanation = f"Your {position.symbol} position is at a safe distance. Continue monitoring."
-        
+
         action_type = advice.action_type.value if advice.margin_to_add_usd and advice.margin_to_add_usd > 0 else "none"
-        
+
         return {
             "severity": severity,
             "summary": summary,
@@ -334,7 +338,7 @@ Response format:
             "advice": advice.to_dict(),
             "mock": True,
         }
-    
+
     async def parse_screenshot(
         self,
         image_data: bytes,
@@ -342,14 +346,14 @@ Response format:
     ) -> Optional[dict]:
         """
         Parse a position screenshot using image understanding.
-        
+
         Returns structured position data for user confirmation.
         """
         if self._use_mock:
             return self._mock_parse_screenshot()
-        
+
         image_b64 = base64.b64encode(image_data).decode()
-        
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -392,15 +396,15 @@ If you cannot determine a field, use null. Always include confidence score."""
                 response_format={"type": "json_object"},
                 max_tokens=400
             )
-            
+
             result = json.loads(response.choices[0].message.content)
             logger.info(f"Parsed screenshot: {result}")
             return result
-            
+
         except Exception as e:
             logger.error(f"Error parsing screenshot: {e}")
             return None
-    
+
     def _mock_parse_screenshot(self) -> dict:
         """Return mock parsed screenshot data for demo."""
         return {
@@ -417,7 +421,7 @@ If you cannot determine a field, use null. Always include confidence score."""
             "confidence": 0.85,
             "mock": True,
         }
-    
+
     async def answer_portfolio_question(
         self,
         positions: list[Position],
@@ -427,14 +431,14 @@ If you cannot determine a field, use null. Always include confidence score."""
     ) -> str:
         """
         Answer a user's question about their portfolio.
-        
+
         Uses tool calling to get pre-calculated metrics.
         """
         if not positions:
             if language == "zh-TW":
                 return "您目前沒有持倉。使用 /bind 連接交易所或 /demo 進入演示模式。"
             return "You have no positions. Use /bind to connect an exchange or /demo for demo mode."
-        
+
         assessments = []
         for pos in positions:
             advice = AdviceCalculator.calculate_margin_to_add(pos)
@@ -450,24 +454,24 @@ If you cannot determine a field, use null. Always include confidence score."""
                 "leverage": pos.leverage,
                 "margin_to_add_for_safety": round(advice.margin_to_add_usd or 0, 2),
             })
-        
+
         if self._use_mock:
             return self._mock_answer_question(assessments, question, language, news_context)
-        
+
         if language == "zh-TW":
             system_prompt = """你是加密貨幣交易助手。根據提供的倉位數據回答問題。
 使用提供的精確數字，不要自行計算。用繁體中文回答。"""
         else:
             system_prompt = """You are a crypto trading assistant. Answer questions based on the provided position data.
 Use the exact numbers provided - do not calculate your own."""
-        
+
         user_content = f"""Portfolio data (pre-calculated):
 {json.dumps(assessments, indent=2)}
 
 {f"Recent market news: {news_context}" if news_context else ""}
 
 Question: {question}"""
-        
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -478,13 +482,13 @@ Question: {question}"""
                 max_tokens=500,
                 temperature=0.3
             )
-            
+
             return response.choices[0].message.content.strip()
-            
+
         except Exception as e:
             logger.error(f"Error answering question: {e}")
             return self._mock_answer_question(assessments, question, language, news_context)
-    
+
     def _mock_answer_question(
         self,
         assessments: list[dict],
@@ -495,9 +499,9 @@ Question: {question}"""
         """Generate deterministic mock answer."""
         total_pnl = sum(a["unrealized_pnl"] for a in assessments)
         riskiest = max(assessments, key=lambda a: 100 - a["distance_to_liquidation_pct"]) if assessments else None
-        
+
         question_lower = question.lower()
-        
+
         if language == "zh-TW":
             if "風險" in question or "risk" in question_lower:
                 if riskiest:
@@ -544,7 +548,7 @@ Question: {question}"""
                 if riskiest:
                     summary += f"\nMost attention needed: {riskiest['symbol']} ({riskiest['distance_to_liquidation_pct']:.1f}% from liq)"
                 return summary
-    
+
     async def summarize_portfolio(
         self,
         overview: PortfolioRiskOverview,
@@ -626,6 +630,45 @@ Question: {question}"""
         line = f"Riskiest is {rp.symbol} {rp.side.upper()} on {rp.venue.title()} at {dist:.1f}% from liquidation"
         return line + (f" — add ${add:,.0f} margin to restore a {target:.0f}% buffer." if add else ".")
 
+    async def explain_rescue(self, plan: RescuePlan, language: str = "en") -> dict:
+        """
+        Structured trade-offs for a rescue plan (RESCUE_EXPLANATION_SCHEMA).
+        Every number comes from `plan`; a live answer that recommends an option
+        outside the plan or quotes an amount not in it is replaced by the mock.
+        """
+        if self._use_mock:
+            return mock_rescue_explanation(plan, language)
+
+        lang = "Traditional Chinese (zh-TW)" if language == "zh-TW" else "English"
+        system_prompt = (
+            "You explain liquidation rescue options to a crypto trader. All numbers are already computed; "
+            "quote only dollar amounts that appear in the input, never compute new ones. Compare add_margin, "
+            "reduce and hedge: what each costs (fees, realized loss, 24h funding 'at current rate'), how far it moves "
+            "the liquidation price, and its risks. Recommend the plan's `recommended` option unless it does not reach "
+            f"the target. Answer in {lang}. Return JSON matching this schema: "
+            + json.dumps(RESCUE_EXPLANATION_SCHEMA)
+        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(plan.to_dict(), indent=2)},
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=700,
+                temperature=0.2,
+            )
+            data = json.loads(response.choices[0].message.content)
+            problem = validate_rescue_explanation(data, plan)
+            if problem:
+                logger.warning("Rejected Muse rescue explanation (%s); using deterministic text", problem)
+                return mock_rescue_explanation(plan, language)
+            return {**data, "mock": False}
+        except Exception as e:
+            logger.error("Error explaining rescue plan: %s", type(e).__name__)
+            return mock_rescue_explanation(plan, language)
+
     async def explain_risk(
         self,
         position: Position,
@@ -636,9 +679,11 @@ Question: {question}"""
     ) -> str:
         """Generate a plain-language risk explanation."""
         advice = AdviceCalculator.calculate_margin_to_add(position)
+        if margin_to_safety and margin_to_safety > 0:
+            advice = dataclasses.replace(advice, margin_to_add_usd=margin_to_safety, estimated_cost_usd=margin_to_safety)
         result = await self.explain_risk_with_advice(position, advice, language)
         return result.get("explanation", AdviceCalculator.format_advice_text(advice, language))
-    
+
     async def get_structured_risk_assessment(self, alert: Alert) -> dict:
         """Get structured risk assessment for an alert."""
         return {
@@ -654,7 +699,7 @@ Question: {question}"""
 def get_news_stub(symbol: str) -> Optional[str]:
     """
     Stub for news context retrieval.
-    
+
     In production, this would call a news API or search service.
     Returns None for now - can be implemented with Meta search grounding.
     """
