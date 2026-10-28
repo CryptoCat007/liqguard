@@ -47,6 +47,8 @@ class Position:
     # Isolated positions only: margin allocated to the position, excluding unrealized PnL.
     # Falls back to `margin` when the venue does not report it separately.
     isolated_wallet: Optional[float] = None
+    # Binance ADL quantile as reported (0 = lowest priority … 4 = first in line). None when the venue doesn't publish it.
+    adl_quantile: Optional[int] = None
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -123,6 +125,7 @@ class Position:
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "network": self.network,
             "margin_mode": self.margin_mode,
+            "adl_quantile": self.adl_quantile,
         }
 
     @property

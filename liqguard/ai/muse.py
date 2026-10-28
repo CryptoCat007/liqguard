@@ -13,8 +13,10 @@ from liqguard.models import Alert, AlertSeverity, Position
 from liqguard.risk.advice import ActionableAdvice, AdviceCalculator
 from liqguard.risk.portfolio import PortfolioRiskOverview
 from liqguard.risk.rescue import RescuePlan
+from liqguard.risk.stops import StopCheck
 
 from .rescue import RESCUE_EXPLANATION_SCHEMA, mock_rescue_explanation, validate_rescue_explanation
+from .stops import STOP_EXPLANATION_SCHEMA, mock_stop_explanation, validate_stop_explanation
 
 logger = logging.getLogger(__name__)
 
@@ -668,6 +670,43 @@ Question: {question}"""
         except Exception as e:
             logger.error("Error explaining rescue plan: %s", type(e).__name__)
             return mock_rescue_explanation(plan, language)
+
+    async def explain_stop_fix(self, check: StopCheck, language: str = "en") -> dict:
+        """
+        Structured stop-loss advice (STOP_EXPLANATION_SCHEMA). Muse picks one of
+        the computed fixes; an answer with an unknown fix or an amount that is
+        not in the check is replaced by the deterministic mock.
+        """
+        if self._use_mock:
+            return mock_stop_explanation(check, language)
+        lang = "Traditional Chinese (zh-TW)" if language == "zh-TW" else "English"
+        system_prompt = (
+            "You review a crypto trader's stop-loss against the liquidation price. All numbers are computed; quote "
+            "only dollar amounts from the input. Say plainly what is wrong (no stop, stop beyond liquidation so it "
+            "never fires, or stop too close to liquidation), then suggest exactly one of the computed `fixes` "
+            "(move_stop, add_margin, reduce) and why. Prefer keeping the trader's stop with a smaller position when "
+            f"that fix exists. Answer in {lang}. Return JSON matching this schema: " + json.dumps(STOP_EXPLANATION_SCHEMA)
+        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(check.to_dict(), indent=2)},
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=400,
+                temperature=0.2,
+            )
+            data = json.loads(response.choices[0].message.content)
+            problem = validate_stop_explanation(data, check)
+            if problem:
+                logger.warning("Rejected Muse stop-loss explanation (%s); using deterministic text", problem)
+                return mock_stop_explanation(check, language)
+            return {**data, "mock": False}
+        except Exception as e:
+            logger.error("Error explaining stop-loss check: %s", type(e).__name__)
+            return mock_stop_explanation(check, language)
 
     async def explain_risk(
         self,

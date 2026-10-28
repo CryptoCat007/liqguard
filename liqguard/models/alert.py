@@ -89,6 +89,15 @@ class UserThreshold:
 
     cooldown_seconds: int = 300
 
+    # Wake-up escalation: unacknowledged critical/emergency alerts are resent every N minutes, up to a cap.
+    escalation_enabled: bool = True
+    escalation_interval_minutes: float = 2.0
+    escalation_max_reminders: int = 5
+
+    # Widen the tiers for volatile symbols, weekends, thin hours and closed stock markets.
+    adaptive_thresholds: bool = True
+    stop_loss_checks: bool = True
+
     def get_severity_for_distance(self, distance_pct: float) -> Optional[AlertSeverity]:
         """Get alert severity based on distance to liquidation."""
         if distance_pct <= self.emergency_distance_pct:
@@ -110,6 +119,11 @@ class UserThreshold:
             "margin_ratio_emergency": self.margin_ratio_emergency,
             "safety_target_pct": self.safety_target_pct,
             "cooldown_seconds": self.cooldown_seconds,
+            "escalation_enabled": self.escalation_enabled,
+            "escalation_interval_minutes": self.escalation_interval_minutes,
+            "escalation_max_reminders": self.escalation_max_reminders,
+            "adaptive_thresholds": self.adaptive_thresholds,
+            "stop_loss_checks": self.stop_loss_checks,
         }
 
     @classmethod
@@ -124,4 +138,9 @@ class UserThreshold:
             margin_ratio_emergency=data.get("margin_ratio_emergency", 15.0),
             safety_target_pct=data.get("safety_target_pct", 30.0),
             cooldown_seconds=data.get("cooldown_seconds", 300),
+            escalation_enabled=bool(data.get("escalation_enabled", True)),
+            escalation_interval_minutes=float(data.get("escalation_interval_minutes", 2.0)),
+            escalation_max_reminders=int(data.get("escalation_max_reminders", 5)),
+            adaptive_thresholds=bool(data.get("adaptive_thresholds", True)),
+            stop_loss_checks=bool(data.get("stop_loss_checks", True)),
         )

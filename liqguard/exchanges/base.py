@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 
-from liqguard.models import MAINNET, MarginAccount, Position
+from liqguard.models import MAINNET, MarginAccount, OpenOrder, Position
 
 
 class ReadOnlyViolation(RuntimeError):
@@ -47,6 +47,10 @@ class ExchangeAdapter(ABC):
         maintenance tiers). Adapters that cannot provide it return None and
         callers fall back to per-position (isolated) math.
         """
+        return None
+
+    async def get_open_orders(self) -> Optional[list[OpenOrder]]:
+        """Resting orders (for the stop-loss check). None means the venue's orders are unknown, not "no orders"."""
         return None
 
     @abstractmethod

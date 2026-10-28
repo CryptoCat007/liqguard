@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
+from liqguard.models import UserThreshold
+
 
 def _bool(value: Optional[str], default: bool = False) -> bool:
     if value is None or value == "":
@@ -19,6 +21,14 @@ def _float(value: Optional[str], default: float) -> float:
         return float(value) if value not in (None, "") else default
     except ValueError:
         return default
+
+
+def _hours(value: Optional[str]) -> tuple[int, int]:
+    try:
+        start, end = (int(x) % 24 for x in (value or "21-1").split("-", 1))
+        return start, end
+    except ValueError:
+        return 21, 1
 
 
 def _int(value: Optional[str], default: int) -> int:
@@ -53,6 +63,13 @@ class Settings:
     funding_refresh: int = 60
     prefunding_lead_minutes: int = 30
 
+    wick_days: int = 30
+    wick_refresh: int = 3600
+    low_liquidity_hours: tuple[int, int] = (21, 1)
+    stop_buffer_pct: float = 0.5
+    escalation_interval_minutes: float = 2.0
+    escalation_max_reminders: int = 5
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
         key_file = env.get("LIQGUARD_KEY_FILE")
@@ -75,6 +92,19 @@ class Settings:
             taker_fee_hyperliquid=_float(env.get("LIQGUARD_TAKER_FEE_HYPERLIQUID"), 0.00045),
             funding_refresh=max(10, _int(env.get("LIQGUARD_FUNDING_REFRESH"), 60)),
             prefunding_lead_minutes=_int(env.get("LIQGUARD_PREFUNDING_LEAD_MINUTES"), 30),
+            wick_days=min(30, max(1, _int(env.get("LIQGUARD_WICK_DAYS"), 30))),
+            wick_refresh=max(300, _int(env.get("LIQGUARD_WICK_REFRESH"), 3600)),
+            low_liquidity_hours=_hours(env.get("LIQGUARD_LOW_LIQUIDITY_HOURS_UTC")),
+            stop_buffer_pct=max(0.0, _float(env.get("LIQGUARD_STOP_BUFFER_PCT"), 0.5)),
+            escalation_interval_minutes=max(0.5, _float(env.get("LIQGUARD_ESCALATION_INTERVAL_MINUTES"), 2.0)),
+            escalation_max_reminders=max(1, _int(env.get("LIQGUARD_ESCALATION_MAX_REMINDERS"), 5)),
+        )
+
+    def default_threshold(self) -> UserThreshold:
+        """Thresholds for a new user (escalation defaults come from the environment)."""
+        return UserThreshold(
+            escalation_interval_minutes=self.escalation_interval_minutes,
+            escalation_max_reminders=self.escalation_max_reminders,
         )
 
     @property

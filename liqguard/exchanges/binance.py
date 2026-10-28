@@ -23,12 +23,14 @@ from liqguard.models import (
     TESTNET,
     MaintenanceBracket,
     MarginAccount,
+    OpenOrder,
     Position,
     Side,
     Venue,
 )
 
 from .base import ExchangeAdapter, KeyCheck, ReadOnlyViolation
+from .orders import parse_binance_order
 from .permissions import evaluate_binance_restrictions
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,13 @@ FUTURES_URLS = {
 }
 SPOT_API_URL = "https://api.binance.com"
 INVALID_KEY_CODES = {-2014, -2015, -1022}
+
+
+def _adl(value) -> Optional[int]:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class BinanceAdapter(ExchangeAdapter):
@@ -152,8 +161,43 @@ class BinanceAdapter(ExchangeAdapter):
                 network=self.network,
                 margin_mode=ISOLATED if isolated else CROSS,
                 isolated_wallet=float(row.get("isolatedWallet", 0)) if isolated else None,
+                adl_quantile=_adl(row.get("adlQuantile", row.get("adl"))),
             ))
         return positions
+
+    async def _adl_quantiles(self) -> dict[str, dict]:
+        rows = await self._request("GET", "/fapi/v1/adlQuantile", signed=True)
+        if isinstance(rows, dict):
+            rows = [rows]
+        return {r["symbol"]: r.get("adlQuantile") or {} for r in rows if r.get("symbol")}
+
+    async def _attach_adl(self, positions: list[Position]) -> list[Position]:
+        if not positions:
+            return positions
+        try:
+            table = await self._adl_quantiles()
+        except httpx.HTTPError as e:
+            logger.warning("Binance adlQuantile failed (%s)", type(e).__name__)
+            return positions
+        for p in positions:
+            sides = table.get(p.symbol)
+            if not sides:
+                continue
+            values = [_adl(sides.get(k)) for k in (p.side.value.upper(), "BOTH", "HEDGE")]
+            values = [v for v in values if v is not None]
+            if values:
+                p.adl_quantile = max(values)
+        return positions
+
+    async def get_open_orders(self) -> list[OpenOrder]:
+        """Regular open orders plus conditional (algo) orders where the account has them. Read-only GETs."""
+        rows = await self._request("GET", "/fapi/v1/openOrders", signed=True)
+        try:
+            algo = await self._request("GET", "/fapi/v1/openAlgoOrders", signed=True)
+            rows = list(rows) + list(algo.get("orders", []) if isinstance(algo, dict) else algo or [])
+        except httpx.HTTPError as e:
+            logger.debug("Binance openAlgoOrders unavailable (%s)", type(e).__name__)
+        return [o for o in (parse_binance_order(r) for r in rows) if o is not None]
 
     async def _cross_wallet_balance(self) -> float:
         account = await self._request("GET", "/fapi/v2/account", signed=True)
@@ -179,7 +223,7 @@ class BinanceAdapter(ExchangeAdapter):
 
     async def get_account(self) -> MarginAccount:
         """Positions, USDT cross wallet balance and this account's maintenance tiers (all read-only GETs)."""
-        positions = await self.get_positions()
+        positions = await self._attach_adl(await self.get_positions())
         wallet = await self._cross_wallet_balance()
         schedules = {}
         if positions:

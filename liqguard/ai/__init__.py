@@ -2,6 +2,7 @@
 
 from .muse import MetaLLMClient, get_news_stub
 from .rescue import RESCUE_EXPLANATION_SCHEMA, mock_rescue_explanation, validate_rescue_explanation
+from .stops import STOP_EXPLANATION_SCHEMA, mock_stop_explanation, validate_stop_explanation
 
 __all__ = [
     "MetaLLMClient",
@@ -9,4 +10,7 @@ __all__ = [
     "RESCUE_EXPLANATION_SCHEMA",
     "mock_rescue_explanation",
     "validate_rescue_explanation",
+    "STOP_EXPLANATION_SCHEMA",
+    "mock_stop_explanation",
+    "validate_stop_explanation",
 ]

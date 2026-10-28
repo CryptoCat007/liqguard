@@ -10,12 +10,14 @@ from liqguard.models import (
     ISOLATED,
     MaintenanceBracket,
     MarginAccount,
+    OpenOrder,
     Position,
     Side,
     Venue,
 )
 
 from .base import ExchangeAdapter, KeyCheck
+from .orders import parse_hyperliquid_order
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,12 @@ class HyperliquidAdapter(ExchangeAdapter):
         except httpx.HTTPError as e:
             logger.warning("Hyperliquid meta failed (%s); using default maintenance", type(e).__name__)
         return MarginAccount(Venue.HYPERLIQUID, wallet, positions, schedules)
+
+    async def get_open_orders(self) -> list[OpenOrder]:
+        """Public `frontendOpenOrders` for the wallet (includes trigger/TP-SL orders)."""
+        response = await self.client.post(HYPERLIQUID_API_URL, json={"type": "frontendOpenOrders", "user": self.wallet_address})
+        response.raise_for_status()
+        return [o for o in (parse_hyperliquid_order(r) for r in response.json() or []) if o is not None]
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         """Get current mark price for a symbol."""

@@ -71,6 +71,67 @@ class FundingInfo:
         }
 
 
+@dataclass(frozen=True)
+class WickStat:
+    """
+    Adverse intra-candle moves for one interval, in percent of the candle's open.
+    Long side: open → low. Short side: open → high. "Typical" is the 95th
+    percentile (a bad but routine wick); "max" is the deepest in the window.
+    """
+
+    interval: str
+    candles: int
+    window_days: float
+    long_typical_pct: float
+    long_max_pct: float
+    short_typical_pct: float
+    short_max_pct: float
+    long_max_at: Optional[datetime] = None
+    short_max_at: Optional[datetime] = None
+
+    def typical_pct(self, long: bool) -> float:
+        return self.long_typical_pct if long else self.short_typical_pct
+
+    def max_pct(self, long: bool) -> float:
+        return self.long_max_pct if long else self.short_max_pct
+
+    def to_dict(self) -> dict:
+        return {
+            "interval": self.interval,
+            "candles": self.candles,
+            "window_days": round(self.window_days, 2),
+            "long_typical_pct": round(self.long_typical_pct, 4),
+            "long_max_pct": round(self.long_max_pct, 4),
+            "short_typical_pct": round(self.short_typical_pct, 4),
+            "short_max_pct": round(self.short_max_pct, 4),
+            "long_max_at": self.long_max_at.isoformat() if self.long_max_at else None,
+            "short_max_at": self.short_max_at.isoformat() if self.short_max_at else None,
+        }
+
+
+@dataclass(frozen=True)
+class WickProfile:
+    """Wick statistics for one perpetual (public market data, shared by all users)."""
+
+    venue: Venue
+    symbol: str
+    stats: dict[str, WickStat]
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    source: str = "live"
+
+    def stat(self, interval: str) -> Optional[WickStat]:
+        return self.stats.get(interval)
+
+    def to_dict(self) -> dict:
+        return {
+            "venue": self.venue.value,
+            "symbol": self.symbol,
+            "stats": {k: v.to_dict() for k, v in self.stats.items()},
+            "fetched_at": self.fetched_at.isoformat(),
+            "source": self.source,
+        }
+
+
 @dataclass
 class MarginAccount:
     """

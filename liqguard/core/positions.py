@@ -7,11 +7,21 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from liqguard.exchanges import DemoAdapter, ExchangeAdapter, UnsupportedBinding, adapter_for_binding
-from liqguard.models import ExchangeBinding, FundingInfo, MarginAccount, Position, User, Venue
+from liqguard.models import (
+    ExchangeBinding,
+    FundingInfo,
+    MarginAccount,
+    OpenOrder,
+    Position,
+    User,
+    Venue,
+    WickProfile,
+)
 from liqguard.risk import FeeSchedule, RiskContext
-from liqguard.simulation import SimulationRegistry
+from liqguard.simulation import DEMO_WICKS, SimulationRegistry
 
 from .market import MarketDataService
+from .wicks import WickService
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +55,18 @@ class PositionService:
         adapter_factory: AdapterFactory = adapter_for_binding,
         market: Optional[MarketDataService] = None,
         fees: Optional[FeeSchedule] = None,
+        wicks: Optional[WickService] = None,
+        low_liquidity_hours: Optional[tuple[int, int]] = None,
+        stop_buffer_pct: Optional[float] = None,
     ):
         self.simulations = simulations
         self._adapter_factory = adapter_factory
         self.market = market
         self.fees = fees or FeeSchedule()
+        self.wicks = wicks
+        self._context_options = {
+            k: v for k, v in (("low_liquidity_hours", low_liquidity_hours), ("stop_buffer_pct", stop_buffer_pct)) if v is not None
+        }
         self._demo: dict[int, DemoAdapter] = {}
 
     def demo_adapter(self, user_id: int, scenario: Optional[str] = None) -> DemoAdapter:
@@ -76,9 +93,35 @@ class PositionService:
                 out[(Venue.DEMO.value, p.base_symbol)] = info
         return out
 
+    def _wicks(self, positions: list[Position]) -> dict[tuple[str, str], WickProfile]:
+        return self.wicks.request(positions) if self.wicks else {}
+
+    def _demo_wicks(self, positions: list[Position]) -> dict[tuple[str, str], WickProfile]:
+        """Demo book: the live Binance profile of the same symbol when fetched, else the labelled demo profile."""
+        live = self.wicks.request_keys([(Venue.BINANCE.value, p.base_symbol) for p in positions]) if self.wicks else {}
+        out = {}
+        for p in positions:
+            profile = live.get((Venue.BINANCE.value, p.base_symbol)) or DEMO_WICKS.get(p.base_symbol)
+            if profile is not None:
+                out[(Venue.DEMO.value, p.base_symbol)] = profile
+        return out
+
+    async def _orders(self, user: User, adapter: ExchangeAdapter, binding: ExchangeBinding) -> Optional[list[OpenOrder]]:
+        try:
+            return await adapter.get_open_orders()
+        except Exception as e:
+            logger.warning("User %s: %s/%s open orders unavailable (%s); stop-loss check skipped",
+                           user.telegram_id, binding.venue, binding.network, type(e).__name__)
+            return None
+
     async def live_book(self, user: User) -> tuple[list[Position], list[MarginAccount]]:
+        positions, accounts, _ = await self._live(user)
+        return positions, accounts
+
+    async def _live(self, user: User) -> tuple[list[Position], list[MarginAccount], dict[tuple[str, str], list[OpenOrder]]]:
         positions: list[Position] = []
         accounts: list[MarginAccount] = []
+        orders: dict[tuple[str, str], list[OpenOrder]] = {}
         for binding in user.bindings:
             if not binding.is_active:
                 continue
@@ -99,11 +142,14 @@ class PositionService:
                     else:
                         accounts.append(account)
                         positions.extend(account.positions)
+                    venue_orders = await self._orders(user, adapter, binding)
+                    if venue_orders is not None:
+                        orders[(binding.venue, binding.network)] = venue_orders
             except UnsupportedBinding as e:
                 logger.warning("User %s: %s", user.telegram_id, e)
             except Exception as e:
                 logger.error("User %s: fetching %s/%s failed: %s", user.telegram_id, binding.venue, binding.network, type(e).__name__)
-        return positions, accounts
+        return positions, accounts, orders
 
     async def live_positions(self, user: User) -> list[Position]:
         positions, _ = await self.live_book(user)
@@ -115,12 +161,20 @@ class PositionService:
             sim = self.simulations.get(user.telegram_id)
             if sim is not None and sim.state != "idle":
                 return BookSnapshot(list(sim.positions), LABEL_SIMULATION, sim.risk_context(self.fees))
-            positions = await self.demo_adapter(user.telegram_id).get_positions()
-            return BookSnapshot(positions, LABEL_DEMO, RiskContext(funding=self._demo_funding(positions), fees=self.fees))
+            adapter = self.demo_adapter(user.telegram_id)
+            positions = await adapter.get_positions()
+            return BookSnapshot(positions, LABEL_DEMO, RiskContext(
+                funding=self._demo_funding(positions), fees=self.fees,
+                orders={(Venue.DEMO.value, "mainnet"): await adapter.get_open_orders()},
+                wicks=self._demo_wicks(positions), **self._context_options,
+            ))
         if not user.has_any_binding():
             return BookSnapshot([], "")
-        positions, accounts = await self.live_book(user)
-        return BookSnapshot(positions, LABEL_LIVE, RiskContext(accounts=accounts, funding=self._funding(), fees=self.fees))
+        positions, accounts, orders = await self._live(user)
+        return BookSnapshot(positions, LABEL_LIVE, RiskContext(
+            accounts=accounts, funding=self._funding(), fees=self.fees, orders=orders,
+            wicks=self._wicks(positions), **self._context_options,
+        ))
 
     async def positions_for(self, user: User) -> tuple[list[Position], str]:
         """(positions, label). An empty label means the user has nothing connected."""

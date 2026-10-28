@@ -6,14 +6,20 @@ import copy
 import random
 from typing import Optional
 
-from liqguard.models import Position, Side, Venue
+from liqguard.models import STOP_MARKET, OpenOrder, Position, Side, Venue
 
 from .base import ExchangeAdapter, KeyCheck
 
 DEMO_POSITIONS_CONFIG = (
-    {"symbol": "BTCUSDT", "side": Side.LONG, "size": 0.5, "entry_price": 65000.0, "leverage": 10, "margin": 3250.0},
-    {"symbol": "ETHUSDT", "side": Side.SHORT, "size": 5.0, "entry_price": 3200.0, "leverage": 20, "margin": 800.0},
-    {"symbol": "SOLUSDT", "side": Side.LONG, "size": 100.0, "entry_price": 150.0, "leverage": 5, "margin": 3000.0},
+    {"symbol": "BTCUSDT", "side": Side.LONG, "size": 0.5, "entry_price": 65000.0, "leverage": 10, "margin": 3250.0, "adl_quantile": 1},
+    {"symbol": "ETHUSDT", "side": Side.SHORT, "size": 5.0, "entry_price": 3200.0, "leverage": 20, "margin": 800.0, "adl_quantile": 3},
+    {"symbol": "SOLUSDT", "side": Side.LONG, "size": 100.0, "entry_price": 150.0, "leverage": 5, "margin": 3000.0, "adl_quantile": 0},
+)
+
+# BTC's stop sits below its liquidation price (≈ $58,760), ETH has none, SOL's is fine.
+DEMO_ORDERS = (
+    OpenOrder(Venue.DEMO, "BTCUSDT", Side.SHORT, STOP_MARKET, trigger_price=58000.0, close_position=True),
+    OpenOrder(Venue.DEMO, "SOLUSDT", Side.SHORT, STOP_MARKET, trigger_price=132.0, quantity=100.0, reduce_only=True),
 )
 
 DEMO_BASE_PRICES = {"BTCUSDT": 65000.0, "ETHUSDT": 3200.0, "SOLUSDT": 150.0}
@@ -115,8 +121,13 @@ class DemoAdapter(ExchangeAdapter):
                 margin=config["margin"],
                 leverage=config["leverage"],
                 unrealized_pnl=(mark - entry) * size * direction,
+                adl_quantile=config.get("adl_quantile"),
             ))
         return positions
+
+    async def get_open_orders(self) -> list[OpenOrder]:
+        symbols = {c["symbol"] for c in self._positions_config}
+        return [o for o in DEMO_ORDERS if o.symbol in symbols]
 
     async def get_mark_price(self, symbol: str) -> Optional[float]:
         return self._simulator.get_prices().get(symbol.replace("-PERP", ""))
