@@ -10,11 +10,19 @@ owner. The public simulation has no Telegram delivery at all.
 The path is deterministic (seeded) so demo recordings are reproducible. All
 numbers are computed here; the LLM only phrases explanations.
 
+The demo book is margined like a real one: BTC and SOL share a Binance cross
+wallet, ETH sits in a Hyperliquid cross account. Liquidation prices are
+computed (`risk.true_liquidation`) every tick from the wallet, the other
+positions' PnL and maintenance tiers. A simulated clock (12 min per step, so
+a 40-step run covers 8 h) drives demo funding settlements that are paid out of
+the wallets, pre-funding warnings, and rescue plans.
+
 Event shapes (all dicts with "type" and "data"):
     status   {state, step, total_steps}
-    tick     {step, timestamp, prices: {symbol: {...}}, overview}
-    alert    {id, level, symbol, venue, side, distance, mark_price, ...}
-    advice   {id, alert_id, symbol, level, explanation, margin_to_add_usd, ...}
+    tick     {step, timestamp, sim_time, prices: {symbol: {...}}, overview, wallets}
+    alert    {id, level, symbol, venue, side, distance, mark_price, ...}  (level "funding" = pre-funding warning)
+    advice   {id, alert_id, symbol, level, explanation, margin_to_add_usd, rescue, rescue_explanation, ...}
+    funding  {sim_time, symbol, venue, rate, payment_usd, wallet_after, liquidation_before, liquidation_after}
     summary  {headline, riskiest_symbol, risk_level, ...}
     audit    {timestamp, event, symbol, detail, source}
 """
@@ -22,15 +30,27 @@ Event shapes (all dicts with "type" and "data"):
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import math
 import random
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
-from liqguard.models import Position, Side, UserThreshold, Venue
-from liqguard.risk import AdviceCalculator, PortfolioAnalyzer
+from liqguard.models import CROSS, FundingInfo, MarginAccount, Position, Side, UserThreshold, Venue
+from liqguard.risk import (
+    AdviceCalculator,
+    FeeSchedule,
+    PortfolioAnalyzer,
+    RescuePlan,
+    RescueSimulator,
+    RiskContext,
+    default_brackets,
+    funding_payment,
+    pre_funding_warning,
+    true_liquidation,
+)
 
 if TYPE_CHECKING:
     from liqguard.ai import MetaLLMClient
@@ -43,31 +63,70 @@ EventCallback = Callable[[dict], Awaitable[None]]
 TIERS = ("warning", "critical", "emergency")
 
 
+SIM_MINUTES_PER_STEP = 12
+PREFUNDING_LEAD_MINUTES = 30
+
+
 @dataclass(frozen=True)
 class SimPositionSpec:
-    """A demo position and the distance-to-liquidation path it follows."""
+    """
+    A demo position and the path it follows.
+
+    In a cross account all positions share one margin buffer, so their
+    distances are not independent: one position per account follows a
+    distance path ("driver"), the others follow a price path (`end_price_pct`,
+    the mark's total move over the run) and their distance is whatever the
+    shared wallet implies.
+    """
     symbol: str
     venue: Venue
     side: Side
     size: float
     entry_price: float
-    liquidation_price: float
     margin: float
     leverage: float
-    start_distance_pct: float
-    end_distance_pct: float
+    start_distance_pct: float = 0.0
+    end_distance_pct: float = 0.0
     lag: float = 0.0
+    end_price_pct: Optional[float] = None
+    margin_mode: str = CROSS
+
+    @property
+    def is_driver(self) -> bool:
+        return self.end_price_pct is None
 
 
-# Cross-venue demo book: aggregated like a real Binance + Hyperliquid user.
-# End distances are chosen so the run shows all three alert tiers.
+@dataclass(frozen=True)
+class SimFundingSpec:
+    """Demo funding schedule (labelled "demo"; live rates come from the exchanges)."""
+    symbol: str
+    venue: Venue
+    rate: float
+    interval_hours: float
+    first_settlement_minutes: float
+
+
+# Cross-margined Binance + Hyperliquid demo book. End distances are chosen so a
+# run shows all three alert tiers, and SOL (which only drifts 5%) is dragged
+# toward liquidation by BTC through the shared wallet.
 DEFAULT_SPECS: tuple[SimPositionSpec, ...] = (
-    SimPositionSpec("BTCUSDT", Venue.BINANCE, Side.LONG, 0.8, 64200.0, 47000.0,
-                    10720.0, 5, start_distance_pct=29.0, end_distance_pct=3.2, lag=0.0),
-    SimPositionSpec("ETH", Venue.HYPERLIQUID, Side.SHORT, 12.0, 3150.0, 3900.0,
-                    9150.0, 4, start_distance_pct=27.5, end_distance_pct=8.1, lag=0.15),
-    SimPositionSpec("SOLUSDT", Venue.BINANCE, Side.LONG, 220.0, 148.0, 112.0,
-                    6688.0, 5, start_distance_pct=26.0, end_distance_pct=15.5, lag=0.3),
+    SimPositionSpec("BTCUSDT", Venue.BINANCE, Side.LONG, 0.8, 64200.0, 10272.0, 5,
+                    start_distance_pct=29.0, end_distance_pct=3.2, lag=0.0),
+    SimPositionSpec("ETH", Venue.HYPERLIQUID, Side.SHORT, 12.0, 3150.0, 9450.0, 4,
+                    start_distance_pct=27.5, end_distance_pct=8.1, lag=0.15),
+    SimPositionSpec("SOLUSDT", Venue.BINANCE, Side.LONG, 150.0, 148.0, 4440.0, 5,
+                    end_price_pct=-5.0, lag=0.3),
+)
+
+DEFAULT_WALLETS: dict[Venue, float] = {Venue.BINANCE: 15500.0, Venue.HYPERLIQUID: 11300.0}
+
+# BTC's 8 h settlement lands near the end of the run, when it is close to
+# liquidation, so the run shows a pre-funding warning; SOL settles every 4 h and
+# ETH hourly (shorts pay when the rate is negative).
+DEFAULT_FUNDING: tuple[SimFundingSpec, ...] = (
+    SimFundingSpec("BTCUSDT", Venue.BINANCE, 0.0025, 8, first_settlement_minutes=456),
+    SimFundingSpec("SOLUSDT", Venue.BINANCE, 0.0003, 4, first_settlement_minutes=216),
+    SimFundingSpec("ETH", Venue.HYPERLIQUID, -0.00003, 1, first_settlement_minutes=36),
 )
 
 
@@ -96,12 +155,19 @@ class MarketSimulation:
         tick_interval: float = 0.75,
         seed: int = 7,
         language: str = "en",
+        wallets: Optional[dict[Venue, float]] = None,
+        funding: tuple[SimFundingSpec, ...] = DEFAULT_FUNDING,
+        fees: Optional[FeeSchedule] = None,
+        prefunding_lead_minutes: float = PREFUNDING_LEAD_MINUTES,
     ):
         self.llm = llm_client
         self.owner_id = owner_id
         self.threshold = threshold or UserThreshold()
-        self.analyzer = PortfolioAnalyzer(self.threshold)
         self.specs = specs
+        self.wallet_specs = dict(DEFAULT_WALLETS if wallets is None else wallets)
+        self.funding_specs = funding
+        self.fees = fees or FeeSchedule()
+        self.prefunding_lead_minutes = prefunding_lead_minutes
         self.steps = steps
         self.tick_interval = tick_interval
         self.seed = seed
@@ -124,15 +190,28 @@ class MarketSimulation:
 
         self.step = 0
         self.state = "idle"
+        self.clock_start = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         self.history: dict[str, list[dict]] = {s.symbol: [] for s in self.specs}
         self.alerts: list[dict] = []
         self.advice: list[dict] = []
         self.audit: list[dict] = []
+        self.funding_events: list[dict] = []
         self.summary: Optional[dict] = None
         self._fired: set[tuple[str, str]] = set()
         self._alert_seq = 0
+        self.wallets = dict(self.wallet_specs)
+        self.funding = {
+            (f.venue.value, f.symbol): FundingInfo(
+                venue=f.venue, symbol=f.symbol, rate=f.rate, interval_hours=f.interval_hours,
+                next_funding_time=self.clock_start + timedelta(minutes=f.first_settlement_minutes),
+                fetched_at=self.clock_start, source="demo",
+            )
+            for f in self.funding_specs
+        }
+        self._marks = [self._solve_marks(step) for step in range(self.steps + 1)]
+        self._settled_this_step: dict[str, float] = {}
         self.positions = self._positions_at(0)
-        self.overview = self.analyzer.analyze_portfolio(self.positions)
+        self.overview = self._analyze()
         self._record_tick()
 
     def configure(self, threshold: Optional[UserThreshold] = None, language: Optional[str] = None) -> bool:
@@ -141,7 +220,6 @@ class MarketSimulation:
             return False
         if threshold is not None:
             self.threshold = threshold
-            self.analyzer = PortfolioAnalyzer(threshold)
         if language:
             self.language = language
         self.reset()
@@ -155,32 +233,121 @@ class MarketSimulation:
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    def _distance_at(self, spec: SimPositionSpec, step: int) -> float:
-        progress = (step / self.steps - spec.lag) / (1 - spec.lag) if spec.lag < 1 else 1.0
-        eased = _smoothstep(progress)
-        base = spec.start_distance_pct - (spec.start_distance_pct - spec.end_distance_pct) * eased
-        damp = 1 - min(max(progress, 0.0), 1.0)
-        wiggle = (0.9 * math.sin(step * 0.8 + self._phases[spec.symbol]) + self._noise[spec.symbol][step]) * damp
-        return max(base + wiggle, 0.5)
+    def _progress(self, spec: SimPositionSpec, step: int) -> float:
+        return (step / self.steps - spec.lag) / (1 - spec.lag) if spec.lag < 1 else 1.0
 
-    def _positions_at(self, step: int) -> list[Position]:
-        positions = []
+    def _wiggle(self, spec: SimPositionSpec, step: int) -> float:
+        damp = 1 - min(max(self._progress(spec, step), 0.0), 1.0)
+        return (0.9 * math.sin(step * 0.8 + self._phases[spec.symbol]) + self._noise[spec.symbol][step]) * damp
+
+    def _distance_at(self, spec: SimPositionSpec, step: int) -> float:
+        eased = _smoothstep(self._progress(spec, step))
+        base = spec.start_distance_pct - (spec.start_distance_pct - spec.end_distance_pct) * eased
+        return max(base + self._wiggle(spec, step), 0.5)
+
+    def _follower_mark(self, spec: SimPositionSpec, step: int) -> float:
+        eased = _smoothstep(self._progress(spec, step))
+        move_pct = (spec.end_price_pct or 0.0) * eased + 0.3 * self._wiggle(spec, step)
+        return spec.entry_price * (1 + move_pct / 100)
+
+    @property
+    def sim_now(self) -> datetime:
+        return self.clock_start + timedelta(minutes=SIM_MINUTES_PER_STEP * self.step)
+
+    def _build(self, marks: dict[str, float], wallets: dict[Venue, float]) -> tuple[list[Position], list[MarginAccount]]:
+        """Positions at `marks` with computed liquidation prices, and the accounts they belong to."""
+        raw = []
         for spec in self.specs:
-            mark = price_at_distance(spec.side, spec.liquidation_price, self._distance_at(spec, step))
-            direction = 1 if spec.side == Side.LONG else -1
-            positions.append(Position(
+            mark = marks[spec.symbol]
+            raw.append(Position(
                 venue=spec.venue,
                 symbol=spec.symbol,
                 side=spec.side,
                 size=spec.size,
                 entry_price=spec.entry_price,
                 mark_price=mark,
-                liquidation_price=spec.liquidation_price,
+                liquidation_price=0.0,
                 margin=spec.margin,
                 leverage=spec.leverage,
-                unrealized_pnl=(mark - spec.entry_price) * spec.size * direction,
+                unrealized_pnl=(mark - spec.entry_price) * spec.size * (1 if spec.side == Side.LONG else -1),
+                margin_mode=spec.margin_mode,
+                isolated_wallet=None if spec.margin_mode == CROSS else spec.margin,
             ))
+        accounts = self._accounts_for(raw, wallets)
+        positions = []
+        for p in raw:
+            account = next((a for a in accounts if a.holds(p)), None)
+            liq = true_liquidation(p, account).price
+            positions.append(dataclasses.replace(p, liquidation_price=liq or 0.0))
+        return positions, self._accounts_for(positions, wallets)
+
+    def _accounts_for(self, positions: list[Position], wallets: dict[Venue, float]) -> list[MarginAccount]:
+        accounts = []
+        for venue, wallet in wallets.items():
+            held = [p for p in positions if p.venue == venue]
+            schedules = {p.symbol: default_brackets(p.venue, p.symbol) for p in held}
+            accounts.append(MarginAccount(venue, wallet, held, schedules, source="demo"))
+        return accounts
+
+    def _solve_marks(self, step: int) -> dict[str, float]:
+        """
+        Marks at `step` (before funding): followers take their price path; each
+        driver's mark is solved so its computed distance equals its path,
+        given the followers' PnL in the same wallet.
+        """
+        marks = {s.symbol: (s.entry_price if s.is_driver else self._follower_mark(s, step)) for s in self.specs}
+        for _ in range(3):
+            positions, accounts = self._build(marks, self.wallet_specs)
+            for spec in self.specs:
+                if not spec.is_driver:
+                    continue
+                pos = next(p for p in positions if p.symbol == spec.symbol)
+                account = next((a for a in accounts if a.holds(pos)), None)
+                liq = true_liquidation(pos, account).price
+                if liq:
+                    marks[spec.symbol] = price_at_distance(spec.side, liq, self._distance_at(spec, step))
+        return marks
+
+    def _positions_at(self, step: int) -> list[Position]:
+        positions, self.accounts = self._build(self._marks[step], self.wallets)
         return positions
+
+    def risk_context(self, fees: Optional[FeeSchedule] = None) -> RiskContext:
+        """Accounts, demo funding and fees at the simulated time (what /risk, /positions and the dashboard use)."""
+        return RiskContext(accounts=list(self.accounts), funding=dict(self.funding), fees=fees or self.fees, now=self.sim_now)
+
+    def _analyze(self):
+        return PortfolioAnalyzer(self.threshold, self.risk_context()).analyze_portfolio(self.positions)
+
+    def _account(self, position: Position) -> Optional[MarginAccount]:
+        return next((a for a in self.accounts if a.holds(position)), None)
+
+    def _position(self, symbol: str) -> Optional[Position]:
+        return next((p for p in self.positions if p.symbol.upper() == symbol.upper()), None)
+
+    def build_rescue_plan(self, symbol: str) -> Optional[RescuePlan]:
+        position = self._position(symbol)
+        if position is None:
+            return None
+        ctx = self.risk_context()
+        simulator = RescueSimulator(self.fees, self.threshold.safety_target_pct)
+        return simulator.simulate(position, ctx.account_for(position), ctx.funding_for(position), ctx.now)
+
+    async def rescue_plan(self, symbol: str) -> Optional[dict]:
+        """Rescue options for one demo position plus Muse's explanation of the trade-offs."""
+        plan = self.build_rescue_plan(symbol)
+        if plan is None:
+            return None
+        return {"plan": plan.to_dict(), "explanation": await self._explain_rescue(plan)}
+
+    async def _explain_rescue(self, plan: RescuePlan) -> Optional[dict]:
+        if self.llm is None:
+            return None
+        try:
+            return await self.llm.explain_rescue(plan, self.language)
+        except Exception as e:
+            logger.error("Rescue explanation failed: %s", type(e).__name__)
+            return None
 
     def tier_prices(self, position: Position) -> dict[str, float]:
         """Mark prices at which each alert tier fires for `position`."""
@@ -193,15 +360,19 @@ class MarketSimulation:
 
     def _record_tick(self) -> dict:
         now = datetime.now(timezone.utc).isoformat()
+        sim_time = self.sim_now.isoformat()
         prices = {}
         for pos in self.positions:
             point = {
                 "step": self.step,
                 "timestamp": now,
+                "sim_time": sim_time,
                 "mark_price": round(pos.mark_price, 4),
                 "liquidation_price": round(pos.liquidation_price, 4),
                 "distance_pct": round(pos.distance_to_liquidation_pct, 3),
             }
+            if pos.symbol in self._settled_this_step:
+                point["funding_paid_usd"] = round(self._settled_this_step[pos.symbol], 2)
             self.history[pos.symbol].append(point)
             prices[pos.symbol] = {
                 **point,
@@ -209,7 +380,25 @@ class MarketSimulation:
                 "side": pos.side.value,
                 "tier_prices": {k: round(v, 4) for k, v in self.tier_prices(pos).items()},
             }
-        return {"step": self.step, "timestamp": now, "prices": prices, "overview": self.overview.to_dict()}
+        return {
+            "step": self.step,
+            "timestamp": now,
+            "sim_time": sim_time,
+            "prices": prices,
+            "overview": self.overview.to_dict(),
+            "wallets": self._wallets_dict(),
+        }
+
+    def _wallets_dict(self) -> dict:
+        return {v.value: round(w, 2) for v, w in self.wallets.items()}
+
+    def _funding_dict(self) -> dict:
+        out = {}
+        for pos in self.positions:
+            info = self.funding.get((pos.venue.value, pos.symbol))
+            if info is not None:
+                out[pos.symbol] = info.to_dict()
+        return out
 
     def _thresholds(self) -> dict[str, float]:
         return {
@@ -234,6 +423,11 @@ class MarketSimulation:
             "alerts": self.alerts,
             "advice": self.advice,
             "audit": self.audit,
+            "funding": self._funding_dict(),
+            "funding_events": self.funding_events,
+            "wallets": self._wallets_dict(),
+            "sim_time": self.sim_now.isoformat(),
+            "minutes_per_step": SIM_MINUTES_PER_STEP,
             "channels": sorted(self._subscribers),
             "muse_mode": "mock" if (self.llm is None or self.llm.is_mock) else "live",
             "demo": True,
@@ -355,16 +549,102 @@ class MarketSimulation:
         while self.step < self.steps:
             await asyncio.sleep(self.tick_interval)
             self.step += 1
-            self.positions = self._positions_at(self.step)
-            self.overview = self.analyzer.analyze_portfolio(self.positions)
-            await self._emit("tick", self._record_tick())
-            await self._check_alerts()
+            await self._advance()
         if self._side_tasks:
             await asyncio.gather(*list(self._side_tasks), return_exceptions=True)
         await self.refresh_summary()
         self.state = "finished"
         await self._add_audit("simulation_finished", None, "Price path complete; no execution performed")
         await self._emit("status", self._status())
+
+    async def _advance(self) -> None:
+        """One step: settle funding due since the last step, reprice, then check warnings and alerts."""
+        self.positions = self._positions_at(self.step)
+        await self._settle_funding()
+        self.positions = self._positions_at(self.step)
+        self.overview = self._analyze()
+        await self._emit("tick", self._record_tick())
+        await self._check_prefunding()
+        await self._check_alerts()
+
+    async def _settle_funding(self) -> None:
+        start = self.clock_start + timedelta(minutes=SIM_MINUTES_PER_STEP * (self.step - 1))
+        end = self.sim_now
+        self._settled_this_step = {}
+        for (venue, symbol), info in self.funding.items():
+            t = info.next_funding_time
+            if not (start < t <= end):
+                continue
+            pos = self._position(symbol)
+            if pos is None:
+                continue
+            before = pos.liquidation_price
+            payment = funding_payment(pos, info.rate)
+            self.wallets[pos.venue] = self.wallets.get(pos.venue, 0.0) - payment
+            self.funding[(venue, symbol)] = dataclasses.replace(
+                info, next_funding_time=t + timedelta(hours=info.interval_hours)
+            )
+            self._settled_this_step[symbol] = payment
+            self.positions = self._positions_at(self.step)
+            after = self._position(symbol).liquidation_price
+            event = {
+                "sim_time": t.isoformat(),
+                "step": self.step,
+                "symbol": symbol,
+                "venue": venue,
+                "rate_pct": round(info.rate * 100, 6),
+                "interval_hours": info.interval_hours,
+                "payment_usd": round(payment, 2),
+                "wallet_after": round(self.wallets[pos.venue], 2),
+                "liquidation_before": round(before, 4),
+                "liquidation_after": round(after, 4),
+                "source": info.source,
+            }
+            self.funding_events.append(event)
+            await self._emit("funding", event)
+            verb = "paid" if payment > 0 else "received"
+            await self._add_audit(
+                "funding_settled", symbol,
+                f"{verb} ${abs(payment):,.2f} funding ({info.rate * 100:+.4f}%, demo) → liq ${before:,.2f} → ${after:,.2f}",
+            )
+
+    async def _check_prefunding(self) -> None:
+        ctx = self.risk_context()
+        for pos in self.positions:
+            warning = pre_funding_warning(
+                pos, ctx.account_for(pos), ctx.funding_for, ctx.now, self.threshold, self.prefunding_lead_minutes
+            )
+            if warning is None:
+                continue
+            key = (pos.symbol, f"funding@{warning.settlement_time.isoformat()}")
+            if key in self._fired:
+                continue
+            self._fired.add(key)
+            self._alert_seq += 1
+            alert = {
+                "id": f"al_{self._alert_seq:03d}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "sim_time": ctx.now.isoformat(),
+                "step": self.step,
+                "level": "funding",
+                "symbol": pos.symbol,
+                "venue": pos.venue.value,
+                "side": pos.side.value,
+                "leverage": pos.leverage,
+                "distance_pct": round(pos.distance_to_liquidation_pct, 2),
+                "threshold_pct": self.threshold.warning_distance_pct,
+                "mark_price": round(pos.mark_price, 4),
+                "liquidation_price": round(pos.liquidation_price, 4),
+                "funding": warning.to_dict(),
+                "channels": sorted(self._subscribers),
+            }
+            self.alerts.append(alert)
+            await self._emit("alert", alert)
+            await self._add_audit(
+                "prefunding_warning", pos.symbol,
+                f"pays ${warning.payment_usd:,.2f} in {warning.minutes_to_settlement:.0f} min → "
+                f"distance {warning.distance_before_pct:.1f}% → {warning.distance_after_pct:.1f}%",
+            )
 
     async def _check_alerts(self) -> None:
         thresholds = self._thresholds()
@@ -382,11 +662,12 @@ class MarketSimulation:
 
     async def _fire_alert(self, level: str, pos: Position) -> None:
         self._alert_seq += 1
-        margin = AdviceCalculator.calculate_margin_to_add(pos, self.threshold.safety_target_pct)
-        reduction = AdviceCalculator.calculate_position_reduction(pos, self.threshold.safety_target_pct)
+        plan = self.build_rescue_plan(pos.symbol)
+        margin = plan.margin_advice()
         alert = {
             "id": f"al_{self._alert_seq:03d}",
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sim_time": self.sim_now.isoformat(),
             "step": self.step,
             "level": level,
             "symbol": pos.symbol,
@@ -405,9 +686,9 @@ class MarketSimulation:
             f"alert_{level}", pos.symbol,
             f"{pos.distance_to_liquidation_pct:.1f}% from liquidation → sent to {', '.join(alert['channels']) or 'no channels'}",
         )
-        self._spawn(self._generate_advice(alert, pos, margin, reduction))
+        self._spawn(self._generate_advice(alert, pos, margin, plan))
 
-    async def _generate_advice(self, alert: dict, pos: Position, margin, reduction) -> None:
+    async def _generate_advice(self, alert: dict, pos: Position, margin, plan: RescuePlan) -> None:
         explanation, summary, mock = None, None, True
         if self.llm is not None:
             try:
@@ -419,6 +700,7 @@ class MarketSimulation:
                 logger.error(f"Advice generation failed: {e}")
         if not explanation:
             explanation = AdviceCalculator.format_advice_text(margin, self.language)
+        rescue_explanation = await self._explain_rescue(plan)
 
         card = {
             "id": f"adv_{alert['id']}",
@@ -435,9 +717,12 @@ class MarketSimulation:
             "explanation": explanation,
             "margin_to_add_usd": round(margin.margin_to_add_usd or 0, 2),
             "new_liquidation_price": round(margin.new_liquidation_price, 4) if margin.new_liquidation_price else None,
-            "reduce_size_pct": round(reduction.reduce_size_pct or 0, 1),
-            "reduce_size_by": round(reduction.reduce_size_by or 0, 4),
+            "reduce_size_pct": round(margin.reduce_size_pct or 0, 1),
+            "reduce_size_by": round(margin.reduce_size_by or 0, 4),
             "target_distance_pct": self.threshold.safety_target_pct,
+            "margin_mode": plan.margin_mode,
+            "rescue": plan.to_dict(),
+            "rescue_explanation": rescue_explanation,
             "mock": mock,
         }
         self.advice.append(card)

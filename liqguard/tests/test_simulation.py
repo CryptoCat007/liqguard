@@ -50,7 +50,10 @@ class TestPricePath:
     def test_path_ends_at_configured_distance(self, sim):
         final = sim._positions_at(sim.steps)
         for spec, pos in zip(sim.specs, final):
-            assert pos.distance_to_liquidation_pct == pytest.approx(spec.end_distance_pct, abs=1e-6)
+            if spec.is_driver:
+                assert pos.distance_to_liquidation_pct == pytest.approx(spec.end_distance_pct, abs=1e-6)
+            else:
+                assert pos.mark_price == pytest.approx(spec.entry_price * (1 + spec.end_price_pct / 100), rel=1e-9)
 
     def test_starts_safe_across_two_venues(self, sim):
         assert sim.overview.positions_at_risk == 0
@@ -60,7 +63,7 @@ class TestPricePath:
 class TestAlerts:
     async def test_all_three_tiers_fire_in_order_once(self, sim):
         events = await run(sim)
-        alerts = [e["data"] for e in events if e["type"] == "alert"]
+        alerts = [e["data"] for e in events if e["type"] == "alert" and e["data"]["level"] in TIERS]
         levels = {a["level"] for a in alerts}
         assert levels == set(TIERS)
 
@@ -78,7 +81,7 @@ class TestAlerts:
 
     async def test_every_alert_gets_advice_with_code_numbers(self, sim):
         await run(sim)
-        assert len(sim.advice) == len(sim.alerts)
+        assert len(sim.advice) == len([a for a in sim.alerts if a["level"] in TIERS])
         for card in sim.advice:
             assert card["margin_to_add_usd"] > 0
             assert card["reduce_size_pct"] > 0
