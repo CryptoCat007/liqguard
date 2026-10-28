@@ -36,6 +36,10 @@
     </div>
 
     <div class="controls">
+      <label class="scenario" title="Demo book to simulate">
+        <span class="sr-only">Demo scenario</span>
+        <select id="scenarioSelect" aria-label="Demo scenario"></select>
+      </label>
       <button class="btn btn-primary" id="simulateBtn" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
         Simulate market
@@ -97,6 +101,15 @@
       </div>
     </section>
 
+    <section class="conc card" id="concBanner" hidden role="alert">
+      <div class="conc-icon">🧲</div>
+      <div class="conc-body">
+        <div class="conc-title" id="concTitle">Concentrated, correlated exposure</div>
+        <div class="conc-sub" id="concSub"></div>
+      </div>
+      <div class="conc-stat"><div class="conc-n" id="concBets">—</div><div class="faint">independent bets</div></div>
+    </section>
+
     <section class="kpis">
       <div class="kpi card"><div class="kpi-label">Total notional</div><div class="kpi-value" id="kpiNotional">—</div><div class="kpi-sub" id="kpiVenues">—</div></div>
       <div class="kpi card"><div class="kpi-label">Margin used</div><div class="kpi-value" id="kpiMargin">—</div><div class="kpi-sub" id="kpiLeverage">—</div></div>
@@ -130,6 +143,52 @@
           </div>
         </div>
         <div class="positions" id="positions"></div>
+      </div>
+    </section>
+
+    <section class="row-portfolio">
+      <div class="card triage-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Priority triage</div>
+            <div class="card-sub">Which position to handle first · time to liquidation at typical volatility, distance vs tiers, size</div>
+          </div>
+          <span class="tag" id="triageTag">—</span>
+        </div>
+        <ol class="triage" id="triage"></ol>
+      </div>
+
+      <div class="card pstress-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Portfolio stress test</div>
+            <div class="card-sub">If everything moves together (correlated coins by their beta) · per cross-margin account</div>
+          </div>
+        </div>
+        <div class="pstress" id="pstress"></div>
+      </div>
+    </section>
+
+    <section class="row-portfolio">
+      <div class="card liqcmp-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Platform liq vs real liq</div>
+            <div class="card-sub">The exchange's line assumes your other positions stand still · LiqGuard moves them together</div>
+          </div>
+        </div>
+        <div class="liqcmp" id="liqcmp"></div>
+      </div>
+
+      <div class="card sizing-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Position sizing</div>
+            <div class="card-sub" id="sizingSub">Loss at the exit vs account equity · margin share · suggested size</div>
+          </div>
+          <span class="tag" id="sizingTag">—</span>
+        </div>
+        <div class="sizing" id="sizing"></div>
       </div>
     </section>
 
@@ -188,9 +247,12 @@
         <div class="card-head">
           <div>
             <div class="card-title">Alert timeline</div>
-            <div class="card-sub">Adaptive tiers, stop-loss, ADL, pre-funding and wake-up reminders · same events as Telegram</div>
+            <div class="card-sub">Triage, stress, sizing, adaptive tiers, stop-loss, ADL, pre-funding and wake-up reminders · same events as Telegram</div>
           </div>
           <div class="tier-counts">
+            <span class="tc tc-triage" title="Triage (several positions at once)"><i></i><b id="cntTriage">0</b></span>
+            <span class="tc tc-corr" title="Correlation / stress"><i></i><b id="cntCorr">0</b></span>
+            <span class="tc tc-sizing" title="Position sizing"><i></i><b id="cntSizing">0</b></span>
             <span class="tc tc-stop" title="Stop-loss"><i></i><b id="cntStop">0</b></span>
             <span class="tc tc-adl" title="ADL"><i></i><b id="cntAdl">0</b></span>
             <span class="tc tc-funding" title="Pre-funding"><i></i><b id="cntFunding">0</b></span>

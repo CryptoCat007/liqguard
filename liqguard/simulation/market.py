@@ -737,6 +737,16 @@ class MarketSimulation:
         await self._add_audit("simulation_stopped", None, f"Stopped from {source}", source)
         await self._emit("status", self._status())
 
+    async def switch_scenario(self, key: str, source: str = "web") -> bool:
+        """Switch the demo book and tell every channel. False while running or for an unknown key."""
+        await self._stop_escalation()
+        if not self.set_scenario(key):
+            return False
+        await self._emit("reset", self.snapshot())
+        await self._add_audit("scenario_switched", None, f"Demo book: {SCENARIOS[key].title}", source)
+        await self.refresh_summary()
+        return True
+
     async def reset_and_notify(self) -> None:
         await self.stop()
         await self._stop_escalation()

@@ -30,8 +30,13 @@ from pydantic import BaseModel, Field
 from liqguard.ai import MetaLLMClient
 from liqguard.auth import SessionClaims
 from liqguard.core import AppContext
-from liqguard.risk import PortfolioAnalyzer, RescueSimulator, position_protection
-from liqguard.simulation import MarketSimulation
+from liqguard.risk import (
+    PortfolioAnalyzer,
+    RescueSimulator,
+    portfolio_insights,
+    position_protection,
+)
+from liqguard.simulation import SCENARIOS, MarketSimulation
 
 from .auth import SessionAuth, register_auth_routes
 from .security import apply_security_headers, require_csrf
@@ -43,6 +48,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 class AckRequest(BaseModel):
     ack_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_\-]+$")
+
+
+class ScenarioRequest(BaseModel):
+    scenario: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z_]+$")
+
 WS_POLICY_VIOLATION = 1008
 
 
@@ -217,6 +227,19 @@ def create_app(
             await sim.reset_and_notify()
             return {"status": "reset"}
 
+        @app.get(f"{prefix}/insights")
+        async def insights(sim: MarketSimulation = Depends(resolve)):
+            """Priority triage, portfolio stress test, platform vs correlated liq, concentration and sizing."""
+            return JSONResponse(sim.insights().to_dict())
+
+        @app.post(f"{prefix}/scenario", dependencies=[Depends(require_csrf)])
+        async def scenario(body: ScenarioRequest, sim: MarketSimulation = Depends(guard)):
+            if body.scenario not in SCENARIOS:
+                raise HTTPException(404, "Unknown scenario")
+            if not await sim.switch_scenario(body.scenario, source="web"):
+                raise HTTPException(409, "Stop the running simulation first")
+            return {"status": "switched", "scenario": sim.scenario}
+
         @app.post(f"{prefix}/ack", dependencies=[Depends(require_csrf)])
         async def ack(body: AckRequest, sim: MarketSimulation = Depends(resolve)):
             """"I'm awake": stops escalating reminders for one alert of this simulation."""
@@ -259,12 +282,14 @@ def create_app(
                 if positions else None
             )
             protection = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in positions]
+            insights = portfolio_insights(positions, snapshot.context, user.threshold).to_dict() if positions else None
             return {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
                 "label": label,
                 "positions": overview,
                 "protection": protection,
+                "insights": insights,
                 "escalations": [a.to_dict() for a in ctx.escalations.pending_for(claims.user_id) if a.acknowledged_at is None],
                 "actions": await ctx.storage.list_audit(claims.user_id, limit=50),
                 "protect_enabled": ctx.actions.is_enabled(),

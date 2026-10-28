@@ -4,10 +4,17 @@ const COLORS = {
   safe: "#34d399", warning: "#fbbf24", critical: "#fb923c", emergency: "#f43f5e", funding: "#a78bfa",
   grid: "rgba(148,163,184,0.08)", tick: "#5b667a", text: "#8a96ab",
 };
-const SYMBOL_COLORS = { BTCUSDT: "#f7931a", ETH: "#8b9cff", ETHUSDT: "#8b9cff", SOLUSDT: "#14f195", TSLAUSDT: "#e2e8f0" };
+const SYMBOL_COLORS = {
+  BTCUSDT: "#f7931a", ETH: "#8b9cff", ETHUSDT: "#8b9cff", SOLUSDT: "#14f195", TSLAUSDT: "#e2e8f0",
+  DOGEUSDT: "#d6b84a", AVAXUSDT: "#e84142",
+};
 const FALLBACK_COLORS = ["#38bdf8", "#f472b6", "#a3e635", "#facc15"];
 const TIERS = ["warning", "critical", "emergency"];
-const LEVEL_ICON = { warning: "⚠️", critical: "🚨", emergency: "🆘", funding: "⏳", stop: "🛑", adl: "⚡" };
+const LEVEL_ICON = {
+  warning: "⚠️", critical: "🚨", emergency: "🆘", funding: "⏳", stop: "🛑", adl: "⚡",
+  triage: "🎯", sizing: "📏", correlation: "🧲",
+};
+const NEW_COUNTS = () => ({ warning: 0, critical: 0, emergency: 0, funding: 0, stop: 0, adl: 0, triage: 0, sizing: 0, correlation: 0 });
 const STOP_LABEL = {
   ok: ["✅ Stop fires first", "safe"], partial: ["⚠️ Partial stop", "warning"], no_stop: ["🛑 No stop-loss", "critical"],
   too_close: ["⚠️ Stop too close to liq", "warning"], beyond_liquidation: ["🛑 Stop beyond liq", "emergency"],
@@ -25,9 +32,10 @@ const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
 const S = {
   history: {}, tierPrices: {}, thresholds: { warning: 20, critical: 10, emergency: 5 },
   totalSteps: 40, tick: 0.75, step: 0, state: "idle", order: [], view: "distance",
-  overview: null, counts: { warning: 0, critical: 0, emergency: 0, funding: 0, stop: 0, adl: 0 }, lastSeverity: {},
+  overview: null, counts: NEW_COUNTS(), lastSeverity: {},
   minutesPerStep: null, wallets: {}, fundingEvents: [], fundingSteps: {}, rescue: null,
   protection: {}, session: null, escalation: null, pending: {}, stopMuse: {},
+  insights: null, scenario: null, scenarios: [],
 };
 let chart = null;
 let ws = null;
@@ -112,7 +120,7 @@ function applySnapshot(snap) {
   S.tierPrices = snap.tier_prices || {};
   S.safetyTarget = snap.safety_target_pct;
   S.order = Object.keys(S.history);
-  S.counts = { warning: 0, critical: 0, emergency: 0, funding: 0, stop: 0, adl: 0 };
+  S.counts = NEW_COUNTS();
   S.lastSeverity = {};
   S.minutesPerStep = snap.minutes_per_step || null;
   S.wallets = snap.wallets || {};
@@ -127,6 +135,10 @@ function applySnapshot(snap) {
   S.escalation = snap.escalation || null;
   S.pending = Object.fromEntries((snap.escalation?.pending || []).map((a) => [a.id, a]));
   S.stopMuse = {};
+  S.insights = snap.insights || null;
+  S.scenario = snap.scenario || null;
+  S.scenarios = snap.scenarios || [];
+  renderScenarios();
   if (S.view !== "distance" && !S.order.includes(S.view)) S.view = "distance";
 
   $("musePill").textContent = snap.muse_mode === "live" ? "Muse · live" : "Muse · mock";
@@ -151,6 +163,7 @@ function applySnapshot(snap) {
   if (!snap.audit?.length) $("audit").append(empty("📋", "Audit log is empty", "Alerts, suggestions and Telegram action steps are recorded here."));
 
   renderProtection();
+  renderInsights();
   renderWake();
   buildTabs();
   buildChart();
@@ -208,6 +221,7 @@ function onTick(data) {
   if (data.wallets) S.wallets = data.wallets;
   if (data.protection) S.protection = data.protection;
   if (data.session) S.session = data.session;
+  if (data.insights) S.insights = data.insights;
   if (data.escalation) {
     S.escalation = data.escalation;
     S.pending = Object.fromEntries((data.escalation.pending || []).map((a) => [a.id, { ...S.pending[a.id], ...a }]));
@@ -215,6 +229,7 @@ function onTick(data) {
   }
   renderProtection();
   renderOverview(data.overview);
+  renderInsights();
   renderFunding();
   updateChart(data);
   setProgress();
@@ -341,6 +356,7 @@ function renderPositions(positions) {
       liqDetail(p),
       fundingDetail(p.funding),
       protectionChips(S.protection[sym]),
+      insightChips(sym),
       el("div", { class: "pos-actions" },
         el("button", {
           class: "mini-btn", type: "button", title: "Compare add margin, reduce and hedge",
@@ -415,6 +431,9 @@ function addAlert(a, opts = {}) {
   if (a.level === "funding") { addFundingAlert(a, opts); return; }
   if (a.level === "stop") { addStopAlert(a, opts); return; }
   if (a.level === "adl") { addAdlAlert(a, opts); return; }
+  if (a.level === "triage") { addTriageAlert(a, opts); return; }
+  if (a.level === "sizing") { addSizingAlert(a, opts); return; }
+  if (a.level === "correlation") { addCorrelationAlert(a, opts); return; }
   if (a.ack_id && !opts.quiet && !S.pending[a.ack_id] && S.escalation?.enabled !== false) {
     S.pending[a.ack_id] = { id: a.ack_id, symbol: a.symbol, severity: a.level, reminders_sent: 0, max_reminders: S.escalation?.max_reminders ?? 5, distance_pct: a.distance_pct };
     renderWake();
@@ -435,9 +454,14 @@ function addAlert(a, opts = {}) {
       ` from liquidation · mark ${price(a.mark_price)} vs liq ${price(a.liquidation_price)}`,
       a.wicks?.max_wicks_away != null ? el("div", { class: "tl-sub" }, `🕯 ${a.wicks.max_wicks_away.toFixed(1)} max ${a.wicks.worst_interval} wicks from liquidation`) : null,
       a.adaptive_reasons?.length ? el("div", { class: "tl-sub" }, `Tiers widened: ${a.adaptive_reasons.join(" · ")}`) : null,
+      a.liq_comparison?.gap_pct >= 1 ? el("div", { class: "tl-sub" },
+        `Correlated liq ${price(a.liq_comparison.correlated_price)} is `, el("b", { class: "c-critical" }, `${a.liq_comparison.gap_pct.toFixed(1)} pts closer`),
+        ` than the platform line`) : null,
     ),
-    el("div", { class: "chips" }, ...chips, a.ack_id ? ackButton(a.ack_id, a.symbol) : null),
+    el("div", { class: "chips" }, priorityChip(a.priority), a.consolidated ? el("span", { class: "chip faint" }, "in one triage alert") : null,
+      ...chips, a.ack_id ? ackButton(a.ack_id, a.symbol) : null),
   ));
+  if (a.consolidated) opts = { ...opts, quiet: true };
   if (!opts.quiet) {
     const sent = (a.channels || []).map((c) => (c === "web" ? "Web" : c === "telegram" ? "Telegram" : c)).join(" + ");
     toast(LEVEL_ICON[a.level], `${a.level.toUpperCase()} · ${a.symbol}`,
@@ -450,6 +474,9 @@ function addAlert(a, opts = {}) {
 }
 
 function updateCounts() {
+  $("cntTriage").textContent = S.counts.triage;
+  $("cntSizing").textContent = S.counts.sizing;
+  $("cntCorr").textContent = S.counts.correlation;
   $("cntWarning").textContent = S.counts.warning;
   $("cntCritical").textContent = S.counts.critical;
   $("cntEmergency").textContent = S.counts.emergency;
@@ -499,6 +526,265 @@ function addAdlAlert(a, opts) {
 
 function channelChip(c) {
   return el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c);
+}
+
+function priorityChip(pr) {
+  if (!pr || (pr.of || 0) < 2) return null;
+  return pr.label
+    ? el("span", { class: "chip chip-first", title: pr.reason }, `🎯 ${pr.label}`)
+    : el("span", { class: "chip", title: pr.reason }, `priority #${pr.rank} of ${pr.of}`);
+}
+
+function addTriageAlert(a, opts) {
+  const items = a.items || [];
+  $("timeline").prepend(el("li", { class: `tl-item tl-triage tl-${a.severity || "warning"}` },
+    el("span", { class: "tl-node" }),
+    tlHead(`${items.length} AT RISK · HANDLE IN ORDER`, `lvl-triage-b`, a),
+    el("ol", { class: "tl-order" }, ...items.map((t) => el("li", { class: t.label ? "first" : "" },
+      el("b", { style: { color: symbolColor(t.symbol) } }, t.symbol), " ",
+      el("span", { class: `c-${t.severity || "safe"}` }, `${(t.severity || "ok").toUpperCase()} ${pct(t.distance_pct)}`),
+      el("span", { class: "faint" }, ` · ${minutesText(t.minutes_to_liq)}`),
+      t.label ? el("span", { class: "first-tag" }, ` 🎯 ${t.label}`) : null,
+    ))),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip),
+      a.ack_id ? ackButton(a.ack_id, a.symbol) : null,
+      el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(a.symbol) }, `🛟 Rescue ${a.symbol}`)),
+  ));
+  if (a.ack_id && !opts.quiet && !S.pending[a.ack_id] && S.escalation?.enabled !== false) {
+    S.pending[a.ack_id] = { id: a.ack_id, symbol: a.symbol, severity: a.severity, reminders_sent: 0, max_reminders: S.escalation?.max_reminders ?? 5, distance_pct: a.distance_pct };
+    renderWake();
+  }
+  if (!opts.quiet) {
+    toast("🎯", `${items.length} positions at risk`, `Handle ${a.symbol} first — then ${items.slice(1).map((t) => t.symbol).join(", ")}`, COLORS[a.severity] || COLORS.critical);
+    if (a.severity === "emergency") {
+      document.body.classList.add("flash-emergency");
+      setTimeout(() => document.body.classList.remove("flash-emergency"), 1400);
+    }
+  }
+}
+
+function addSizingAlert(a, opts) {
+  const checks = a.sizing || [];
+  $("timeline").prepend(el("li", { class: "tl-item tl-sizing" },
+    el("span", { class: "tl-node" }),
+    tlHead(`OVERSIZED · ${checks.length}`, "lvl-sizing-b", a),
+    el("div", { class: "tl-body" },
+      checks.map((c) => el("div", {},
+        el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol), ` loses ${pct(c.risk_pct)} of equity at its ${c.exit_kind} → suggest `,
+        el("b", {}, `${fmtSize(c.suggested_size)}`), el("span", { class: "faint" }, ` (now ${fmtSize(c.size)})`)))),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
+  ));
+  if (!opts.quiet) toast("📏", "Position size too large", `${checks.map((c) => c.symbol).join(", ")}: over your ${checks[0]?.max_risk_pct}% risk per trade`, COLORS.warning);
+}
+
+function addCorrelationAlert(a, opts) {
+  const st = a.stress, conc = a.concentration || {};
+  const move = st?.liq_move_down_pct;
+  $("timeline").prepend(el("li", { class: `tl-item tl-corr tl-${a.severity || "warning"}` },
+    el("span", { class: "tl-node" }),
+    tlHead(`STRESS ${a.severity ? a.severity.toUpperCase() : "· CONCENTRATION"}`, "lvl-corr-b", a),
+    el("div", { class: "tl-body" },
+      move != null ? ["A ", el("b", { class: `c-${a.severity || "warning"}` }, pct(move)), ` correlated market drop liquidates the ${venueLabel(st.venue)} account`] : "",
+      conc.flagged ? el("div", { class: "tl-sub" }, `🧲 ${conc.message}`) : null,
+    ),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
+  ));
+  if (!opts.quiet) {
+    toast("🧲", "Portfolio stress test", move != null ? `${pct(move)} market drop liquidates the account` : conc.message, COLORS[a.severity] || COLORS.warning);
+  }
+}
+
+/* ---------------- portfolio: triage / stress / liq comparison / sizing ---------------- */
+
+function minutesText(m) {
+  if (m == null) return "no liq";
+  if (m < 120) return `~${Math.round(m)} min at typical vol`;
+  if (m < 72 * 60) return `~${(m / 60).toFixed(1)} h at typical vol`;
+  return `~${Math.round(m / 1440)} d at typical vol`;
+}
+function fmtSize(v) {
+  if (v == null) return "—";
+  return Math.abs(v) >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : `${+v.toPrecision(4)}`;
+}
+
+function insightChips(sym) {
+  const ins = S.insights;
+  if (!ins) return null;
+  const chips = [];
+  const t = (ins.triage || []).find((x) => x.symbol === sym);
+  if (t?.label) chips.push(el("span", { class: "pchip chip-first", title: t.reason }, `🎯 ${t.label}`));
+  else if (t?.at_risk && t.of > 1) chips.push(el("span", { class: "pchip", title: t.reason }, `#${t.rank} of ${t.of}`));
+  const c = (ins.comparisons || []).find((x) => x.symbol === sym);
+  if (c?.gap_pct >= 1) chips.push(el("span", { class: "pchip c-critical", title: "LiqGuard correlated liquidation vs the platform's line" }, `🧲 real liq ${pct(c.correlated_distance_pct)} away`));
+  const z = (ins.sizing || []).find((x) => x.symbol === sym);
+  if (z?.status === "oversized") chips.push(el("span", { class: "pchip c-warning", title: (z.reasons || []).join(" · ") }, `📏 size → ${fmtSize(z.suggested_size)}`));
+  return chips.length ? el("div", { class: "pchips" }, ...chips) : null;
+}
+
+function renderInsights() {
+  renderConcentration();
+  renderTriage();
+  renderPortfolioStress();
+  renderLiqComparison();
+  renderSizing();
+}
+
+function renderConcentration() {
+  const conc = S.insights?.concentration;
+  const box = $("concBanner");
+  box.hidden = !conc?.flagged;
+  if (!conc?.flagged) return;
+  const worst = S.insights.worst_account;
+  $("concTitle").textContent = `${pct(conc.dominant_share_pct, 0)} ${conc.dominant_side} across ${conc.dominant_count} correlated coins`;
+  $("concSub").textContent = `${conc.symbols.join(" · ")} move together (avg correlation ${conc.avg_correlation.toFixed(2)}).`
+    + (worst ? ` A ${pct(Math.abs(worst.first_liquidation_move_pct))} market ${worst.first_liquidation_move_pct < 0 ? "drop" : "rise"} liquidates the ${venueLabel(worst.venue)} account.` : "");
+  $("concBets").textContent = conc.effective_bets == null ? "—" : conc.effective_bets.toFixed(1);
+}
+
+function renderTriage() {
+  const box = $("triage");
+  const items = S.insights?.triage || [];
+  const atRisk = items.filter((t) => t.at_risk).length;
+  $("triageTag").textContent = atRisk ? `${atRisk} AT RISK` : "ALL CLEAR";
+  $("triageTag").className = `tag${atRisk ? " tag-hot" : " tag-ro"}`;
+  if (!items.length) { box.replaceChildren(empty("🎯", "No positions", "Positions are ranked here when you have more than one.")); return; }
+  const maxScore = Math.max(...items.map((t) => t.score), 1);
+  box.replaceChildren(...items.map((t) => el("li", { class: `tri${t.label ? " first" : ""}${t.at_risk ? "" : " calm"}` },
+    el("div", { class: "tri-rank" }, t.rank),
+    el("div", { class: "tri-main" },
+      el("div", { class: "tri-head" },
+        el("b", { style: { color: symbolColor(t.symbol) } }, t.symbol),
+        el("span", { class: `side side-${t.side}` }, t.side.toUpperCase()),
+        el("span", { class: `tri-sev c-${t.severity || "safe"}` }, t.severity ? t.severity.toUpperCase() : "OK"),
+        t.label ? el("span", { class: "first-tag" }, `🎯 ${t.label}`) : null,
+      ),
+      el("div", { class: "tri-bar" }, el("i", { style: { width: `${(t.score / maxScore) * 100}%`, background: COLORS[t.severity || "safe"] } })),
+      el("div", { class: "tri-meta" },
+        el("span", {}, `${pct(t.distance_pct)} from liq`),
+        el("span", {}, minutesText(t.minutes_to_liq)),
+        el("span", {}, `σ5m ${pct(t.sigma_5m_pct, 2)}${t.sigma_source === "default" ? " (default)" : ""}`),
+        el("span", {}, `${money(t.notional)} notional`),
+      ),
+    ),
+    el("div", { class: "tri-score", title: "Urgency score 0–100" }, t.score.toFixed(0)),
+  )));
+}
+
+function renderPortfolioStress() {
+  const box = $("pstress");
+  const accounts = S.insights?.stress || [];
+  if (!accounts.length) { box.replaceChildren(empty("📉", "No cross-margin account", "The stress test covers positions that share one cross wallet.")); return; }
+  box.replaceChildren(...accounts.map((st) => {
+    const down = st.shocks.filter((x) => x.market_move_pct < 0).sort((a, b) => b.market_move_pct - a.market_move_pct);
+    const up = st.shocks.filter((x) => x.market_move_pct > 0);
+    const move = st.liq_move_down_pct, uni = st.uniform_liq_move_down_pct;
+    const band = move == null ? "safe" : move <= 2.5 ? "emergency" : move <= 5 ? "critical" : move <= 10 ? "warning" : "safe";
+    const cell = (x) => el("div", { class: `ps-cell${x.liquidated ? " dead" : ""}` },
+      el("div", { class: "ps-move" }, `${x.market_move_pct > 0 ? "+" : ""}${x.market_move_pct}%`),
+      el("div", { class: "ps-out" }, x.liquidated ? "LIQUIDATED" : `${money(x.margin_left)} left`),
+    );
+    return el("div", { class: "ps-acct" },
+      el("div", { class: "ps-head" },
+        el("span", { class: `venue venue-${st.venue}` }, venueLabel(st.venue)),
+        el("span", { class: "faint" }, `${st.symbols.length} cross positions · equity ${money(st.equity)} · maint. ${money(st.maintenance)}`),
+      ),
+      el("div", { class: `ps-big c-${band}` },
+        el("div", { class: "ps-n" }, move == null ? "> 95%" : `−${pct(move)}`),
+        el("div", {}, el("b", {}, "market move liquidates the account"),
+          el("div", { class: "faint" }, `coins moving by their beta${uni != null ? ` · ${pct(uni)} if all move equally` : ""}`
+            + (st.liq_move_up_pct != null ? ` · +${pct(st.liq_move_up_pct)} on the upside` : ""))),
+      ),
+      el("div", { class: "ps-grid" }, ...down.map(cell)),
+      up.length ? el("div", { class: "ps-grid ps-up" }, ...up.map(cell)) : null,
+    );
+  }));
+}
+
+function renderLiqComparison() {
+  const box = $("liqcmp");
+  const comps = (S.insights?.comparisons || []).filter((c) => c.platform_price != null || c.correlated_price != null);
+  if (!comps.length) { box.replaceChildren(empty("📐", "No liquidation prices", "Positions without a liquidation price have nothing to compare.")); return; }
+  const scale = Math.max(...comps.map((c) => c.platform_distance_pct || 0), 10);
+  box.replaceChildren(...comps.map((c) => {
+    const gap = c.gap_pct;
+    const hot = gap != null && gap >= 1;
+    const bar = (d, cls) => el("div", { class: `lc-bar ${cls}` }, el("i", { style: { width: `${Math.min((d || 0) / scale, 1) * 100}%` } }), el("span", {}, pct(d)));
+    return el("div", { class: `lc-row${hot ? " hot" : ""}` },
+      el("div", { class: "lc-head" },
+        el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol),
+        el("span", { class: `mode mode-${c.margin_mode}` }, c.margin_mode.toUpperCase()),
+        hot ? el("span", { class: "lc-gap" }, `⚠️ ${gap.toFixed(1)} pts closer than shown`) : el("span", { class: "faint" }, "matches the platform"),
+      ),
+      el("div", { class: "lc-line" }, el("span", { class: "lc-label" }, "Platform shows"), el("span", { class: "lc-price" }, price(c.platform_price)), bar(c.platform_distance_pct, "plat")),
+      el("div", { class: "lc-line" }, el("span", { class: "lc-label" }, "LiqGuard (together)"), el("span", { class: "lc-price" }, price(c.correlated_price)), bar(c.correlated_distance_pct, hot ? "real hot" : "real")),
+      c.correlated_market_move_pct != null ? el("div", { class: "faint lc-note" }, `≈ a ${pct(Math.abs(c.correlated_market_move_pct))} market ${c.correlated_market_move_pct < 0 ? "drop" : "rise"}`) : null,
+    );
+  }));
+}
+
+function renderSizing() {
+  const box = $("sizing");
+  const checks = S.insights?.sizing || [];
+  const over = checks.filter((c) => c.status === "oversized").length;
+  $("sizingTag").textContent = checks.length ? (over ? `${over} OVERSIZED` : "SIZED OK") : "—";
+  $("sizingTag").className = `tag${over ? " tag-hot" : " tag-ro"}`;
+  if (checks.length) {
+    const c0 = checks[0];
+    $("sizingSub").textContent = `Equity ${money(c0.equity)} · limits ${c0.max_risk_pct}% loss per trade at the exit, ${c0.max_margin_pct}% margin per position${MODE === "me" ? " (/settings in Telegram)" : ""}`;
+  }
+  if (!checks.length) { box.replaceChildren(empty("📏", "No account equity", "Sizing needs the account's wallet balance.")); return; }
+  box.replaceChildren(...checks.map((c) => el("div", { class: `sz-row${c.status === "oversized" ? " over" : ""}` },
+    el("div", { class: "sz-head" },
+      el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol),
+      el("span", { class: "faint" }, `${fmtSize(c.size)} · ${money(c.notional)} · ${c.notional_x_equity?.toFixed(1)}× equity`),
+      el("span", { class: c.status === "oversized" ? "c-warning sz-status" : "c-safe sz-status" }, c.status === "oversized" ? `cut ${pct(c.reduce_pct, 0)}` : "fits"),
+    ),
+    el("div", { class: "sz-meters" },
+      meter("Loss at exit", c.risk_pct, c.max_risk_pct, `${money(c.loss_at_exit_usd)} at ${c.exit_kind}`),
+      meter("Margin share", c.margin_pct, c.max_margin_pct, `${money(c.margin)} margin`),
+    ),
+    c.status === "oversized" ? el("div", { class: "sz-suggest" }, "Suggested size ", el("b", {}, fmtSize(c.suggested_size)), ` (≈ ${money(c.suggested_notional)})`) : null,
+  )));
+}
+
+function meter(label, value, limit, sub) {
+  const ratio = value == null || !limit ? 0 : value / limit;
+  const cls = ratio > 1 ? "over" : ratio > 0.75 ? "near" : "ok";
+  return el("div", { class: `meter ${cls}` },
+    el("div", { class: "meter-top" }, el("span", {}, label), el("b", {}, value == null ? "—" : `${pct(value)} / ${limit}%`)),
+    el("div", { class: "meter-bar" }, el("i", { style: { width: `${Math.min(ratio, 1) * 100}%` } }), el("u", { style: { left: `${Math.min(1 / Math.max(ratio, 1), 1) * 100}%` } })),
+    el("div", { class: "faint meter-sub" }, sub),
+  );
+}
+
+function renderScenarios() {
+  const sel = $("scenarioSelect");
+  if (!S.scenarios.length) { sel.parentElement.hidden = true; return; }
+  sel.parentElement.hidden = false;
+  sel.replaceChildren(...S.scenarios.map((sc) => el("option", { value: sc.key, selected: sc.key === S.scenario, title: sc.description }, `🎬 ${sc.title}`)));
+  sel.disabled = S.state === "running";
+}
+
+async function switchScenario(key) {
+  const sel = $("scenarioSelect");
+  sel.disabled = true;
+  try {
+    const r = await fetch(`${API}/scenario`, {
+      method: "POST", credentials: "same-origin",
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" }, body: JSON.stringify({ scenario: key }),
+    });
+    if (r.status === 401) { toLogin(); return; }
+    if (r.status === 409) toast("⏹", "Simulation running", "Stop the run before switching the demo book.", COLORS.warning);
+    else if (!r.ok) throw new Error(`${r.status}`);
+    else {
+      const sc = S.scenarios.find((x) => x.key === key);
+      toast("🎬", sc?.title || key, sc?.description || "", COLORS.safe);
+    }
+  } catch (err) {
+    toast("⚠️", "Request failed", "Could not switch the scenario.", COLORS.critical);
+  } finally {
+    renderScenarios();
+  }
 }
 
 /* ---------------- wake-up escalation ---------------- */
@@ -942,6 +1228,7 @@ function setStatus(st) {
   sim.classList.toggle("running", running);
   sim.lastChild.textContent = running ? " Simulating…" : st.state === "finished" || st.state === "stopped" ? " Replay simulation" : " Simulate market";
   $("stopBtn").disabled = !running;
+  $("scenarioSelect").disabled = running;
   setProgress();
 }
 
@@ -1231,6 +1518,8 @@ async function refreshAccount() {
       + ` (${p.funding.label})`) : null,
   )));
   if (!positions.length) box.append(empty("📭", "No open positions", data.label ? "Nothing open right now." : "Connect an exchange or enable /demo in Telegram."));
+  const live = accountInsights(data.insights);
+  if (live) box.append(live);
   for (const a of data.escalations || []) {
     box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${a.severity.toUpperCase()} · ${a.reminders_sent}/${a.max_reminders} reminders `,
       el("button", { class: "mini-btn ack-btn", type: "button", onclick: async () => {
@@ -1247,6 +1536,32 @@ async function refreshAccount() {
     ),
   )));
   if (!data.actions?.length) acts.append(empty("📋", "No protective actions yet", data.protect_enabled ? "Proposals and confirmations from Telegram appear here." : "Protective actions are disabled on this server."));
+}
+
+function accountInsights(ins) {
+  if (!ins) return null;
+  const parts = [];
+  const atRisk = (ins.triage || []).filter((t) => t.at_risk);
+  if (atRisk.length) {
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, "🎯 Handle in order: "),
+      atRisk.map((t, i) => el("span", { class: `c-${t.severity}` }, `${i ? " → " : ""}${t.symbol} ${pct(t.distance_pct)}`))));
+  }
+  for (const st of ins.stress || []) {
+    if (st.liq_move_down_pct == null && st.symbols.length < 2) continue;
+    const shocks = st.shocks.filter((x) => x.market_move_pct < 0).map((x) => `${x.market_move_pct}%: ${x.liquidated ? "LIQUIDATED" : "ok"}`).join(" · ");
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `📉 ${venueLabel(st.venue)} cross: `),
+      st.liq_move_down_pct != null ? `a ${pct(st.liq_move_down_pct)} correlated drop liquidates the account · ` : "", shocks));
+  }
+  for (const c of (ins.comparisons || []).filter((x) => x.gap_pct >= 1)) {
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `🧲 ${c.symbol}: `),
+      `platform liq ${price(c.platform_price)} (${pct(c.platform_distance_pct)}) vs LiqGuard ${price(c.correlated_price)} (${pct(c.correlated_distance_pct)}) — `,
+      el("b", { class: "c-critical" }, `${c.gap_pct.toFixed(1)} pts closer`)));
+  }
+  if (ins.concentration?.flagged) parts.push(el("div", { class: "acct-ins c-warning" }, `🧲 ${ins.concentration.message}`));
+  for (const z of (ins.sizing || []).filter((x) => x.status === "oversized")) {
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `📏 ${z.symbol}: `), `${pct(z.risk_pct)} of equity at its ${z.exit_kind} → suggested ${fmtSize(z.suggested_size)}`));
+  }
+  return parts.length ? el("div", { class: "acct-insights" }, ...parts) : null;
 }
 
 async function bootstrap() {
@@ -1268,6 +1583,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!res) $("simulateBtn").disabled = false;
   });
   $("stopBtn").addEventListener("click", () => post(`${API}/simulate/stop`));
+  $("scenarioSelect").addEventListener("change", (ev) => switchScenario(ev.target.value));
   $("resetBtn").addEventListener("click", () => post(`${API}/simulate/reset`));
   $("signOutBtn").addEventListener("click", async () => {
     await fetch("/auth/logout", { method: "POST", headers: CSRF_HEADERS, credentials: "same-origin" });
