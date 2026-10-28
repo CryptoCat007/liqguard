@@ -52,7 +52,6 @@ class Settings:
     taker_fee_hyperliquid: float = 0.00045
     funding_refresh: int = 60
     prefunding_lead_minutes: int = 30
-    rescue_target_pct: float = 30.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
@@ -76,7 +75,6 @@ class Settings:
             taker_fee_hyperliquid=_float(env.get("LIQGUARD_TAKER_FEE_HYPERLIQUID"), 0.00045),
             funding_refresh=max(10, _int(env.get("LIQGUARD_FUNDING_REFRESH"), 60)),
             prefunding_lead_minutes=_int(env.get("LIQGUARD_PREFUNDING_LEAD_MINUTES"), 30),
-            rescue_target_pct=_float(env.get("LIQGUARD_RESCUE_TARGET_PCT"), 30.0),
         )
 
     @property

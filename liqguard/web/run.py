@@ -39,6 +39,7 @@ async def _serve(args: argparse.Namespace) -> None:
         logger.info("Public demo only (login disabled)")
     else:
         ctx = await AppContext.create(settings)
+        ctx.market.start()
         app = create_app(ctx)
         logger.info("Muse: %s · master key source: %s", "mock" if ctx.llm.is_mock else "live", ctx.storage.key_source)
 

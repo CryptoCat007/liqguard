@@ -93,11 +93,12 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
 
     monitor = PositionMonitor(
         users=ctx.storage.get_all_users_with_bindings,
-        positions=ctx.positions.monitored_positions,
+        positions=ctx.positions.snapshot_for,
         notifier=TelegramNotifier(bot),
         alert_manager=ctx.alerts,
         explainer=ctx.llm,
         poll_interval=settings.poll_interval,
+        prefunding_lead_minutes=settings.prefunding_lead_minutes,
     )
 
     dashboard_server = None
@@ -123,6 +124,7 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
                 settings.db_path, settings.poll_interval, "enabled (testnet)" if ctx.actions.is_enabled() else "disabled")
 
     try:
+        ctx.market.start()
         await monitor.start()
         await dp.start_polling(bot)
     finally:

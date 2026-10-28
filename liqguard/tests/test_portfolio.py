@@ -13,11 +13,11 @@ from liqguard.risk.portfolio import (
 
 class TestPortfolioAnalyzer:
     """Test portfolio analysis."""
-    
+
     @pytest.fixture
     def analyzer(self):
         return PortfolioAnalyzer()
-    
+
     @pytest.fixture
     def mixed_positions(self):
         """Create a mix of safe and risky positions."""
@@ -59,7 +59,7 @@ class TestPortfolioAnalyzer:
                 unrealized_pnl=-500,
             ),
         ]
-    
+
     @pytest.fixture
     def safe_positions(self):
         """Create all safe positions."""
@@ -77,7 +77,7 @@ class TestPortfolioAnalyzer:
                 unrealized_pnl=100,
             ),
         ]
-    
+
     @pytest.fixture
     def critical_positions(self):
         """Create positions at critical risk."""
@@ -95,85 +95,85 @@ class TestPortfolioAnalyzer:
                 unrealized_pnl=-9000,
             ),
         ]
-    
+
     def test_analyze_single_position(self, analyzer, safe_positions):
         """Test analyzing a single position."""
         summary = analyzer.analyze_position(safe_positions[0])
-        
+
         assert summary.symbol == "BTCUSDT"
         assert summary.side == "long"
         assert summary.distance_to_liquidation_pct > 30
         assert summary.severity is None
-    
+
     def test_analyze_portfolio_metrics(self, analyzer, mixed_positions):
         """Test portfolio-level metrics."""
         overview = analyzer.analyze_portfolio(mixed_positions)
-        
+
         assert overview.total_positions == 3
         assert overview.total_notional_value > 0
         assert overview.total_margin_used > 0
         assert len(overview.position_summaries) == 3
         assert len(overview.venues) == 2
-    
+
     def test_portfolio_exposure(self, analyzer, mixed_positions):
         """Test exposure calculations."""
         overview = analyzer.analyze_portfolio(mixed_positions)
-        
+
         assert overview.long_exposure > 0
         assert overview.short_exposure > 0
         assert overview.net_exposure == overview.long_exposure - overview.short_exposure
-    
+
     def test_riskiest_position_identified(self, analyzer, mixed_positions):
         """Test that riskiest position is identified."""
         overview = analyzer.analyze_portfolio(mixed_positions)
-        
+
         assert overview.riskiest_position is not None
-        
+
         for summary in overview.position_summaries:
             assert summary.risk_score <= overview.riskiest_position.risk_score
-    
+
     def test_safe_portfolio_risk_level(self, analyzer, safe_positions):
         """Test that safe portfolio has safe risk level."""
         overview = analyzer.analyze_portfolio(safe_positions)
-        
+
         assert overview.overall_risk_level == RiskLevel.SAFE
         assert overview.positions_at_risk == 0
-    
+
     def test_critical_portfolio_risk_level(self, analyzer, critical_positions):
         """Test that critical portfolio has high/critical risk level."""
         overview = analyzer.analyze_portfolio(critical_positions)
-        
+
         assert overview.overall_risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL]
         assert overview.positions_at_risk > 0
-    
+
     def test_empty_portfolio(self, analyzer):
         """Test empty portfolio analysis."""
         overview = analyzer.analyze_portfolio([])
-        
+
         assert overview.total_positions == 0
         assert overview.overall_risk_level == RiskLevel.SAFE
-    
+
     def test_portfolio_to_dict(self, analyzer, mixed_positions):
         """Test portfolio overview serialization."""
         overview = analyzer.analyze_portfolio(mixed_positions)
         d = overview.to_dict()
-        
+
         assert "summary" in d
         assert "risk_metrics" in d
         assert "exposure" in d
         assert "positions" in d
         assert d["summary"]["total_positions"] == 3
-    
+
     def test_margin_needed_calculated(self, analyzer, mixed_positions):
         """Test that total margin needed is calculated."""
         overview = analyzer.analyze_portfolio(mixed_positions)
-        
+
         assert overview.total_margin_needed_for_safety >= 0
 
 
 class TestPortfolioWithCustomThresholds:
     """Test portfolio analysis with custom thresholds."""
-    
+
     def test_custom_threshold_affects_risk(self):
         """Test that custom thresholds affect risk assessment."""
         position = Position(
@@ -188,22 +188,22 @@ class TestPortfolioWithCustomThresholds:
             leverage=10,
             unrealized_pnl=-2500,
         )
-        
+
         strict = UserThreshold(warning_distance_pct=25, critical_distance_pct=15)
         lenient = UserThreshold(warning_distance_pct=5, critical_distance_pct=3)
-        
+
         strict_analyzer = PortfolioAnalyzer(strict)
         lenient_analyzer = PortfolioAnalyzer(lenient)
-        
+
         strict_overview = strict_analyzer.analyze_portfolio([position])
         lenient_overview = lenient_analyzer.analyze_portfolio([position])
-        
+
         assert strict_overview.positions_at_risk >= lenient_overview.positions_at_risk
 
 
 class TestFormatOverviewText:
     """Test portfolio overview text formatting."""
-    
+
     @pytest.fixture
     def sample_overview(self):
         return PortfolioRiskOverview(
@@ -222,27 +222,27 @@ class TestFormatOverviewText:
             short_exposure=10000,
             net_exposure=30000,
         )
-    
+
     def test_format_english(self, sample_overview):
         """Test English text formatting."""
         text = format_portfolio_overview_text(sample_overview, "en")
-        
+
         assert "Portfolio Risk Overview" in text
         assert "MODERATE" in text
         assert "3" in text
         assert "$50,000" in text or "50000" in text
-    
+
     def test_format_chinese(self, sample_overview):
         """Test Chinese text formatting."""
         text = format_portfolio_overview_text(sample_overview, "zh-TW")
-        
+
         assert "投資組合" in text or "風險" in text
         assert "3" in text
 
 
 class TestActionableAdvice:
     """Test getting actionable advice from portfolio."""
-    
+
     def test_prioritized_advice(self):
         """Test that advice is prioritized by risk."""
         positions = [
@@ -271,11 +271,11 @@ class TestActionableAdvice:
                 unrealized_pnl=-500,
             ),
         ]
-        
+
         analyzer = PortfolioAnalyzer()
         advice_list = analyzer.get_actionable_advice(positions)
-        
+
         assert len(advice_list) > 0
-        
+
         if len(advice_list) > 1:
             assert advice_list[0].current_distance_pct <= advice_list[1].current_distance_pct

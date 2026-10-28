@@ -8,6 +8,7 @@ from typing import Callable, Optional
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from liqguard.alerts import format_prefunding_message
 from liqguard.simulation import MarketSimulation
 
 logger = logging.getLogger(__name__)
@@ -29,12 +30,43 @@ def format_advice_message(card: dict) -> str:
         f"🧠 _{muse}:_ {card['explanation']}",
     ]
     if card.get("margin_to_add_usd"):
+        where = "to the cross wallet" if card.get("margin_mode") == "cross" else "margin"
         lines += [
             "",
-            f"💰 Add **${card['margin_to_add_usd']:,.2f}** margin → {card['target_distance_pct']:.0f}% from liq",
+            f"💰 Add **${card['margin_to_add_usd']:,.2f}** {where} → {card['target_distance_pct']:.0f}% from liq",
             f"✂️ Or reduce size by **{card['reduce_size_pct']:.1f}%**",
         ]
+    rescue, explanation = card.get("rescue"), card.get("rescue_explanation")
+    if rescue:
+        best = next((o for o in rescue["options"] if o["kind"] == rescue["recommended"]), None)
+        if best:
+            lines += ["", f"🛟 Cheapest rescue: **{best['title']}** (${best['costs']['total_cost_usd']:,.2f} incl. fees + 24h funding)"]
+        if explanation and explanation.get("headline"):
+            lines.append(f"_{explanation['headline']}_")
     return "\n".join(lines)
+
+
+def advice_keyboard(card: dict) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🛟 Compare rescue options", callback_data=f"rescue:sim:{card['symbol']}")]]
+    rescue = card.get("rescue")
+    if rescue:
+        labels = {"add_margin": "💰 Add margin", "reduce": "✂️ Reduce", "hedge": "🛡 Hedge"}
+        rows.append([
+            InlineKeyboardButton(
+                text=labels.get(o["kind"], o["kind"]) + (" ⭐" if o["kind"] == rescue["recommended"] else ""),
+                callback_data=f"rescue:sim:{card['symbol']}:{o['kind']}",
+            )
+            for o in rescue["options"]
+        ])
+    if card.get("margin_to_add_usd"):
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✅ Propose adding ${card['margin_to_add_usd']:,.0f}",
+                callback_data=f"action:propose:{card['symbol']}",
+            ),
+            InlineKeyboardButton(text="❌ Dismiss", callback_data="action:dismiss"),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 class TelegramSimulationBridge:
@@ -63,16 +95,13 @@ class TelegramSimulationBridge:
         kind, data = event["type"], event["data"]
 
         if kind == "advice":
-            keyboard = None
-            if data.get("margin_to_add_usd"):
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=f"💰 Add ${data['margin_to_add_usd']:,.0f} margin",
-                        callback_data=f"action:propose:{data['symbol']}",
-                    ),
-                    InlineKeyboardButton(text="❌ Dismiss", callback_data="action:dismiss"),
-                ]])
-            await self._send(format_advice_message(data), keyboard)
+            await self._send(format_advice_message(data), advice_keyboard(data))
+
+        elif kind == "alert" and data["level"] == "funding":
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}"),
+            ]])
+            await self._send(format_prefunding_message(data["funding"], demo=True), keyboard)
 
         elif kind == "audit" and data["event"] == "simulation_started":
             t = self.simulation.threshold
@@ -80,7 +109,9 @@ class TelegramSimulationBridge:
                 "🎬 **Market simulation started** (demo data)\n\n"
                 "Prices will walk toward liquidation. Alerts fire at "
                 f"⚠️ {t.warning_distance_pct:.0f}% · 🚨 {t.critical_distance_pct:.0f}% · "
-                f"🆘 {t.emergency_distance_pct:.0f}%."
+                f"🆘 {t.emergency_distance_pct:.0f}%.\n"
+                "Liquidation prices are computed for cross margin (BTC + SOL share one Binance wallet); "
+                "demo funding settles on a simulated clock (12 min per step) and ⏳ warns before large payments."
             )
 
         elif kind == "status" and data["state"] in ("finished", "stopped"):
@@ -104,8 +135,13 @@ class TelegramNotifier:
     def __init__(self, bot: Bot):
         self.bot = bot
 
-    async def notify(self, user_id: int, text: str) -> None:
+    async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None) -> None:
+        keyboard = None
+        if actions:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=label, callback_data=data) for label, data in actions]
+            ])
         try:
-            await self.bot.send_message(user_id, text, parse_mode="Markdown")
+            await self.bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             logger.error("Failed to deliver alert to %s: %s", user_id, type(e).__name__)

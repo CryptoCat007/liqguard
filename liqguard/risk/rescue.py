@@ -21,13 +21,14 @@ from __future__ import annotations
 import dataclasses
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from liqguard.models import CROSS, FundingInfo, MarginAccount, Position, Side, Venue
 
+from .advice import ActionableAdvice, ActionType
 from .fees import FeeSchedule
-from .funding import funding_payment, settlements_within
+from .funding import PROJECTION_LABEL, funding_payment, settlements_within
 from .liquidation import (
     LiquidationResult,
     brackets_for,
@@ -102,6 +103,24 @@ class RescuePlan:
     def option(self, kind: str) -> Optional[RescueOption]:
         return next((o for o in self.options if o.kind == kind), None)
 
+    def margin_advice(self) -> ActionableAdvice:
+        """The add-margin option as `ActionableAdvice` (what alerts, Muse and the confirm flow consume)."""
+        add, reduce = self.option(ADD_MARGIN), self.option(REDUCE)
+        amount = add.params.get("amount_usd", 0.0) if add else 0.0
+        return ActionableAdvice(
+            action_type=ActionType.ADD_MARGIN,
+            symbol=self.symbol,
+            venue=self.venue,
+            current_distance_pct=self.current.distance_pct,
+            target_distance_pct=self.target_distance_pct,
+            margin_to_add_usd=amount,
+            reduce_size_by=reduce.params.get("reduce_size") if reduce else None,
+            reduce_size_pct=reduce.params.get("reduce_pct") if reduce else None,
+            new_liquidation_price=add.new_liquidation_price if add and amount else None,
+            new_distance_pct=add.new_distance_pct if add and amount else self.current.distance_pct,
+            estimated_cost_usd=amount,
+        )
+
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
@@ -112,7 +131,7 @@ class RescuePlan:
             "current": self.current.to_dict(),
             "target_distance_pct": self.target_distance_pct,
             "funding": self.funding.to_dict() if self.funding else None,
-            "funding_label": "at current rate",
+            "funding_label": PROJECTION_LABEL,
             "options": [o.to_dict() for o in self.options],
             "recommended": self.recommended,
         }
@@ -325,8 +344,6 @@ class RescueSimulator:
         funding: Optional[FundingInfo] = None,
         now: Optional[datetime] = None,
     ) -> RescuePlan:
-        from datetime import timezone
-
         now = now or datetime.now(timezone.utc)
         options = (
             self.add_margin(position, account, funding, now),

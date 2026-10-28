@@ -58,6 +58,15 @@ def fake_exchanges(request: httpx.Request) -> httpx.Response:
             "liquidationPrice": "57500", "leverage": "10", "unRealizedProfit": "-2000",
             "marginType": "cross", "isolatedMargin": "0",
         }])
+    if request.url.path == "/fapi/v2/account":
+        assert key == ALICE_KEY
+        return httpx.Response(200, json={"assets": [{"asset": "USDT", "crossWalletBalance": "5000"}]})
+    if request.url.path == "/fapi/v1/leverageBracket":
+        assert key == ALICE_KEY
+        return httpx.Response(200, json=[{"symbol": "BTCUSDT", "brackets": [
+            {"bracket": 1, "initialLeverage": 125, "notionalCap": 50000, "notionalFloor": 0, "maintMarginRatio": 0.004, "cum": 0},
+            {"bracket": 2, "initialLeverage": 100, "notionalCap": 250000, "notionalFloor": 50000, "maintMarginRatio": 0.005, "cum": 50},
+        ]}])
     return httpx.Response(404, json={"msg": f"unexpected {request.method} {request.url}"})
 
 
@@ -155,11 +164,11 @@ async def test_two_users_end_to_end(ctx, handlers, fsm):
     sent: list[tuple[int, str]] = []
 
     class Notifier:
-        async def notify(self, user_id: int, text: str) -> None:
+        async def notify(self, user_id: int, text: str, actions=None) -> None:
             sent.append((user_id, text))
 
     monitor = PositionMonitor(
-        ctx.storage.get_all_users_with_bindings, ctx.positions.monitored_positions, Notifier(), ctx.alerts, ctx.llm
+        ctx.storage.get_all_users_with_bindings, ctx.positions.snapshot_for, Notifier(), ctx.alerts, ctx.llm
     )
     await monitor.check_all_users()
     assert {uid for uid, _ in sent} == {ALICE, BOB}

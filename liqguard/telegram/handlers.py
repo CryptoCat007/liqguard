@@ -14,16 +14,27 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from liqguard.ai import get_news_stub
-from liqguard.core import AppContext
+from liqguard.core import AppContext, BookSnapshot
+from liqguard.core.positions import LABEL_SIMULATION
 from liqguard.exchanges import SCENARIOS, BinanceAdapter, HyperliquidAdapter
 from liqguard.models import MAINNET, TESTNET, ExchangeBinding, Position, Side, User
 from liqguard.risk import (
     AdviceCalculator,
     PortfolioAnalyzer,
+    RescuePlan,
+    RescueSimulator,
     RiskEngine,
     format_portfolio_overview_text,
 )
 from liqguard.simulation import MarketSimulation
+
+from .views import (
+    format_option_detail,
+    format_rescue_text,
+    funding_lines,
+    liquidation_lines,
+    rescue_keyboard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +107,7 @@ class BotHandlers:
         r.callback_query.register(self.callback_action_confirm, F.data.startswith("action:"))
         r.callback_query.register(self.callback_demo_control, F.data.startswith("democtl:"))
         r.callback_query.register(self.callback_risk, F.data.startswith("risk:"))
+        r.callback_query.register(self.callback_rescue, F.data.startswith("rescue:"))
 
         r.message.register(self.process_binance_api_key, BindingStates.waiting_for_binance_api_key)
         r.message.register(self.process_binance_api_secret, BindingStates.waiting_for_binance_api_secret)
@@ -304,22 +316,31 @@ class BotHandlers:
     async def _get_positions_for_user(self, user: User) -> tuple[list[Position], str]:
         return await self.positions.positions_for(user)
 
-    def _positions_text(self, user: User, positions: list[Position], label: str) -> tuple[str, list]:
-        assessments = RiskEngine(user.threshold).assess_positions(positions)
-        response = f"**{label}**\n\n"
+    async def _snapshot(self, user: User) -> BookSnapshot:
+        return await self.positions.snapshot_for(user)
+
+    def _positions_text(self, user: User, snapshot: BookSnapshot) -> tuple[str, list]:
+        context = snapshot.context
+        assessments = RiskEngine(user.threshold, context).assess_positions(snapshot.positions)
+        response = f"**{snapshot.label}**\n\n"
         for a in assessments:
             pos = a.position
+            mode = f" · {pos.margin_mode}" if pos.venue.value != "demo" else ""
             response += (
                 f"{RISK_EMOJI.get(a.risk_level_str, '❓')} **{pos.symbol}** "
                 f"{'📈' if pos.side == Side.LONG else '📉'} {pos.side.value.upper()}"
-                f"{' · testnet' if pos.network == TESTNET else ''}\n"
+                f"{' · testnet' if pos.network == TESTNET else ''}{mode}\n"
                 f"├ Size: {pos.size}\n├ Entry: ${pos.entry_price:,.2f}\n├ Mark: ${pos.mark_price:,.2f}\n"
-                f"├ Liq: ${pos.liquidation_price:,.2f}\n├ Distance: **{a.distance_to_liquidation_pct:.1f}%**\n"
-                f"├ PnL: ${pos.unrealized_pnl:,.2f}\n├ Leverage: {pos.leverage}x\n"
             )
+            response += "\n".join(liquidation_lines(pos, context)) + "\n"
+            response += f"├ Distance: **{a.distance_to_liquidation_pct:.1f}%**\n"
+            response += "".join(line + "\n" for line in funding_lines(pos, context))
+            response += f"├ PnL: ${pos.unrealized_pnl:,.2f}\n├ Leverage: {pos.leverage}x\n"
             if a.margin_to_safety > 0:
-                advice = AdviceCalculator.calculate_margin_to_add(pos, user.threshold.safety_target_pct)
-                response += f"└ {AdviceCalculator.format_advice_text(advice, user.language)}\n\n"
+                response += (
+                    f"└ Add **${a.margin_to_safety:,.2f}** margin → {user.threshold.safety_target_pct:.0f}% from liq "
+                    "(or tap 🛟 to compare reduce / hedge)\n\n"
+                )
             else:
                 response += "└ Position is safe\n\n"
         if len(response) > 4000:
@@ -328,24 +349,34 @@ class BotHandlers:
 
     async def cmd_positions(self, message: Message) -> None:
         user = await self.get_or_create_user(message)
-        positions, label = await self._get_positions_for_user(user)
-        if not label:
+        snapshot = await self._snapshot(user)
+        if not snapshot.label:
             await message.answer(NO_EXCHANGES)
             return
-        if not positions:
-            await message.answer(f"{label}\n\nNo open positions found.")
+        if not snapshot.positions:
+            await message.answer(f"{snapshot.label}\n\nNo open positions found.")
             return
-        text, assessments = self._positions_text(user, positions, label)
+        text, assessments = self._positions_text(user, snapshot)
         buttons = []
-        if self.actions_manager.is_enabled():
-            for a in assessments[:3]:
-                if a.margin_to_safety > 0:
-                    buttons.append([InlineKeyboardButton(
-                        text=f"💰 Add margin to {a.position.symbol}",
-                        callback_data=f"action:propose:{a.position.symbol}",
-                    )])
+        for a in assessments[:3]:
+            if a.severity is None:
+                continue
+            row = [InlineKeyboardButton(
+                text=f"🛟 Rescue {a.position.symbol}", callback_data=self._rescue_callback(snapshot, a.position),
+            )]
+            if self.actions_manager.is_enabled() and a.margin_to_safety > 0:
+                row.append(InlineKeyboardButton(
+                    text=f"💰 Add margin to {a.position.symbol}",
+                    callback_data=f"action:propose:{a.position.symbol}",
+                ))
+            buttons.append(row)
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
         await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
+
+    @staticmethod
+    def _rescue_callback(snapshot: BookSnapshot, position: Position, kind: Optional[str] = None) -> str:
+        source = "sim" if snapshot.label == LABEL_SIMULATION else position.venue.value
+        return f"rescue:{source}:{position.symbol}" + (f":{kind}" if kind else "")
 
     async def _risk_overview_text(self, overview, language: str) -> str:
         summary = await self.llm.summarize_portfolio(overview, language)
@@ -353,13 +384,22 @@ class BotHandlers:
         return f"🧠 _{tag}:_ {summary['headline']}\n\n" + format_portfolio_overview_text(overview, language)
 
     async def _risk_reply(self, user: User) -> Optional[tuple[str, InlineKeyboardMarkup]]:
-        positions, _ = await self._get_positions_for_user(user)
-        if not positions:
+        snapshot = await self._snapshot(user)
+        if not snapshot.positions:
             return None
-        overview = PortfolioAnalyzer(user.threshold).analyze_portfolio(positions)
+        overview = PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(snapshot.positions)
         text = await self._risk_overview_text(overview, user.language)
         buttons = []
         riskiest = overview.riskiest_position
+        if riskiest:
+            pos = next((p for p in snapshot.positions if p.symbol == riskiest.symbol and p.venue.value == riskiest.venue), None)
+            if pos is not None:
+                extra = liquidation_lines(pos, snapshot.context) + funding_lines(pos, snapshot.context)
+                text += f"\n\n**{pos.symbol} liquidation & funding**\n" + "\n".join(extra)
+                if riskiest.severity is not None:
+                    buttons.append([InlineKeyboardButton(
+                        text=f"🛟 Rescue options for {riskiest.symbol}", callback_data=self._rescue_callback(snapshot, pos),
+                    )])
         if riskiest and riskiest.margin_advice:
             buttons.append([InlineKeyboardButton(
                 text=f"💰 Add ${riskiest.margin_advice.margin_to_add_usd:.0f} to {riskiest.symbol}",
@@ -370,6 +410,49 @@ class BotHandlers:
             InlineKeyboardButton(text="🔄 Refresh", callback_data="risk:refresh"),
         ])
         return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    async def _rescue_plan_for(self, user: User, source: str, symbol: str) -> Optional[RescuePlan]:
+        """The caller's own position only: their simulation, demo book or exchange bindings."""
+        if source == "sim":
+            sim = self.simulations.get(user.telegram_id)
+            return sim.build_rescue_plan(symbol) if sim is not None else None
+        snapshot = await self._snapshot(user)
+        position = next((p for p in snapshot.positions if p.symbol == symbol and p.venue.value == source), None)
+        if position is None:
+            return None
+        ctx = snapshot.context
+        simulator = RescueSimulator(ctx.fees, user.threshold.safety_target_pct)
+        return simulator.simulate(position, ctx.account_for(position), ctx.funding_for(position), ctx.now)
+
+    async def callback_rescue(self, callback: CallbackQuery) -> None:
+        parts = callback.data.split(":")
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        source, symbol, kind = parts[1], parts[2], (parts[3] if len(parts) > 3 else None)
+        user = await self.storage.get_user(callback.from_user.id)
+        if not user:
+            await callback.answer("User not found")
+            return
+        plan = await self._rescue_plan_for(user, source, symbol)
+        if plan is None:
+            await callback.answer("Position not found")
+            return
+        explanation = await self.llm.explain_rescue(plan, user.language)
+        data = plan.to_dict()
+        if kind:
+            text = format_option_detail(data, kind, explanation)
+            if text is None:
+                await callback.answer("Unknown option")
+                return
+            await callback.message.answer(text, parse_mode="Markdown")
+        else:
+            await callback.message.answer(
+                format_rescue_text(data, explanation, demo=source in ("sim", "demo")),
+                parse_mode="Markdown",
+                reply_markup=rescue_keyboard(source, data, self.actions_manager.is_enabled() and source not in ("sim", "demo")),
+            )
+        await callback.answer()
 
     async def cmd_risk(self, message: Message) -> None:
         user = await self.get_or_create_user(message)
@@ -397,12 +480,12 @@ class BotHandlers:
             await callback.message.edit_text(reply[0], parse_mode="Markdown", reply_markup=reply[1])
             await callback.answer("Refreshed")
         elif action == "positions":
-            positions, label = await self._get_positions_for_user(user)
-            if not positions:
+            snapshot = await self._snapshot(user)
+            if not snapshot.positions:
                 await callback.answer("No positions found")
                 return
-            response = f"**{label}**\n\n"
-            for a in RiskEngine(user.threshold).assess_positions(positions):
+            response = f"**{snapshot.label}**\n\n"
+            for a in RiskEngine(user.threshold, snapshot.context).assess_positions(snapshot.positions):
                 pos = a.position
                 response += (
                     f"{RISK_EMOJI.get(a.risk_level_str, '❓')} **{pos.symbol}** {pos.side.value.upper()}\n"
@@ -746,12 +829,17 @@ class BotHandlers:
             if not user:
                 await callback.answer("User not found")
                 return
-            positions, _ = await self._get_positions_for_user(user)
-            position = next((p for p in positions if p.symbol == symbol), None)
+            snapshot = await self._snapshot(user)
+            position = next((p for p in snapshot.positions if p.symbol == symbol), None)
             if not position:
                 await callback.answer("Position not found")
                 return
-            advice = AdviceCalculator.calculate_margin_to_add(position, user.threshold.safety_target_pct)
+            ctx = snapshot.context
+            if ctx.computable(position):
+                simulator = RescueSimulator(ctx.fees, user.threshold.safety_target_pct)
+                advice = simulator.simulate(position, ctx.account_for(position), ctx.funding_for(position), ctx.now).margin_advice()
+            else:
+                advice = AdviceCalculator.calculate_margin_to_add(position, user.threshold.safety_target_pct)
             action, msg = self.actions_manager.propose_action(user_id, advice, position)
             if action:
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[[
