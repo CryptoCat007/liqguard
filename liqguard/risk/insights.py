@@ -18,7 +18,7 @@ from .stress import (
     liq_comparison,
     stress_account,
 )
-from .triage import TriageItem, triage
+from .triage import TriageItem, focus, triage
 
 
 def _key(p: Position) -> tuple[str, str]:
@@ -36,6 +36,10 @@ class PortfolioInsights:
     @property
     def top(self) -> Optional[TriageItem]:
         return self.triage[0] if self.triage and self.triage[0].label else None
+
+    @property
+    def focus(self) -> Optional[dict]:
+        return focus(self.triage)
 
     @property
     def at_risk(self) -> list[TriageItem]:
@@ -63,6 +67,7 @@ class PortfolioInsights:
         return {
             "triage": [t.to_dict() for t in self.triage],
             "top": self.top.to_dict() if self.top else None,
+            "focus": self.focus,
             "at_risk_count": len(self.at_risk),
             "stress": [s.to_dict() for s in self.stress],
             "worst_account": None if worst is None else {

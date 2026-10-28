@@ -587,6 +587,7 @@ class MarketSimulation:
             "session": self._session_dict(),
             "escalation": self._escalation_state(),
             "insights": self.insights(ctx).to_dict(),
+            "summary": self.summary,
             "scenario": self.scenario,
         }
 
@@ -767,14 +768,29 @@ class MarketSimulation:
     def _status(self) -> dict:
         return {"state": self.state, "step": self.step, "total_steps": self.steps}
 
-    async def refresh_summary(self) -> Optional[dict]:
+    def _tick_summary(self, insights: PortfolioInsights) -> Optional[dict]:
+        """Rule-based summary from this step's overview and triage focus (goes out inside the tick)."""
         if self.llm is None:
             return None
+        return {**self.llm.mock_portfolio_summary(self.overview, self.language, insights.focus), "step": self.step}
+
+    async def refresh_summary(self) -> Optional[dict]:
+        """
+        Muse's phrasing of the summary. It is computed from one step's numbers;
+        if the simulation moved on while Muse was answering, the stale headline
+        is dropped so the summary never quotes an older distance than the tick.
+        """
+        if self.llm is None:
+            return None
+        step, overview, focus = self.step, self.overview, self.insights().focus
         try:
-            self.summary = await self.llm.summarize_portfolio(self.overview, self.language)
+            summary = await self.llm.summarize_portfolio(overview, self.language, focus)
         except Exception as e:
             logger.error(f"Portfolio summary failed: {e}")
             return self.summary
+        if self.step != step or self.overview is not overview:
+            return self.summary
+        self.summary = {**summary, "step": step}
         await self._emit("summary", self.summary)
         return self.summary
 
@@ -797,6 +813,7 @@ class MarketSimulation:
         await self._settle_funding()
         self.positions = self._positions_at(self.step)
         self.overview = self._analyze()
+        self.summary = self._tick_summary(self.insights())
         await self._emit("tick", self._record_tick())
         await self._check_prefunding()
         await self._check_alerts()
@@ -910,7 +927,8 @@ class MarketSimulation:
                 await self._fire_alert(tier, pos, protection, insights)
         else:
             await self._fire_triage(crossings, insights)
-        self._spawn(self.refresh_summary())
+        if self.llm is not None and not self.llm.is_mock:
+            self._spawn(self.refresh_summary())
 
     async def _fire_triage(self, crossings: list, insights: PortfolioInsights) -> None:
         self._alert_seq += 1
@@ -943,6 +961,7 @@ class MarketSimulation:
             "crossed": [{"symbol": pos.symbol, "tier": tier} for tier, pos, _ in crossings],
             "items": items,
             "handle_first": top.to_dict() if top else None,
+            "focus": insights.focus,
             "ack_id": lead_alert.get("ack_id") if lead_alert else None,
             "channels": sorted(self._subscribers),
         }

@@ -257,7 +257,7 @@ class PositionMonitor:
         items = [t.to_dict() for t in insights.at_risk]
         severities = [a.severity.value for _, a, _ in due if a.severity]
         worst = max(severities, key=BAND_ORDER.index) if severities else None
-        text = format_triage_message(items, worst)
+        text = format_triage_message(items, worst, focus=insights.focus)
         top = insights.top
         lead = next(((p, a) for p, a, _ in due if top and p.symbol == top.symbol and p.venue.value == top.venue), None)
         lead = lead or (due[0][0], due[0][1])

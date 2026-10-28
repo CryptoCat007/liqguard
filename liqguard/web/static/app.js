@@ -136,6 +136,7 @@ function applySnapshot(snap) {
   S.pending = Object.fromEntries((snap.escalation?.pending || []).map((a) => [a.id, a]));
   S.stopMuse = {};
   S.insights = snap.insights || null;
+  S.summary = snap.summary || null;
   S.scenario = snap.scenario || null;
   S.scenarios = snap.scenarios || [];
   renderScenarios();
@@ -190,6 +191,8 @@ function handle(msg) {
       addAdvice(data);
       break;
     case "summary":
+      if (data && data.step != null && S.step != null && data.step !== S.step) break;
+      S.summary = data;
       renderSummary(data);
       break;
     case "audit":
@@ -222,6 +225,7 @@ function onTick(data) {
   if (data.protection) S.protection = data.protection;
   if (data.session) S.session = data.session;
   if (data.insights) S.insights = data.insights;
+  if (data.summary) S.summary = data.summary;
   if (data.escalation) {
     S.escalation = data.escalation;
     S.pending = Object.fromEntries((data.escalation.pending || []).map((a) => [a.id, { ...S.pending[a.id], ...a }]));
@@ -229,7 +233,9 @@ function onTick(data) {
   }
   renderProtection();
   renderOverview(data.overview);
+  renderSummary(S.summary);
   renderInsights();
+  refreshLiveToasts();
   renderFunding();
   updateChart(data);
   setProgress();
@@ -274,13 +280,9 @@ function renderOverview(ov) {
   $("kpiSafetySub").textContent = rm.total_margin_needed_for_safety > 0
     ? `to restore a ${S.safetyTarget ?? 30}% buffer` : "all above safety target";
 
-  if (!S.summaryRiskiest && ov.riskiest_position) {
-    const rp = ov.riskiest_position;
-    setRiskiest(rp.symbol, rp.side, rp.distance_to_liquidation_pct);
-  } else if (S.summaryRiskiest) {
-    const rp = ov.positions.find((p) => p.symbol === S.summaryRiskiest);
-    if (rp) setRiskiest(rp.symbol, rp.side, rp.distance_to_liquidation_pct);
-  }
+  const riskiestSym = S.summaryRiskiest || S.insights?.focus?.symbol || ov.riskiest_position?.symbol;
+  const rp = ov.positions.find((p) => p.symbol === riskiestSym);
+  if (rp) setRiskiest(rp.symbol, rp.side, rp.distance_to_liquidation_pct);
 
   renderPositions(ov.positions);
 }
@@ -295,6 +297,10 @@ function renderSummary(summary) {
   $("headline").textContent = summary.headline;
   $("summaryTag").hidden = !summary.mock;
   S.summaryRiskiest = summary.riskiest_symbol;
+  const why = summary.priority_reason && summary.priority_basis !== "closest to liquidation" && summary.priority_basis !== "only position"
+    ? summary.priority_reason : "";
+  $("riskiestWhy").textContent = why;
+  $("riskiestWhy").hidden = !why;
   if (S.overview) {
     const rp = S.overview.positions.find((p) => p.symbol === summary.riskiest_symbol);
     if (rp) setRiskiest(rp.symbol, rp.side, rp.distance_to_liquidation_pct);
@@ -465,7 +471,7 @@ function addAlert(a, opts = {}) {
   if (!opts.quiet) {
     const sent = (a.channels || []).map((c) => (c === "web" ? "Web" : c === "telegram" ? "Telegram" : c)).join(" + ");
     toast(LEVEL_ICON[a.level], `${a.level.toUpperCase()} · ${a.symbol}`,
-      `${pct(a.distance_pct)} from liquidation — sent to ${sent || "dashboard"}`, COLORS[a.level]);
+      `${pct(a.distance_pct)} from liquidation — sent to ${sent || "dashboard"}`, COLORS[a.level], `tier:${a.symbol}`);
     if (a.level === "emergency") {
       document.body.classList.add("flash-emergency");
       setTimeout(() => document.body.classList.remove("flash-emergency"), 1400);
@@ -555,7 +561,8 @@ function addTriageAlert(a, opts) {
     renderWake();
   }
   if (!opts.quiet) {
-    toast("🎯", `${items.length} positions at risk`, `Handle ${a.symbol} first — then ${items.slice(1).map((t) => t.symbol).join(", ")}`, COLORS[a.severity] || COLORS.critical);
+    const [title, body] = triageToastText(items.map((t) => t.symbol), a.focus);
+    toast("🎯", title, body, COLORS[a.severity] || COLORS.critical, "triage");
     if (a.severity === "emergency") {
       document.body.classList.add("flash-emergency");
       setTimeout(() => document.body.classList.remove("flash-emergency"), 1400);
@@ -574,7 +581,7 @@ function addSizingAlert(a, opts) {
         el("b", {}, `${fmtSize(c.suggested_size)}`), el("span", { class: "faint" }, ` (now ${fmtSize(c.size)})`)))),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
   ));
-  if (!opts.quiet) toast("📏", "Position size too large", `${checks.map((c) => c.symbol).join(", ")}: over your ${checks[0]?.max_risk_pct}% risk per trade`, COLORS.warning);
+  if (!opts.quiet) toast("📏", "Position size too large", `${checks.map((c) => c.symbol).join(", ")}: over your ${checks[0]?.max_risk_pct}% risk per trade`, COLORS.warning, "sizing");
 }
 
 function addCorrelationAlert(a, opts) {
@@ -584,13 +591,13 @@ function addCorrelationAlert(a, opts) {
     el("span", { class: "tl-node" }),
     tlHead(`STRESS ${a.severity ? a.severity.toUpperCase() : "· CONCENTRATION"}`, "lvl-corr-b", a),
     el("div", { class: "tl-body" },
-      move != null ? ["A ", el("b", { class: `c-${a.severity || "warning"}` }, pct(move)), ` correlated market drop liquidates the ${venueLabel(st.venue)} account`] : "",
+      move != null ? ["A ", el("b", { class: `c-${a.severity || "warning"}` }, pct(move)), ` correlated market drop liquidates the ${venueLabel(st.venue)} account`, el("span", { class: "faint" }, " (at alert time)")] : "",
       conc.flagged ? el("div", { class: "tl-sub" }, `🧲 ${conc.message}`) : null,
     ),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
   ));
   if (!opts.quiet) {
-    toast("🧲", "Portfolio stress test", move != null ? `${pct(move)} market drop liquidates the account` : conc.message, COLORS[a.severity] || COLORS.warning);
+    toast("🧲", "Portfolio stress test", stressToastText() || conc.message, COLORS[a.severity] || COLORS.warning, "stress");
   }
 }
 
@@ -634,10 +641,10 @@ function renderConcentration() {
   const box = $("concBanner");
   box.hidden = !conc?.flagged;
   if (!conc?.flagged) return;
-  const worst = S.insights.worst_account;
+  const move = accountLiqMove();
   $("concTitle").textContent = `${pct(conc.dominant_share_pct, 0)} ${conc.dominant_side} across ${conc.dominant_count} correlated coins`;
   $("concSub").textContent = `${conc.symbols.join(" · ")} move together (avg correlation ${conc.avg_correlation.toFixed(2)}).`
-    + (worst ? ` A ${pct(Math.abs(worst.first_liquidation_move_pct))} market ${worst.first_liquidation_move_pct < 0 ? "drop" : "rise"} liquidates the ${venueLabel(worst.venue)} account.` : "");
+    + (move ? ` A ${pct(move.pct)} market ${move.dir} liquidates the ${venueLabel(move.venue)} account.` : "");
   $("concBets").textContent = conc.effective_bets == null ? "—" : conc.effective_bets.toFixed(1);
 }
 
@@ -647,6 +654,10 @@ function renderTriage() {
   const atRisk = items.filter((t) => t.at_risk).length;
   $("triageTag").textContent = atRisk ? `${atRisk} AT RISK` : "ALL CLEAR";
   $("triageTag").className = `tag${atRisk ? " tag-hot" : " tag-ro"}`;
+  const focus = S.insights?.focus;
+  const why = focus && items.length > 1 ? focus.why : "";
+  $("triageWhy").hidden = !why;
+  $("triageWhy").replaceChildren(...(why ? [el("b", {}, focus.label ? "🎯 Why first: " : "Ranked #1: "), why] : []));
   if (!items.length) { box.replaceChildren(empty("🎯", "No positions", "Positions are ranked here when you have more than one.")); return; }
   const maxScore = Math.max(...items.map((t) => t.score), 1);
   box.replaceChildren(...items.map((t) => el("li", { class: `tri${t.label ? " first" : ""}${t.at_risk ? "" : " calm"}` },
@@ -662,7 +673,8 @@ function renderTriage() {
       el("div", { class: "tri-meta" },
         el("span", {}, `${pct(t.distance_pct)} from liq`),
         el("span", {}, minutesText(t.minutes_to_liq)),
-        el("span", {}, `σ5m ${pct(t.sigma_5m_pct, 2)}${t.sigma_source === "default" ? " (default)" : ""}`),
+        el("span", { title: `σ5m ${pct(t.sigma_5m_pct, 2)}${t.sigma_source === "default" ? " (default)" : " (from 5m wicks)"}` },
+          t.typical_moves == null ? "no liq" : `${t.typical_moves.toFixed(1)} typical 5m moves`),
         el("span", {}, `${money(t.notional)} notional`),
       ),
     ),
@@ -1046,12 +1058,45 @@ function addAudit(e) {
   while (box.children.length > 120) box.lastChild.remove();
 }
 
-function toast(icon, title, body, color) {
+function triageToastText(order, focus) {
+  const [first, ...rest] = order;
+  const why = focus && focus.symbol === first && focus.basis && focus.basis !== "closest to liquidation" ? ` (${focus.basis})` : "";
+  return [`${order.length} positions at risk`, `Handle ${first} first${why}${rest.length ? ` — then ${rest.join(", ")}` : ""}`];
+}
+
+function accountLiqMove() {
+  const w = S.insights?.worst_account;
+  if (!w || w.first_liquidation_move_pct == null) return null;
+  return { pct: Math.abs(w.first_liquidation_move_pct), dir: w.first_liquidation_move_pct < 0 ? "drop" : "rise", venue: w.venue };
+}
+
+function stressToastText() {
+  const m = accountLiqMove();
+  return m ? `A ${pct(m.pct)} correlated market ${m.dir} liquidates the ${venueLabel(m.venue)} account` : null;
+}
+
+function refreshLiveToasts() {
   const box = $("toasts");
+  const stress = box.querySelector('.toast[data-key="stress"] .toast-body');
+  const st = stressToastText();
+  if (stress && st) stress.textContent = st;
+  const tri = box.querySelector('.toast[data-key="triage"]');
+  const atRisk = (S.insights?.triage || []).filter((t) => t.at_risk).map((t) => t.symbol);
+  if (tri && atRisk.length > 1) {
+    const [title, body] = triageToastText(atRisk, S.insights.focus);
+    tri.querySelector(".toast-title").textContent = title;
+    tri.querySelector(".toast-body").textContent = body;
+  }
+}
+
+function toast(icon, title, body, color, key) {
+  const box = $("toasts");
+  if (key) box.querySelectorAll(`.toast[data-key="${key}"]`).forEach((n) => n.remove());
   const t = el("div", { class: "toast", style: { "--t": color } },
     el("div", {}, icon),
     el("div", {}, el("div", { class: "toast-title" }, title), el("div", { class: "toast-body" }, body)),
   );
+  if (key) t.dataset.key = key;
   box.append(t);
   while (box.children.length > 4) box.firstChild.remove();
   setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 320); }, 4200);

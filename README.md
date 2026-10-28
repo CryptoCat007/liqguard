@@ -295,6 +295,21 @@ first**. When two or more positions are due an alert in the same check, the moni
 carries the 🛟 rescue button. A single tier alert still shows its rank, e.g.
 "Priority #2 of 3 — handle SOLUSDT first".
 
+**One source of truth.** Triage rank #1 is *the* riskiest position everywhere: the summary
+banner, Muse's headline, `/risk`, the Telegram triage message and the dashboard toasts all
+read the same `PortfolioInsights.focus`, computed in the same simulation tick as the
+position cards. When rank #1 is not the position nearest in raw %, the UI says why, with
+the same numbers, e.g. *"SOLUSDT: closest in volatility-adjusted terms — 7.8% is only 15.0
+typical 5m moves; BTCUSDT is nearer in % (6.9%) but calmer, 27.0 typical 5m moves"*. The
+"Closest to liquidation" KPI keeps showing the raw-% nearest position and is labelled that way.
+
+Every tick carries its own rule-based summary, so no panel can show a distance from an
+older step. A live Muse rewrite of the headline is discarded if the simulation has moved on
+by the time Muse answers, or if it quotes a % other than the riskiest distance. Dashboard
+toasts are keyed per kind (triage, stress, sizing, per-symbol tier), so a new one replaces
+the old one. The open triage and stress toasts update every tick, so they always show the
+same account-level liquidating move as the concentration banner and the stress card.
+
 ### Position sizing check (`risk/sizing.py`)
 
 - **Equity** is the venue account's cross wallet plus cross unrealized PnL, plus isolated margin and PnL.
@@ -753,7 +768,7 @@ python3 -m pytest liqguard/tests/ -q
 | `test_dashboard_protection.py` | Snapshot protection data, stop/ADL/escalation events, `…/ack` (CSRF, id validation, once only), live ack and cross-user isolation, account protection payload |
 | `test_portfolio_risk.py` | Correlation factors, account surplus and liquidation move, ±5/10/20 % shocks, platform vs correlated liquidation gap, concentration and effective bets, sizing (equity, stop vs liquidation exit, both limits), triage ordering and labels, consolidated monitor alert and dedupe, the 5-long scenario, Telegram `/risk` / `/positions` / `/settings` / `/demo`, dashboard insights and scenario endpoints, per-user isolation, env defaults |
 
-532 tests at the time of writing.
+546 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
 
 ## Environment Variables
 

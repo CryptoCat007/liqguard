@@ -406,8 +406,8 @@ class BotHandlers:
         source = "sim" if snapshot.label == LABEL_SIMULATION else position.venue.value
         return f"rescue:{source}:{position.symbol}" + (f":{kind}" if kind else "")
 
-    async def _risk_overview_text(self, overview, language: str) -> str:
-        summary = await self.llm.summarize_portfolio(overview, language)
+    async def _risk_overview_text(self, overview, language: str, focus: Optional[dict] = None) -> str:
+        summary = await self.llm.summarize_portfolio(overview, language, focus)
         tag = "Muse (mock)" if summary.get("mock") else "Muse"
         return f"🧠 _{tag}:_ {summary['headline']}\n\n" + format_portfolio_overview_text(overview, language)
 
@@ -416,11 +416,13 @@ class BotHandlers:
         if not snapshot.positions:
             return None
         overview = PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(snapshot.positions)
-        text = await self._risk_overview_text(overview, user.language)
-        buttons = []
-        riskiest = overview.riskiest_position
-        infos = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in snapshot.positions]
         insights = portfolio_insights(snapshot.positions, snapshot.context, user.threshold)
+        focus = insights.focus
+        text = await self._risk_overview_text(overview, user.language, focus)
+        buttons = []
+        riskiest = next((p for p in overview.position_summaries
+                         if focus and p.symbol == focus["symbol"] and p.venue == focus["venue"]), overview.riskiest_position)
+        infos = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in snapshot.positions]
         section = insights_section(insights)
         if section:
             text += f"\n\n{section}"

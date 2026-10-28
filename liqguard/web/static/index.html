@@ -96,8 +96,9 @@
         <div class="banner-headline" id="headline">Loading portfolio…</div>
       </div>
       <div class="banner-riskiest">
-        <div class="banner-label">Riskiest position</div>
+        <div class="banner-label">Riskiest position · triage #1</div>
         <div class="riskiest-chip" id="riskiest">—</div>
+        <div class="riskiest-why faint" id="riskiestWhy"></div>
       </div>
     </section>
 
@@ -115,7 +116,7 @@
       <div class="kpi card"><div class="kpi-label">Margin used</div><div class="kpi-value" id="kpiMargin">—</div><div class="kpi-sub" id="kpiLeverage">—</div></div>
       <div class="kpi card"><div class="kpi-label">Unrealized PnL</div><div class="kpi-value" id="kpiPnl">—</div><div class="kpi-sub">across all venues</div></div>
       <div class="kpi card"><div class="kpi-label">Net exposure</div><div class="kpi-value" id="kpiNet">—</div><div class="kpi-sub" id="kpiLongShort">—</div></div>
-      <div class="kpi card"><div class="kpi-label">Closest to liquidation</div><div class="kpi-value" id="kpiMinDist">—</div><div class="kpi-sub" id="kpiMinDistSym">—</div></div>
+      <div class="kpi card"><div class="kpi-label">Closest to liquidation (raw %)</div><div class="kpi-value" id="kpiMinDist">—</div><div class="kpi-sub" id="kpiMinDistSym">—</div></div>
       <div class="kpi card"><div class="kpi-label">Margin to reach safety</div><div class="kpi-value" id="kpiSafety">—</div><div class="kpi-sub" id="kpiSafetySub">—</div></div>
     </section>
 
@@ -155,6 +156,7 @@
           </div>
           <span class="tag" id="triageTag">—</span>
         </div>
+        <div class="tri-why" id="triageWhy" hidden></div>
         <ol class="triage" id="triage"></ol>
       </div>
 

@@ -535,6 +535,11 @@ a.btn { text-decoration: none; }
 .scenario select:disabled { opacity: 0.55; cursor: not-allowed; }
 .scenario select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+.riskiest-why { font-size: 12px; margin-top: 6px; max-width: 320px; line-height: 1.35; }
+.tri-why { font-size: 12.5px; color: var(--muted); padding: 8px 12px; margin-bottom: 10px; border-radius: 10px;
+  border: 1px solid var(--line-2); background: rgba(17, 24, 37, 0.6); line-height: 1.4; }
+.tri-why b { color: var(--text); }
+
 .tag-hot { color: var(--emergency); border-color: rgba(244, 63, 94, 0.4); background: rgba(244, 63, 94, 0.1); }
 
 .conc { display: flex; align-items: center; gap: 16px; padding: 14px 18px; border-color: rgba(251, 146, 60, 0.45);

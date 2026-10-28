@@ -140,7 +140,7 @@ class TelegramSimulationBridge:
         elif kind == "alert" and data["level"] == "triage":
             rows = [ack_row(data["ack_id"])] if data.get("ack_id") else []
             rows.append([InlineKeyboardButton(text=f"🛟 Rescue {data['symbol']} first", callback_data=f"rescue:sim:{data['symbol']}")])
-            await self._send(format_triage_message(data["items"], data.get("severity"), demo=True),
+            await self._send(format_triage_message(data["items"], data.get("severity"), demo=True, focus=data.get("focus")),
                              InlineKeyboardMarkup(inline_keyboard=rows))
 
         elif kind == "alert" and data["level"] == "sizing":

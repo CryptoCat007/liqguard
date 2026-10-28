@@ -5,6 +5,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -550,28 +551,60 @@ Question: {question}"""
                     summary += f"\nMost attention needed: {riskiest['symbol']} ({riskiest['distance_to_liquidation_pct']:.1f}% from liq)"
                 return summary
 
+    @staticmethod
+    def _focus_position(overview: PortfolioRiskOverview, focus: Optional[dict]):
+        if focus:
+            match = next((p for p in overview.position_summaries
+                          if p.symbol == focus.get("symbol") and p.venue == focus.get("venue")), None)
+            if match is not None:
+                return match
+        return overview.riskiest_position
+
+    def portfolio_facts(self, overview: PortfolioRiskOverview, focus: Optional[dict] = None) -> dict:
+        """
+        Numbers for the summary card. `focus` is `PortfolioInsights.focus` (triage
+        rank #1); when given it is the riskiest position, so the summary names the
+        same position, distance and reason as triage and the alerts.
+        """
+        rp = self._focus_position(overview, focus)
+        finite = [p.distance_to_liquidation_pct for p in overview.position_summaries]
+        return {
+            "risk_level": overview.overall_risk_level.value,
+            "riskiest_symbol": rp.symbol if rp else None,
+            "riskiest_venue": rp.venue if rp else None,
+            "riskiest_distance_pct": round(rp.distance_to_liquidation_pct, 2) if rp else None,
+            "min_distance_pct": round(min(finite), 2) if finite else None,
+            "priority_basis": focus.get("basis") if focus and rp and rp.symbol == focus.get("symbol") else None,
+            "priority_reason": focus.get("why") if focus and rp and rp.symbol == focus.get("symbol") else None,
+            "recommended_action": self._portfolio_action(rp),
+        }
+
+    def mock_portfolio_summary(self, overview: PortfolioRiskOverview, language: str = "en",
+                               focus: Optional[dict] = None) -> dict:
+        """Deterministic summary from the same numbers (no LLM call), safe to compute every tick."""
+        facts = self.portfolio_facts(overview, focus)
+        rp = self._focus_position(overview, focus)
+        return {**facts, "headline": self._mock_portfolio_headline(rp, language, facts["priority_basis"]), "mock": True}
+
     async def summarize_portfolio(
         self,
         overview: PortfolioRiskOverview,
         language: str = "en",
+        focus: Optional[dict] = None,
     ) -> dict:
         """
         One-line structured portfolio summary naming the riskiest position.
 
-        The riskiest position and every number come from `overview`; the LLM only
-        phrases the headline. Returns keys: headline, riskiest_symbol, risk_level,
-        min_distance_pct, recommended_action, mock.
+        The riskiest position (triage rank #1 when `focus` is given) and every
+        number come from `overview`; the LLM only phrases the headline. Returns
+        keys: headline, riskiest_symbol, riskiest_distance_pct, min_distance_pct,
+        priority_basis, priority_reason, risk_level, recommended_action, mock.
         """
-        rp = overview.riskiest_position
-        facts = {
-            "risk_level": overview.overall_risk_level.value,
-            "riskiest_symbol": rp.symbol if rp else None,
-            "min_distance_pct": round(rp.distance_to_liquidation_pct, 2) if rp else None,
-            "recommended_action": self._portfolio_action(overview),
-        }
+        facts = self.portfolio_facts(overview, focus)
+        rp = self._focus_position(overview, focus)
 
         if self._use_mock or rp is None:
-            return {**facts, "headline": self._mock_portfolio_headline(overview, language), "mock": True}
+            return self.mock_portfolio_summary(overview, language, focus)
 
         if language == "zh-TW":
             system_prompt = (
@@ -598,16 +631,28 @@ Question: {question}"""
                 temperature=0.2,
             )
             headline = str(json.loads(response.choices[0].message.content).get("headline", "")).strip()
-            if not headline or rp.symbol not in headline:
-                headline = self._mock_portfolio_headline(overview, language)
+            if not headline or rp.symbol not in headline or not self._headline_numbers_ok(headline, facts):
+                return {**self.mock_portfolio_summary(overview, language, focus), "mock": False}
             return {**facts, "headline": headline, "mock": False}
         except Exception as e:
             logger.error(f"Error summarizing portfolio: {e}")
-            return {**facts, "headline": self._mock_portfolio_headline(overview, language), "mock": True}
+            return self.mock_portfolio_summary(overview, language, focus)
 
     @staticmethod
-    def _portfolio_action(overview: PortfolioRiskOverview) -> dict:
-        rp = overview.riskiest_position
+    def _headline_numbers_ok(headline: str, facts: dict) -> bool:
+        """A live headline that quotes a % must quote the riskiest distance, not another figure."""
+        quoted = re.findall(r"(\d+(?:\.\d+)?)\s*%", headline)
+        dist = facts.get("riskiest_distance_pct")
+        if not quoted or dist is None:
+            return True
+        allowed = {f"{dist:.1f}", f"{dist:.2f}", f"{dist:.0f}"}
+        target = (facts.get("recommended_action") or {}).get("target_distance_pct")
+        if target is not None:
+            allowed |= {f"{target:.0f}", f"{target:.1f}"}
+        return all(q in allowed for q in quoted)
+
+    @staticmethod
+    def _portfolio_action(rp) -> dict:
         if rp and rp.margin_advice and rp.margin_advice.margin_to_add_usd:
             return {
                 "action_type": "add_margin",
@@ -618,17 +663,21 @@ Question: {question}"""
         return {"action_type": "none"}
 
     @staticmethod
-    def _mock_portfolio_headline(overview: PortfolioRiskOverview, language: str) -> str:
-        rp = overview.riskiest_position
+    def _mock_portfolio_headline(rp, language: str, basis: Optional[str] = None) -> str:
         if rp is None:
             return "目前沒有持倉。" if language == "zh-TW" else "No open positions."
-        dist = rp.distance_to_liquidation_pct
+        dist = round(rp.distance_to_liquidation_pct, 2)
         add = rp.margin_advice.margin_to_add_usd if rp.margin_advice else 0
         target = rp.margin_advice.target_distance_pct if rp.margin_advice else None
+        explained = basis and basis not in ("only position", "closest to liquidation")
         if language == "zh-TW":
             line = f"最高風險為 {rp.symbol} {rp.side.upper()}（{rp.venue}），距離清算 {dist:.1f}%"
+            if explained:
+                line += "（以波動調整後最接近）" if basis == "closest in volatility-adjusted terms" else f"（{basis}）"
             return line + (f"，增加 ${add:,.0f} 保證金可恢復 {target:.0f}% 緩衝。" if add else "。")
         line = f"Riskiest is {rp.symbol} {rp.side.upper()} on {rp.venue.title()} at {dist:.1f}% from liquidation"
+        if explained:
+            line += f" ({basis})"
         return line + (f" — add ${add:,.0f} margin to restore a {target:.0f}% buffer." if add else ".")
 
     async def explain_rescue(self, plan: RescuePlan, language: str = "en") -> dict:

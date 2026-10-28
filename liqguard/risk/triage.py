@@ -7,7 +7,7 @@ Each position gets an urgency score from 0 to 100:
   typical size σ (the symbol's typical 5m adverse wick / 1.645, or a default
   per asset class). A random walk needs about (distance / σ)² five-minute
   steps to cover the distance, so a volatile coin 6% away can be more urgent
-  than a calm one 4% away. u = 1 / (1 + minutes / 120).
+  than a calm one 4% away. u = 1 / (1 + minutes / 720).
 - 30% **distance against its own (adaptive) tiers**. u = 1 - distance / warning
   tier, clamped to 0..1.
 - 15% **size**: notional relative to the largest position. (In one cross
@@ -77,6 +77,13 @@ class TriageItem:
     def at_risk(self) -> bool:
         return self.severity is not None
 
+    @property
+    def typical_moves(self) -> float:
+        """Distance in typical 5m moves: the volatility-adjusted distance the ranking is mostly built on."""
+        if math.isinf(self.distance_pct) or self.sigma_5m_pct <= 0:
+            return math.inf
+        return max(self.distance_pct, 0.0) / self.sigma_5m_pct
+
     def reason(self) -> str:
         if math.isinf(self.minutes_to_liq):
             return "no liquidation price"
@@ -100,6 +107,7 @@ class TriageItem:
             "warning_tier_pct": round(self.warning_tier_pct, 2),
             "sigma_5m_pct": round(self.sigma_5m_pct, 3),
             "sigma_source": self.sigma_source,
+            "typical_moves": None if math.isinf(self.typical_moves) else round(self.typical_moves, 1),
             "minutes_to_liq": None if inf else round(self.minutes_to_liq, 1),
             "loss_at_liq_usd": round(self.loss_at_liq_usd, 2),
             "notional": round(self.notional, 2),
@@ -135,3 +143,59 @@ def triage(entries: list[tuple[Position, float, Optional[float], UserThreshold, 
         label = HANDLE_FIRST if n == 1 and item.at_risk else None
         out.append(TriageItem(**{**item.__dict__, "rank": n, "of": len(items), "label": label}))
     return out
+
+
+def focus(items: list[TriageItem]) -> Optional[dict]:
+    """
+    The one position every panel names as "riskiest" (triage rank #1), with
+    the reason it outranks the position nearest in raw %. Summary, Muse,
+    toasts and the triage card all read this, so they cannot disagree.
+    """
+    if not items:
+        return None
+    top = items[0]
+    finite = [i for i in items if not math.isinf(i.distance_pct)]
+    nearest = min(finite, key=lambda i: i.distance_pct) if finite else top
+    same = (nearest.venue, nearest.symbol) == (top.venue, top.symbol)
+    fewest_moves = min(items, key=lambda i: i.typical_moves)
+    if len(items) == 1:
+        basis = "only position"
+    elif same:
+        basis = "closest to liquidation"
+    elif (fewest_moves.venue, fewest_moves.symbol) == (top.venue, top.symbol):
+        basis = "closest in volatility-adjusted terms"
+    elif top.at_risk and not nearest.at_risk:
+        basis = "inside an alert tier"
+    else:
+        basis = "highest combined urgency"
+
+    def moves(i: TriageItem) -> str:
+        return "no liq" if math.isinf(i.typical_moves) else f"{round(i.typical_moves, 1):.1f} typical 5m moves"
+
+    def dist(i: TriageItem) -> str:
+        return "n/a" if math.isinf(i.distance_pct) else f"{round(i.distance_pct, 2):.1f}%"
+
+    if same or len(items) == 1:
+        why = f"{top.symbol}: {basis} ({dist(top)}, {moves(top)})"
+    elif basis == "closest in volatility-adjusted terms":
+        why = (f"{top.symbol}: {basis} — {dist(top)} is only {moves(top)}; {nearest.symbol} is nearer in % "
+               f"({dist(nearest)}) but calmer, {moves(nearest)}")
+    else:
+        why = (f"{top.symbol}: {basis} (time to liq, distance vs tiers and size); {nearest.symbol} is nearer in % "
+               f"({dist(nearest)}, {moves(nearest)}) vs {dist(top)}, {moves(top)}")
+    return {
+        "symbol": top.symbol,
+        "venue": top.venue,
+        "side": top.side,
+        "rank": top.rank,
+        "of": top.of,
+        "label": top.label,
+        "at_risk": top.at_risk,
+        "severity": top.severity,
+        "distance_pct": None if math.isinf(top.distance_pct) else round(top.distance_pct, 2),
+        "typical_moves": None if math.isinf(top.typical_moves) else round(top.typical_moves, 1),
+        "basis": basis,
+        "why": why,
+        "nearest_symbol": nearest.symbol,
+        "nearest_distance_pct": None if math.isinf(nearest.distance_pct) else round(nearest.distance_pct, 2),
+    }

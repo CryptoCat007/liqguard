@@ -246,7 +246,9 @@ def insights_section(insights: PortfolioInsights) -> Optional[str]:
     parts = []
     at_risk = [t for t in data["triage"] if t["at_risk"]]
     if at_risk:
-        parts.append(f"**{HANDLE_FIRST_ICON} Priority triage** (handle in this order)\n" + "\n".join(triage_lines(at_risk)))
+        why = (data.get("focus") or {}).get("why")
+        parts.append(f"**{HANDLE_FIRST_ICON} Priority triage** (handle in this order)\n" + "\n".join(triage_lines(at_risk))
+                     + (f"\n_Why first: {why}._" if why else ""))
     elif data["triage"]:
         parts.append("**🎯 Priority triage**\nNo position is inside an alert tier.")
     for stress in data["stress"]:

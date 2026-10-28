@@ -130,12 +130,15 @@ def triage_lines(items: list[dict]) -> list[str]:
     return lines
 
 
-def format_triage_message(items: list[dict], severity: Optional[str] = None, demo: bool = False) -> str:
+def format_triage_message(items: list[dict], severity: Optional[str] = None, demo: bool = False,
+                          focus: Optional[dict] = None) -> str:
     """One consolidated alert for several positions, most urgent first (from `TriageItem.to_dict()`)."""
     icon = SEVERITY_ICON.get(severity or "", "🚨")
     lines = [f"{icon} **{len(items)} POSITIONS AT RISK — HANDLE IN THIS ORDER**{' · demo' if demo else ''}", ""]
     lines += triage_lines(items)
-    if items and items[0].get("reason"):
+    if focus and items and focus.get("symbol") == items[0]["symbol"] and focus.get("why"):
+        lines += ["", f"Why {items[0]['symbol']} first: {focus['why']}."]
+    elif items and items[0].get("reason"):
         lines += ["", f"Why {items[0]['symbol']} first: {items[0]['reason']}."]
     lines.append("_Order = time to liquidation at typical volatility, distance vs your tiers, position size._")
     return "\n".join(lines)
