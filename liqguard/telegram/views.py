@@ -68,7 +68,9 @@ def format_rescue_text(plan: dict, explanation: Optional[dict], demo: bool = Fal
         f"Mark {_money(plan['mark_price'])} · Liq {_money(current['price'])} · {dist} away · target {plan['target_distance_pct']:.0f}%",
         "",
     ]
-    for o in plan["options"]:
+    if plan.get("already_safe"):
+        lines.append(f"✅ Already beyond the {plan['target_distance_pct']:.0f}% target; no rescue needed now.")
+    for o in ([] if plan.get("already_safe") else plan["options"]):
         star = " ⭐" if o["kind"] == plan["recommended"] else ""
         new_dist = "no liquidation" if o["no_liquidation"] else f"{o['new_distance_pct']:.1f}%"
         c = o["costs"]
@@ -83,7 +85,7 @@ def format_rescue_text(plan: dict, explanation: Optional[dict], demo: bool = Fal
     if explanation:
         tag = "Muse (mock)" if explanation.get("mock") else "Muse"
         lines += ["", f"🧠 _{tag}:_ {explanation['headline']}"]
-        for t in explanation.get("trade_offs", []):
+        for t in ([] if plan.get("already_safe") else explanation.get("trade_offs", [])):
             pros = "; ".join(t.get("pros", []))
             cons = "; ".join(t.get("cons", []))
             lines.append(f"{OPTION_EMOJI.get(t['option'], '•')} + {pros}\n   − {cons}")
@@ -96,6 +98,8 @@ def format_rescue_text(plan: dict, explanation: Optional[dict], demo: bool = Fal
 def rescue_keyboard(source: str, plan: dict, can_propose: bool) -> InlineKeyboardMarkup:
     """One button per option (shows its details) plus the confirm flow for add-margin when available."""
     symbol = plan["symbol"]
+    if plan.get("already_safe"):
+        return InlineKeyboardMarkup(inline_keyboard=[])
     row = [
         InlineKeyboardButton(
             text=f"{OPTION_EMOJI[o['kind']]} {OPTION_LABEL[o['kind']]}" + (" ⭐" if o["kind"] == plan["recommended"] else ""),
@@ -135,5 +139,7 @@ def format_option_detail(plan: dict, kind: str, explanation: Optional[dict]) -> 
 
 
 def plan_summary_line(plan: RescuePlan) -> str:
+    if plan.already_safe:
+        return ""
     best = plan.option(plan.recommended)
     return f"🛟 Cheapest rescue: {best.title} ({_money(best.total_cost_usd)})" if best else ""

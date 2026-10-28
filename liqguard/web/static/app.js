@@ -636,7 +636,9 @@ function renderRescue() {
       el("div", {}, el("b", {}, ex.headline), el("div", { class: "rs-caveat" }, ex.caveat)),
       el("span", { class: "tag" }, ex.mock ? "MUSE · MOCK" : "MUSE"),
     ) : null,
-    el("div", { class: "rs-grid" }, ...cols),
+    plan.already_safe
+      ? empty("✅", `Already beyond the ${plan.target_distance_pct}% target`, "No rescue needed right now. Run the simulation to see the options once this position is at risk.")
+      : el("div", { class: "rs-grid" }, ...cols),
     el("div", { class: "adv-foot" }, "Simulation only · costs use taker fees and funding at the current rate · nothing is executed from the dashboard"),
   );
 }

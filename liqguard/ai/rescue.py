@@ -92,7 +92,15 @@ def mock_rescue_explanation(plan: RescuePlan, language: str = "en") -> dict:
     zh = language == "zh-TW"
     best = plan.option(plan.recommended)
     target = plan.target_distance_pct
-    if best is None:
+    if plan.already_safe:
+        dist = plan.current.distance_pct
+        if zh:
+            headline = (f"{plan.symbol} 沒有清算價，無需救援。" if dist is None else
+                        f"{plan.symbol} 距清算 {dist:.1f}%，已達 {target:.0f}% 目標，目前無需救援。")
+        else:
+            headline = (f"{plan.symbol} has no liquidation price; no rescue needed." if dist is None else
+                        f"{plan.symbol} is {dist:.1f}% from liquidation, already beyond the {target:.0f}% target; no rescue needed now.")
+    elif best is None:
         headline = "沒有可用的方案。" if zh else "No rescue option is available."
     elif zh:
         headline = (

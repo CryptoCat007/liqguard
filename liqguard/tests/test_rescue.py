@@ -147,6 +147,33 @@ class TestOptions:
         assert set(d["options"][0]["costs"]) == {"fees_usd", "funding_24h_usd", "realized_loss_usd", "capital_required_usd", "total_cost_usd"}
 
 
+class TestAlreadySafe:
+    def safe_plan(self):
+        btc, account, funding = cross_book()
+        return RescueSimulator(FEES, 5).simulate(btc, account, funding, NOW)
+
+    def test_flag(self, plan):
+        assert not plan.already_safe and plan.to_dict()["already_safe"] is False
+        safe = self.safe_plan()
+        assert safe.already_safe and safe.to_dict()["already_safe"] is True
+
+    def test_mock_says_no_rescue_needed_and_validates(self):
+        safe = self.safe_plan()
+        ex = mock_rescue_explanation(safe)
+        assert "no rescue needed" in ex["headline"]
+        assert validate_rescue_explanation(ex, safe) is None
+
+    def test_telegram_shows_no_options(self):
+        from liqguard.telegram.views import format_rescue_text, plan_summary_line, rescue_keyboard
+
+        safe = self.safe_plan()
+        data = safe.to_dict()
+        text = format_rescue_text(data, mock_rescue_explanation(safe))
+        assert "no rescue needed" in text and "Reduce" not in text
+        assert rescue_keyboard("live", data, True).inline_keyboard == []
+        assert plan_summary_line(safe) == ""
+
+
 class TestRecommend:
     def opt(self, kind, cost, reaches=True, protects=True, distance=30.0):
         return RescueOption(kind, kind, 1.0, distance, reaches, protects, cost, 0, 0, 0)
@@ -349,7 +376,9 @@ class TestTelegram:
 
     async def test_rescue_callback_compares_options_with_buttons(self, ctx, handlers):
         await ctx.storage.save_user(User(telegram_id=ALICE, is_demo_mode=True))
-        handlers.simulation_for(await ctx.storage.get_user(ALICE))
+        sim = handlers.simulation_for(await ctx.storage.get_user(ALICE))
+        sim.step = 30
+        sim.positions = sim._positions_at(sim.step)
         cb = fake_callback(ALICE, "rescue:sim:BTCUSDT")
         await handlers.callback_rescue(cb)
         text = cb.message.answer.call_args.args[0]

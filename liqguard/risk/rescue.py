@@ -103,6 +103,12 @@ class RescuePlan:
     def option(self, kind: str) -> Optional[RescueOption]:
         return next((o for o in self.options if o.kind == kind), None)
 
+    @property
+    def already_safe(self) -> bool:
+        """Already at or beyond the target: every option is a no-op, so there is nothing to recommend."""
+        d = self.current.distance_pct
+        return d is None or d >= self.target_distance_pct
+
     def margin_advice(self) -> ActionableAdvice:
         """The add-margin option as `ActionableAdvice` (what alerts, Muse and the confirm flow consume)."""
         add, reduce = self.option(ADD_MARGIN), self.option(REDUCE)
@@ -134,6 +140,7 @@ class RescuePlan:
             "funding_label": PROJECTION_LABEL,
             "options": [o.to_dict() for o in self.options],
             "recommended": self.recommended,
+            "already_safe": self.already_safe,
         }
 
 
