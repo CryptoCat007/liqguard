@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -24,11 +25,12 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from liqguard.ai import MetaLLMClient
 from liqguard.auth import SessionClaims
 from liqguard.core import AppContext
-from liqguard.risk import PortfolioAnalyzer, RescueSimulator
+from liqguard.risk import PortfolioAnalyzer, RescueSimulator, position_protection
 from liqguard.simulation import MarketSimulation
 
 from .auth import SessionAuth, register_auth_routes
@@ -37,6 +39,10 @@ from .security import apply_security_headers, require_csrf
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class AckRequest(BaseModel):
+    ack_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_\-]+$")
 WS_POLICY_VIOLATION = 1008
 
 
@@ -161,6 +167,7 @@ def create_app(
         }
         if ctx is not None:
             body["funding_feeds"] = ctx.market.status()
+            body["wick_feeds"] = ctx.wicks.status()
         return body
 
     # ---------------------------------------------------------------- simulation routes
@@ -210,6 +217,14 @@ def create_app(
             await sim.reset_and_notify()
             return {"status": "reset"}
 
+        @app.post(f"{prefix}/ack", dependencies=[Depends(require_csrf)])
+        async def ack(body: AckRequest, sim: MarketSimulation = Depends(resolve)):
+            """"I'm awake": stops escalating reminders for one alert of this simulation."""
+            event = await sim.acknowledge(body.ack_id, source="dashboard")
+            if event is None:
+                raise HTTPException(404, "No pending reminder with that id")
+            return {"status": "acknowledged", "symbol": event["symbol"]}
+
     async def public_simulation() -> MarketSimulation:
         return public_sim
 
@@ -243,14 +258,25 @@ def create_app(
                 PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(positions).to_dict()
                 if positions else None
             )
+            protection = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in positions]
             return {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
                 "label": label,
                 "positions": overview,
+                "protection": protection,
+                "escalations": [a.to_dict() for a in ctx.escalations.pending_for(claims.user_id) if a.acknowledged_at is None],
                 "actions": await ctx.storage.list_audit(claims.user_id, limit=50),
                 "protect_enabled": ctx.actions.is_enabled(),
             }
+
+        @app.post("/api/me/live/ack", dependencies=[Depends(require_csrf)])
+        async def my_live_ack(body: AckRequest, claims: SessionClaims = Depends(auth.required)):
+            """Acknowledge one of the signed-in user's own live escalations; other users' ids are indistinguishable from unknown."""
+            ack = ctx.escalations.acknowledge(claims.user_id, body.ack_id, time.time())
+            if ack is None:
+                raise HTTPException(404, "No pending reminder with that id")
+            return {"status": "acknowledged", "symbol": ack.symbol}
 
         @app.get("/api/me/rescue/live")
         async def my_live_rescue(

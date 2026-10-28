@@ -107,7 +107,7 @@ class TestControls:
         for forbidden in ("/api/actions", "/api/execute", "/api/confirm", "/api/bind"):
             assert forbidden not in paths
         posts = {r.path for r in client.app.routes if "POST" in getattr(r, "methods", set())}
-        assert posts == {"/api/demo/simulate", "/api/demo/simulate/stop", "/api/demo/simulate/reset", "/auth/logout"}
+        assert posts == {"/api/demo/simulate", "/api/demo/simulate/stop", "/api/demo/simulate/reset", "/api/demo/ack", "/auth/logout"}
 
     def test_post_without_csrf_header_is_rejected(self, client):
         assert client.post("/api/demo/simulate").status_code == 403

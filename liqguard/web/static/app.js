@@ -4,10 +4,15 @@ const COLORS = {
   safe: "#34d399", warning: "#fbbf24", critical: "#fb923c", emergency: "#f43f5e", funding: "#a78bfa",
   grid: "rgba(148,163,184,0.08)", tick: "#5b667a", text: "#8a96ab",
 };
-const SYMBOL_COLORS = { BTCUSDT: "#f7931a", ETH: "#8b9cff", ETHUSDT: "#8b9cff", SOLUSDT: "#14f195" };
+const SYMBOL_COLORS = { BTCUSDT: "#f7931a", ETH: "#8b9cff", ETHUSDT: "#8b9cff", SOLUSDT: "#14f195", TSLAUSDT: "#e2e8f0" };
 const FALLBACK_COLORS = ["#38bdf8", "#f472b6", "#a3e635", "#facc15"];
 const TIERS = ["warning", "critical", "emergency"];
-const LEVEL_ICON = { warning: "⚠️", critical: "🚨", emergency: "🆘", funding: "⏳" };
+const LEVEL_ICON = { warning: "⚠️", critical: "🚨", emergency: "🆘", funding: "⏳", stop: "🛑", adl: "⚡" };
+const STOP_LABEL = {
+  ok: ["✅ Stop fires first", "safe"], partial: ["⚠️ Partial stop", "warning"], no_stop: ["🛑 No stop-loss", "critical"],
+  too_close: ["⚠️ Stop too close to liq", "warning"], beyond_liquidation: ["🛑 Stop beyond liq", "emergency"],
+};
+const FIX_ICON = { move_stop: "🎯", add_margin: "💰", reduce: "✂️" };
 const OPTION_META = {
   add_margin: { icon: "💰", label: "Add margin" },
   reduce: { icon: "✂️", label: "Reduce" },
@@ -20,8 +25,9 @@ const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
 const S = {
   history: {}, tierPrices: {}, thresholds: { warning: 20, critical: 10, emergency: 5 },
   totalSteps: 40, tick: 0.75, step: 0, state: "idle", order: [], view: "distance",
-  overview: null, counts: { warning: 0, critical: 0, emergency: 0, funding: 0 }, lastSeverity: {},
+  overview: null, counts: { warning: 0, critical: 0, emergency: 0, funding: 0, stop: 0, adl: 0 }, lastSeverity: {},
   minutesPerStep: null, wallets: {}, fundingEvents: [], fundingSteps: {}, rescue: null,
+  protection: {}, session: null, escalation: null, pending: {}, stopMuse: {},
 };
 let chart = null;
 let ws = null;
@@ -69,8 +75,14 @@ function pct(v, dp = 1) { return v == null ? "—" : `${v.toFixed(dp)}%`; }
 function clock(iso) {
   return new Date(iso).toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
-function tierFor(distance) {
-  const t = S.thresholds;
+function tiersOf(sym) { return S.protection[sym]?.thresholds?.effective || S.thresholds; }
+function chartTiers() {
+  const eff = Object.values(S.protection).map((p) => p.thresholds?.effective).filter(Boolean);
+  if (!eff.length) return S.thresholds;
+  return Object.fromEntries(TIERS.map((t) => [t, Math.min(...eff.map((e) => e[t]))]));
+}
+function tierFor(distance, sym) {
+  const t = sym ? tiersOf(sym) : S.thresholds;
   if (distance == null) return "safe";
   if (distance <= t.emergency) return "emergency";
   if (distance <= t.critical) return "critical";
@@ -100,7 +112,7 @@ function applySnapshot(snap) {
   S.tierPrices = snap.tier_prices || {};
   S.safetyTarget = snap.safety_target_pct;
   S.order = Object.keys(S.history);
-  S.counts = { warning: 0, critical: 0, emergency: 0, funding: 0 };
+  S.counts = { warning: 0, critical: 0, emergency: 0, funding: 0, stop: 0, adl: 0 };
   S.lastSeverity = {};
   S.minutesPerStep = snap.minutes_per_step || null;
   S.wallets = snap.wallets || {};
@@ -110,6 +122,11 @@ function applySnapshot(snap) {
     S.fundingSteps[sym] = new Set(pts.filter((p) => p.funding_paid_usd != null).map((p) => p.step));
   }
   S.rescue = null;
+  S.protection = snap.protection || {};
+  S.session = snap.session || null;
+  S.escalation = snap.escalation || null;
+  S.pending = Object.fromEntries((snap.escalation?.pending || []).map((a) => [a.id, a]));
+  S.stopMuse = {};
   if (S.view !== "distance" && !S.order.includes(S.view)) S.view = "distance";
 
   $("musePill").textContent = snap.muse_mode === "live" ? "Muse · live" : "Muse · mock";
@@ -121,6 +138,7 @@ function applySnapshot(snap) {
 
   $("timeline").replaceChildren();
   (snap.alerts || []).forEach((a) => addAlert(a, { quiet: true }));
+  (snap.escalation_log || []).forEach((e) => addEscalation(e, { quiet: true }));
   if (!snap.alerts?.length) $("timeline").append(empty("🔕", "No alerts yet", "Press Simulate market to walk prices toward liquidation."));
   updateCounts();
 
@@ -132,6 +150,8 @@ function applySnapshot(snap) {
   (snap.audit || []).forEach((e) => addAudit(e));
   if (!snap.audit?.length) $("audit").append(empty("📋", "Audit log is empty", "Alerts, suggestions and Telegram action steps are recorded here."));
 
+  renderProtection();
+  renderWake();
   buildTabs();
   buildChart();
   renderFunding();
@@ -169,6 +189,12 @@ function handle(msg) {
     case "status":
       setStatus(data);
       break;
+    case "escalation":
+      addEscalation(data);
+      break;
+    case "ack":
+      onAck(data);
+      break;
   }
 }
 
@@ -180,6 +206,14 @@ function onTick(data) {
     if (p.funding_paid_usd != null) (S.fundingSteps[sym] ||= new Set()).add(p.step);
   }
   if (data.wallets) S.wallets = data.wallets;
+  if (data.protection) S.protection = data.protection;
+  if (data.session) S.session = data.session;
+  if (data.escalation) {
+    S.escalation = data.escalation;
+    S.pending = Object.fromEntries((data.escalation.pending || []).map((a) => [a.id, { ...S.pending[a.id], ...a }]));
+    renderWake();
+  }
+  renderProtection();
   renderOverview(data.overview);
   renderFunding();
   updateChart(data);
@@ -219,7 +253,7 @@ function renderOverview(ov) {
   const minD = rm.min_distance_to_liquidation;
   const md = $("kpiMinDist");
   md.textContent = pct(minD);
-  md.className = `kpi-value c-${tierFor(minD)}`;
+  md.className = `kpi-value c-${tierFor(minD, closest?.symbol)}`;
   $("kpiMinDistSym").textContent = closest ? `${closest.symbol} ${closest.side}` : "—";
   $("kpiSafety").textContent = money(rm.total_margin_needed_for_safety);
   $("kpiSafetySub").textContent = rm.total_margin_needed_for_safety > 0
@@ -257,7 +291,7 @@ function setRiskiest(sym, side, dist) {
   chip.replaceChildren(
     el("span", { style: { color: symbolColor(sym) } }, sym), " ",
     el("span", { class: `side side-${side}` }, side.toUpperCase()), " ",
-    el("span", { class: `c-${tierFor(dist)}` }, pct(dist)),
+    el("span", { class: `c-${tierFor(dist, sym)}` }, pct(dist)),
   );
 }
 
@@ -270,16 +304,17 @@ function renderPositions(positions) {
   box.replaceChildren(...order.map((sym) => {
     const p = bySym[sym];
     const d = p.distance_to_liquidation_pct;
-    const tier = tierFor(d);
+    const tier = tierFor(d, sym);
     const color = COLORS[tier];
     const prev = S.lastSeverity[sym];
     S.lastSeverity[sym] = tier;
+    const th = tiersOf(sym);
 
     const ticks = TIERS.map((t) => el("div", {
-      class: "gauge-tick", title: `${t} ${S.thresholds[t]}%`,
-      style: { left: `${(S.thresholds[t] / scale) * 100}%`, background: COLORS[t] },
+      class: "gauge-tick", title: `${t} ${th[t]}%`,
+      style: { left: `${(Math.min(th[t], scale) / scale) * 100}%`, background: COLORS[t] },
     }));
-    const labels = TIERS.map((t) => el("span", { style: { left: `${(S.thresholds[t] / scale) * 100}%` } }, `${S.thresholds[t]}`));
+    const labels = TIERS.map((t) => el("span", { style: { left: `${(Math.min(th[t], scale) / scale) * 100}%` } }, `${+th[t].toFixed(1)}`));
 
     const node = el("div", {
       class: `position${S.view === sym ? " selected" : ""}${prev && prev !== tier ? " flash" : ""}`,
@@ -305,6 +340,7 @@ function renderPositions(positions) {
       ),
       liqDetail(p),
       fundingDetail(p.funding),
+      protectionChips(S.protection[sym]),
       el("div", { class: "pos-actions" },
         el("button", {
           class: "mini-btn", type: "button", title: "Compare add margin, reduce and hedge",
@@ -377,6 +413,12 @@ function addAlert(a, opts = {}) {
   S.counts[a.level] = (S.counts[a.level] || 0) + 1;
   updateCounts();
   if (a.level === "funding") { addFundingAlert(a, opts); return; }
+  if (a.level === "stop") { addStopAlert(a, opts); return; }
+  if (a.level === "adl") { addAdlAlert(a, opts); return; }
+  if (a.ack_id && !opts.quiet && !S.pending[a.ack_id] && S.escalation?.enabled !== false) {
+    S.pending[a.ack_id] = { id: a.ack_id, symbol: a.symbol, severity: a.level, reminders_sent: 0, max_reminders: S.escalation?.max_reminders ?? 5, distance_pct: a.distance_pct };
+    renderWake();
+  }
   const chips = (a.channels || []).map((c) => el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c));
   box.prepend(el("li", { class: `tl-item tl-${a.level}` },
     el("span", { class: "tl-node" }),
@@ -387,10 +429,14 @@ function addAlert(a, opts = {}) {
       el("span", { class: "tl-time" }, clock(a.timestamp)),
     ),
     el("div", { class: "tl-body" },
-      "Crossed ", el("b", {}, `${a.threshold_pct}%`), " — now ", el("b", {}, pct(a.distance_pct)),
+      "Crossed ", el("b", {}, pct(a.threshold_pct, 2)),
+      a.base_threshold_pct != null && Math.abs(a.base_threshold_pct - a.threshold_pct) > 0.01 ? el("span", { class: "faint" }, ` (base ${a.base_threshold_pct}%)`) : "",
+      " — now ", el("b", {}, pct(a.distance_pct)),
       ` from liquidation · mark ${price(a.mark_price)} vs liq ${price(a.liquidation_price)}`,
+      a.wicks?.max_wicks_away != null ? el("div", { class: "tl-sub" }, `🕯 ${a.wicks.max_wicks_away.toFixed(1)} max ${a.wicks.worst_interval} wicks from liquidation`) : null,
+      a.adaptive_reasons?.length ? el("div", { class: "tl-sub" }, `Tiers widened: ${a.adaptive_reasons.join(" · ")}`) : null,
     ),
-    chips.length ? el("div", { class: "chips" }, ...chips) : null,
+    el("div", { class: "chips" }, ...chips, a.ack_id ? ackButton(a.ack_id, a.symbol) : null),
   ));
   if (!opts.quiet) {
     const sent = (a.channels || []).map((c) => (c === "web" ? "Web" : c === "telegram" ? "Telegram" : c)).join(" + ");
@@ -408,6 +454,248 @@ function updateCounts() {
   $("cntCritical").textContent = S.counts.critical;
   $("cntEmergency").textContent = S.counts.emergency;
   $("cntFunding").textContent = S.counts.funding;
+  $("cntStop").textContent = S.counts.stop;
+  $("cntAdl").textContent = S.counts.adl;
+}
+
+function tlHead(label, cls, a) {
+  return el("div", { class: "tl-head" },
+    el("span", { class: `lvl ${cls}` }, label),
+    el("span", { class: "tl-sym", style: { color: symbolColor(a.symbol) } }, a.symbol),
+    a.side ? el("span", { class: `side side-${a.side}` }, a.side.toUpperCase()) : null,
+    el("span", { class: "tl-time" }, clock(a.timestamp)),
+  );
+}
+
+function addStopAlert(a, opts) {
+  const s = a.stop, m = a.explanation;
+  S.stopMuse[a.symbol] = m;
+  const [label] = STOP_LABEL[s.status] || [s.status];
+  $("timeline").prepend(el("li", { class: "tl-item tl-stop" },
+    el("span", { class: "tl-node" }),
+    tlHead("STOP-LOSS", "lvl-stop-b", a),
+    el("div", { class: "tl-body" },
+      el("b", {}, label), s.stop_price ? ` · stop ${price(s.stop_price)}` : "", ` · liq ${price(s.liquidation_price)}`,
+      m ? el("div", { class: "tl-muse" }, el("span", { class: "muse-glyph" }, "✦ "), m.explanation) : null,
+    ),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip),
+      el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(a.symbol) }, "🛟 Rescue")),
+  ));
+  if (!opts.quiet) toast("🛑", `STOP-LOSS · ${a.symbol}`, m?.headline || label, COLORS.emergency);
+  renderStops();
+}
+
+function addAdlAlert(a, opts) {
+  const adl = a.adl;
+  $("timeline").prepend(el("li", { class: "tl-item tl-adl" },
+    el("span", { class: "tl-node" }),
+    tlHead(`ADL ${adl.lights}/5`, "lvl-adl-b", a),
+    el("div", { class: "tl-body" }, adlLights(adl.lights), " ",
+      `Profitable (${money(a.unrealized_pnl, { signed: true })}) and near the front of the auto-deleverage queue — could be closed if a counterparty is liquidated past the insurance fund.`),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
+  ));
+  if (!opts.quiet) toast("⚡", `ADL ${adl.lights}/5 · ${a.symbol}`, `In profit ${money(a.unrealized_pnl, { signed: true })} — consider taking some off`, COLORS.funding);
+}
+
+function channelChip(c) {
+  return el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c);
+}
+
+/* ---------------- wake-up escalation ---------------- */
+
+function ackButton(id, sym) {
+  const pending = S.pending[id] ? !S.pending[id].acknowledged
+    : Object.values(S.pending).some((p) => p.symbol === sym && !p.acknowledged);
+  return el("button", {
+    class: `mini-btn ack-btn${pending ? "" : " done"}`, type: "button", "data-ack": id, "data-sym": sym, disabled: !pending,
+    onclick: (ev) => { ev.stopPropagation(); acknowledge(id); },
+  }, pending ? "✅ I'm awake" : "✓ acknowledged");
+}
+
+function refreshAckButtons() {
+  document.querySelectorAll("[data-ack]").forEach((b) => b.replaceWith(ackButton(b.dataset.ack, b.dataset.sym)));
+}
+
+async function acknowledge(id) {
+  const res = await postJson(`${API}/ack`, { ack_id: id });
+  if (!res) return;
+  for (const p of Object.values(S.pending)) if (p.id === id || p.symbol === res.symbol) p.acknowledged = true;
+  renderWake();
+  refreshAckButtons();
+}
+
+function addEscalation(e, opts = {}) {
+  const p = S.pending[e.ack_id];
+  if (p) { p.reminders_sent = e.reminder; p.urgency = e.urgency; }
+  else if (!opts.quiet) S.pending[e.ack_id] = { id: e.ack_id, symbol: e.symbol, severity: e.severity, reminders_sent: e.reminder, max_reminders: e.max_reminders, urgency: e.urgency, distance_pct: e.distance_pct };
+  const box = $("timeline");
+  clearEmpty(box);
+  box.prepend(el("li", { class: `tl-item tl-esc tl-esc-${e.urgency}` },
+    el("span", { class: "tl-node" }),
+    tlHead(`${e.urgency === "final" ? "FINAL " : e.urgency === "urgent" ? "URGENT " : ""}REMINDER ${e.reminder}/${e.max_reminders}`, `lvl-esc-b lvl-esc-${e.urgency}`, e),
+    el("div", { class: "tl-body" },
+      `${e.severity.toUpperCase()} alert unacknowledged for ${Math.round(e.minutes_since_alert)} min · now `, el("b", {}, pct(e.distance_pct)), " from liquidation"),
+    el("div", { class: "chips" }, ...(e.channels || []).map(channelChip), ackButton(e.ack_id, e.symbol)),
+  ));
+  if (!opts.quiet) {
+    toast("⏰", `${e.urgency === "final" ? "FINAL WAKE-UP" : "WAKE UP"} · ${e.symbol}`, `Reminder ${e.reminder}/${e.max_reminders} — tap “I'm awake” to stop`, COLORS[e.severity] || COLORS.critical);
+    const wake = $("wake");
+    wake.classList.remove("ring");
+    void wake.offsetWidth;
+    wake.classList.add("ring");
+    renderWake();
+  }
+}
+
+function onAck(data) {
+  for (const p of Object.values(S.pending)) if (p.id === data.ack_id || p.symbol === data.symbol) p.acknowledged = true;
+  const box = $("timeline");
+  box.prepend(el("li", { class: "tl-item tl-ack" },
+    el("span", { class: "tl-node" }),
+    tlHead("ACKNOWLEDGED", "lvl-ack-b", data),
+    el("div", { class: "tl-body" }, `${data.severity} alert acknowledged from ${data.source} after ${data.reminders_sent} reminder(s) — reminders stopped.`),
+  ));
+  toast("✅", `Acknowledged · ${data.symbol}`, `From ${data.source} — no more reminders`, COLORS.safe);
+  renderWake();
+  refreshAckButtons();
+}
+
+function renderWake() {
+  const items = Object.values(S.pending).filter((a) => !a.acknowledged);
+  const wake = $("wake");
+  wake.hidden = !items.length;
+  if (!items.length) return;
+  const esc = S.escalation || {};
+  const worst = items.some((a) => a.severity === "emergency") ? "emergency" : "critical";
+  wake.className = `wake card wake-${worst}${wake.classList.contains("ring") ? " ring" : ""}`;
+  $("wakeTitle").textContent = `${items.length} alert${items.length > 1 ? "s" : ""} waiting for “I'm awake”`;
+  $("wakeSub").textContent = esc.interval_minutes
+    ? `Reminders every ${esc.interval_minutes} min (demo: ${esc.seconds_per_minute}s per minute), up to ${esc.max_reminders}, louder each time · same button in Telegram`
+    : "Reminders repeat until acknowledged";
+  $("wakeList").replaceChildren(...items.map((a) => el("div", { class: `wake-item c-${a.severity}` },
+    el("b", { style: { color: symbolColor(a.symbol) } }, a.symbol),
+    el("span", {}, `${a.severity.toUpperCase()} · ${pct(a.distance_pct)}`),
+    el("span", { class: "faint" }, `${a.reminders_sent || 0}/${a.max_reminders} sent`),
+    ackButton(a.id, a.symbol),
+  )));
+}
+
+/* ---------------- wick stress / stops / ADL ---------------- */
+
+function adlLights(n, max = 5) {
+  return el("span", { class: `adl adl-${n}`, title: `ADL ${n}/${max}` },
+    ...Array.from({ length: max }, (_, i) => el("i", { class: i < n ? "on" : "" })));
+}
+
+function wicksClass(n) {
+  if (n == null) return "faint";
+  return n <= 1 ? "c-emergency" : n <= 3 ? "c-critical" : n <= 6 ? "c-warning" : "c-safe";
+}
+
+function protectionChips(pr) {
+  if (!pr) return null;
+  const chips = [];
+  if (pr.wicks?.max_wicks_away != null) {
+    chips.push(el("span", { class: `pchip ${wicksClass(pr.wicks.max_wicks_away)}`, title: `Deepest ${pr.wicks.worst_interval} wick in 30 days` },
+      `🕯 ${pr.wicks.max_wicks_away.toFixed(1)} max wicks`));
+  }
+  if (pr.stop) {
+    const [label, tone] = STOP_LABEL[pr.stop.status] || [pr.stop.status, "muted"];
+    chips.push(el("span", { class: `pchip c-${tone}` }, label));
+  } else chips.push(el("span", { class: "pchip faint" }, "orders n/a"));
+  if (pr.adl?.supported) {
+    chips.push(el("span", { class: `pchip${pr.adl.warn ? " c-critical" : ""}`, title: pr.adl.note || "" }, "ADL ", adlLights(pr.adl.lights || 0)));
+  } else if (pr.adl) chips.push(el("span", { class: "pchip faint", title: pr.adl.note || "" }, "ADL n/a"));
+  if (pr.thresholds?.adapted) chips.push(el("span", { class: "pchip", title: pr.thresholds.reasons.join(" · ") }, "📈 adaptive"));
+  return el("div", { class: "pchips" }, ...chips);
+}
+
+function renderSession() {
+  const s = S.session;
+  const box = $("session");
+  if (!s) { box.replaceChildren(); return; }
+  const when = s.sim_time ? new Date(s.sim_time) : null;
+  const t = when ? `${s.weekday || ""} ${String(when.getUTCHours()).padStart(2, "0")}:${String(when.getUTCMinutes()).padStart(2, "0")} UTC` : "";
+  const stock = Object.values(S.protection).some((p) => p.thresholds?.session?.stock_market_closed);
+  box.replaceChildren(
+    el("span", { class: "sess-clock" }, "🕒 ", t, el("span", { class: "faint" }, MODE === "me" || S.minutesPerStep ? " · demo clock" : "")),
+    el("span", { class: `sess${s.weekend ? " on" : ""}` }, "Weekend ×1.15"),
+    el("span", { class: `sess${s.low_liquidity ? " on" : ""}` }, "Thin hours ×1.10"),
+    el("span", { class: `sess${stock ? " on" : ""}` }, "US stocks closed ×1.5"),
+  );
+}
+
+function renderProtection() {
+  renderSession();
+  renderStress();
+  renderStops();
+}
+
+function renderStress() {
+  const box = $("stress");
+  const entries = S.order.map((s) => S.protection[s]).filter(Boolean);
+  if (!entries.length) { box.replaceChildren(empty("🕯", "No wick data yet", "Wick stats load from public 1m/5m candles for each open symbol.")); return; }
+  const sources = new Set(entries.map((p) => p.wicks?.source).filter(Boolean));
+  $("stressTag").textContent = sources.has("demo") ? "DEMO WICKS" : sources.size ? "LIVE KLINES" : "NO KLINES";
+  box.replaceChildren(...entries.map((p) => {
+    const w = p.wicks, th = p.thresholds;
+    const byInt = Object.fromEntries((w?.exposures || []).map((e) => [e.interval, e]));
+    const cell = (iv) => {
+      const e = byInt[iv];
+      if (!e) return el("div", { class: "st-cell faint" }, `${iv} —`);
+      return el("div", { class: "st-cell" },
+        el("div", { class: "st-iv" }, iv, e.window_days < 29 ? el("span", { class: "faint" }, ` · ${e.window_days.toFixed(1)}d`) : null),
+        el("div", {}, el("b", { class: wicksClass(e.max_wicks_away) }, e.max_wicks_away == null ? "—" : `${e.max_wicks_away.toFixed(1)}×`), el("span", { class: "faint" }, ` max ${pct(e.max_pct, 2)}`)),
+        el("div", {}, el("b", { class: wicksClass(e.typical_wicks_away / 4) }, e.typical_wicks_away == null ? "—" : `${e.typical_wicks_away.toFixed(0)}×`), el("span", { class: "faint" }, ` typical ${pct(e.typical_pct, 2)}`)),
+      );
+    };
+    const tiers = th ? TIERS.map((t) => el("span", { class: `st-tier c-${t}` },
+      `${t[0].toUpperCase()} ${th.base[t]}→`, el("b", {}, `${+th.effective[t].toFixed(1)}%`))) : [];
+    return el("div", { class: `st-row${w?.one_max_wick_liquidates ? " danger" : ""}` },
+      el("div", { class: "st-sym" },
+        el("b", { style: { color: symbolColor(p.symbol) } }, p.symbol),
+        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
+        el("span", { class: `c-${tierFor(p.distance_pct, p.symbol)}` }, pct(p.distance_pct)),
+      ),
+      el("div", { class: "st-big" },
+        el("div", { class: `st-n ${wicksClass(w?.max_wicks_away)}` }, w?.max_wicks_away == null ? "—" : w.max_wicks_away.toFixed(1)),
+        el("div", { class: "faint" }, w?.one_max_wick_liquidates ? "one wick liquidates!" : "max wicks away"),
+      ),
+      cell("1m"), cell("5m"),
+      el("div", { class: "st-tiers" }, ...tiers,
+        th?.reasons?.length ? el("div", { class: "st-why faint" }, th.reasons.join(" · ")) : el("div", { class: "st-why faint" }, "base tiers (no widening)")),
+    );
+  }));
+}
+
+function renderStops() {
+  const box = $("stops");
+  const entries = S.order.map((s) => S.protection[s]).filter(Boolean);
+  if (!entries.length) { box.replaceChildren(empty("🛑", "No positions", "Stop-loss checks run against each position's liquidation price.")); return; }
+  box.replaceChildren(...entries.map((p) => {
+    const s = p.stop, adl = p.adl || {};
+    const [label, tone] = s ? (STOP_LABEL[s.status] || [s.status, "muted"]) : ["Orders unavailable", "muted"];
+    const muse = S.stopMuse[p.symbol];
+    const fixes = s?.needs_warning ? (s.fixes || []) : [];
+    return el("div", { class: `sp-row sp-${tone}` },
+      el("div", { class: "sp-head" },
+        el("b", { style: { color: symbolColor(p.symbol) } }, p.symbol),
+        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
+        el("span", { class: `sp-status c-${tone}` }, label),
+        el("span", { class: "sp-adl", title: adl.note || "" },
+          adl.supported ? [adlLights(adl.lights || 0), el("span", { class: adl.warn ? "c-critical" : "faint" }, ` ${adl.lights}/5`)] : el("span", { class: "faint" }, "ADL n/a (Hyperliquid)")),
+      ),
+      s ? el("div", { class: "sp-line" },
+        s.stop_price ? `stop ${price(s.stop_price)} · ` : "",
+        `liq ${price(s.liquidation_price)}`,
+        s.gap_pct != null ? ` · gap ${s.gap_pct >= 0 ? "" : "−"}${Math.abs(s.gap_pct).toFixed(2)}% (need ≥ ${s.required_gap_pct.toFixed(2)}%)` : ` · need ≥ ${s.required_gap_pct.toFixed(2)}% gap`,
+      ) : null,
+      fixes.length ? el("div", { class: "sp-fixes" }, ...fixes.map((f) => el("span", {
+        class: `sp-fix${muse?.suggested_fix === f.kind ? " best" : ""}`,
+      }, `${FIX_ICON[f.kind] || "•"} ${f.title}`, muse?.suggested_fix === f.kind ? el("span", { class: "star" }, " ★ Muse") : null))) : null,
+      muse && s?.needs_warning ? el("div", { class: "sp-muse" }, el("span", { class: "muse-glyph" }, "✦ "), muse.explanation) : null,
+    );
+  }));
 }
 
 function addAdvice(c) {
@@ -438,6 +726,7 @@ function addAdvice(c) {
     el("div", { class: "adv-text" }, c.explanation),
     actions.length ? el("div", { class: "adv-actions" }, ...actions) : null,
     c.rescue ? rescueMini(c) : null,
+    c.ack_id ? el("div", { class: "chips" }, ackButton(c.ack_id, c.symbol)) : null,
     el("div", { class: "adv-foot" }, "Suggestion only · confirm in Telegram · testnet execution"),
   ));
   if (c.rescue && (!S.rescue || S.rescue.auto)) showRescue(c.symbol, { plan: c.rescue, explanation: c.rescue_explanation }, { auto: true });
@@ -675,6 +964,22 @@ async function post(path) {
   }
 }
 
+async function postJson(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: "POST", credentials: "same-origin",
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (r.status === 401) { toLogin(); return null; }
+    if (r.status === 404) { toast("ℹ️", "Already handled", "That reminder was already acknowledged or has expired.", COLORS.text); return null; }
+    if (!r.ok) throw new Error(`${r.status}`);
+    return await r.json();
+  } catch (err) {
+    toast("⚠️", "Request failed", `Could not reach ${path}. Is the server running?`, COLORS.critical);
+    return null;
+  }
+}
+
 /* ---------------- chart ---------------- */
 
 const tierBands = {
@@ -682,7 +987,7 @@ const tierBands = {
   beforeDatasetsDraw(c) {
     if (S.view !== "distance") return;
     const { ctx, chartArea: a, scales: { y } } = c;
-    const t = S.thresholds;
+    const t = chartTiers();
     const bands = [[0, t.emergency, COLORS.emergency, 0.12], [t.emergency, t.critical, COLORS.critical, 0.08], [t.critical, t.warning, COLORS.warning, 0.05]];
     ctx.save();
     for (const [lo, hi, col, al] of bands) {
@@ -696,7 +1001,7 @@ const tierBands = {
       ctx.fillStyle = alpha(col, 0.9);
       ctx.font = "600 10px Inter, ui-sans-serif, sans-serif";
       ctx.textAlign = "right";
-      ctx.fillText(`${Object.keys(t).find((k) => t[k] === hi).toUpperCase()} ${hi}%`, a.right - 6, top - 4);
+      ctx.fillText(`${Object.keys(t).find((k) => t[k] === hi).toUpperCase()} ${+hi.toFixed(1)}%`, a.right - 6, top - 4);
     }
     ctx.restore();
   },
@@ -761,6 +1066,7 @@ function buildChart() {
     $("chartSub").textContent = S.minutesPerStep
       ? `All positions · tier bands · ▲ funding settlement · simulated clock (${S.minutesPerStep} min per step)`
       : "All positions · shaded bands are the warning / critical / emergency tiers";
+    if (S.session?.reasons?.length) $("chartSub").textContent += ` · tiers widened (${S.session.reasons.join(", ")})`;
     const datasets = S.order.map((sym) => ({
       label: sym, data: series(sym, "distance_pct"), borderColor: symbolColor(sym),
       backgroundColor: symbolColor(sym), borderWidth: 2.5, tension: 0.35, spanGaps: true,
@@ -798,7 +1104,7 @@ function buildChart() {
     { label: "Mark price", data: series(sym, "mark_price"), borderColor: col, backgroundColor: grad, fill: { target: 1 }, borderWidth: 2.5, pointRadius: 0, tension: 0.35, spanGaps: true },
     { label: "True liquidation", data: series(sym, "liquidation_price"), borderColor: COLORS.emergency, borderWidth: 2, borderDash: [6, 5], fill: false, spanGaps: true, stepped: true,
       pointRadius: fundingPoint(sym, 6), pointStyle: "triangle", pointBackgroundColor: COLORS.funding, pointBorderColor: COLORS.funding },
-    ...TIERS.map((t) => ({ label: `${t[0].toUpperCase() + t.slice(1)} (${S.thresholds[t]}%)`, data: flat(tp[t]), borderColor: alpha(COLORS[t], 0.55), borderWidth: 1, borderDash: [3, 4], pointRadius: 0, fill: false })),
+    ...TIERS.map((t) => ({ label: `${t[0].toUpperCase() + t.slice(1)} (${+tiersOf(sym)[t].toFixed(1)}%)`, data: flat(tp[t]), borderColor: alpha(COLORS[t], 0.55), borderWidth: 1, borderDash: [3, 4], pointRadius: 0, fill: false })),
   ];
   const vals = [...h.map((p) => p.mark_price), ...h.map((p) => p.liquidation_price)].filter((v) => v != null);
   const lo = Math.min(...vals), hi = Math.max(...vals), pad = (hi - lo) * 0.08 || hi * 0.02;
@@ -918,12 +1224,19 @@ async function refreshAccount() {
         ? ` · true ${price(p.true_liquidation.price)}` : ""),
     el("span", { class: `d c-${tierFor(p.distance_to_liquidation_pct)}` }, pct(p.distance_to_liquidation_pct)),
     el("button", { class: "mini-btn", type: "button", onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
+    protectionChips((data.protection || []).find((x) => x.symbol === p.symbol && x.venue === p.venue)),
     p.funding ? el("span", { class: "acct-fund" },
       `funding ${p.funding.rate_pct >= 0 ? "+" : ""}${p.funding.rate_pct.toFixed(4)}%/${p.funding.interval_hours}h · next ${duration(p.funding.minutes_to_settlement)} · `
       + (p.funding.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ")
       + ` (${p.funding.label})`) : null,
   )));
   if (!positions.length) box.append(empty("📭", "No open positions", data.label ? "Nothing open right now." : "Connect an exchange or enable /demo in Telegram."));
+  for (const a of data.escalations || []) {
+    box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${a.severity.toUpperCase()} · ${a.reminders_sent}/${a.max_reminders} reminders `,
+      el("button", { class: "mini-btn ack-btn", type: "button", onclick: async () => {
+        if (await postJson("/api/me/live/ack", { ack_id: a.id })) refreshAccount();
+      } }, "✅ I'm awake")));
+  }
 
   const acts = $("accountActions");
   acts.replaceChildren(...(data.actions || []).slice().reverse().map((a) => el("div", { class: "au" },

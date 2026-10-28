@@ -100,6 +100,7 @@ def ack_action(ack: PendingAck) -> tuple[str, str]:
 class EscalationTracker:
     def __init__(self, id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(9)):
         self._pending: dict[tuple[Optional[int], str, str], PendingAck] = {}
+        self._superseded: dict[str, tuple[Optional[int], str, str]] = {}
         self._ids = id_factory
 
     def open(
@@ -128,6 +129,8 @@ class EscalationTracker:
             opened_at=now, last_sent_at=now, interval_seconds=interval_seconds, max_reminders=max_reminders,
             distance_pct=distance_pct, meta=dict(meta or {}),
         )
+        if current is not None and current.acknowledged_at is None:
+            self._superseded[current.id] = key
         self._pending[key] = ack
         return ack
 
@@ -140,18 +143,25 @@ class EscalationTracker:
     def mark_sent(self, ack: PendingAck, now: float) -> int:
         ack.reminders_sent += 1
         ack.last_sent_at = now
-        if ack.exhausted:
-            self._pending.pop((ack.user_id, ack.venue, ack.symbol), None)
         return ack.reminders_sent
 
     def acknowledge(self, user_id: Optional[int], ack_id: str, now: float) -> Optional[PendingAck]:
-        """Close the owner's pending ack with this id. Another user's id does nothing."""
-        for key, ack in list(self._pending.items()):
-            if ack.id == ack_id and ack.user_id == user_id:
-                ack.acknowledged_at = now
-                del self._pending[key]
-                return ack
-        return None
+        """Close the owner's pending ack with this id, or the one that superseded it when the
+        position worsened (an older alert's button still works). Another user's id does nothing."""
+        key = self._superseded.get(ack_id)
+        if key is None:
+            key = next((k for k, a in self._pending.items() if a.id == ack_id), None)
+        ack = self._pending.get(key) if key is not None else None
+        if ack is None or ack.user_id != user_id:
+            return None
+        ack.acknowledged_at = now
+        del self._pending[key]
+        self._forget(key)
+        return ack
+
+    def _forget(self, key: tuple) -> None:
+        for old in [i for i, k in self._superseded.items() if k == key]:
+            del self._superseded[old]
 
     def update(self, user_id: Optional[int], venue: str, symbol: str, distance_pct: float) -> None:
         ack = self._pending.get((user_id, venue, symbol))
@@ -160,13 +170,19 @@ class EscalationTracker:
 
     def resolve(self, user_id: Optional[int], venue: str, symbol: str) -> Optional[PendingAck]:
         """The position recovered (or closed): stop reminding."""
+        self._forget((user_id, venue, symbol))
         return self._pending.pop((user_id, venue, symbol), None)
 
     def pending_for(self, user_id: Optional[int]) -> list[PendingAck]:
+        """Unacknowledged alerts, including ones whose reminders hit the cap (still acknowledgeable)."""
         return [a for a in self._pending.values() if a.user_id == user_id]
+
+    def active_for(self, user_id: Optional[int]) -> list[PendingAck]:
+        return [a for a in self.pending_for(user_id) if not a.exhausted]
 
     def clear(self) -> None:
         self._pending.clear()
+        self._superseded.clear()
 
 
 class EscalationService:

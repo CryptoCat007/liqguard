@@ -73,6 +73,15 @@
       </div>
     </section>
 
+    <section class="wake card" id="wake" hidden aria-live="assertive">
+      <div class="wake-icon">⏰</div>
+      <div class="wake-body">
+        <div class="wake-title" id="wakeTitle">Wake-up escalation</div>
+        <div class="wake-sub" id="wakeSub"></div>
+      </div>
+      <div class="wake-list" id="wakeList"></div>
+    </section>
+
     <section class="banner card" id="banner">
       <div class="banner-level" id="riskLevel">—</div>
       <div class="banner-body">
@@ -124,6 +133,31 @@
       </div>
     </section>
 
+    <section class="row-protect">
+      <div class="card stress-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Wick stress test &amp; adaptive tiers</div>
+            <div class="card-sub" id="stressSub">Deepest adverse 1m / 5m wicks over 30 days · how many fit before liquidation</div>
+          </div>
+          <span class="tag" id="stressTag">DEMO WICKS</span>
+        </div>
+        <div class="session" id="session"></div>
+        <div class="stress" id="stress"></div>
+      </div>
+
+      <div class="card stops-card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Stop-loss sanity &amp; ADL</div>
+            <div class="card-sub">Does the stop fire before liquidation? · auto-deleverage queue (1–5 lights)</div>
+          </div>
+          <span class="tag tag-ro" title="LiqGuard reads open orders; it never places or edits them">READ-ONLY ORDERS</span>
+        </div>
+        <div class="stops" id="stops"></div>
+      </div>
+    </section>
+
     <section class="row-rescue">
       <div class="card rescue-card" id="rescueCard">
         <div class="card-head">
@@ -154,9 +188,11 @@
         <div class="card-head">
           <div>
             <div class="card-title">Alert timeline</div>
-            <div class="card-sub">Three-tier + pre-funding alerts · same events as Telegram</div>
+            <div class="card-sub">Adaptive tiers, stop-loss, ADL, pre-funding and wake-up reminders · same events as Telegram</div>
           </div>
           <div class="tier-counts">
+            <span class="tc tc-stop" title="Stop-loss"><i></i><b id="cntStop">0</b></span>
+            <span class="tc tc-adl" title="ADL"><i></i><b id="cntAdl">0</b></span>
             <span class="tc tc-funding" title="Pre-funding"><i></i><b id="cntFunding">0</b></span>
             <span class="tc tc-warning" title="Warning"><i></i><b id="cntWarning">0</b></span>
             <span class="tc tc-critical" title="Critical"><i></i><b id="cntCritical">0</b></span>

@@ -909,7 +909,7 @@ class MarketSimulation:
                     "escalation_reminder", ack.symbol,
                     f"{event['urgency']} {n}/{ack.max_reminders}: {ack.severity} alert unacknowledged for {minutes:.0f} demo min",
                 )
-            if not self.escalation.pending_for(self.owner_id) and not self.is_running:
+            if not self.escalation.active_for(self.owner_id) and not self.is_running:
                 return
 
     async def acknowledge(self, ack_id: str, source: str = "web") -> Optional[dict]:
