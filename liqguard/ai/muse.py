@@ -176,15 +176,18 @@ class MetaLLMClient:
         self,
         position: Position,
         advice: ActionableAdvice,
-        language: str = "en"
+        language: str = "en",
+        distance_pct: Optional[float] = None,
+        severity: Optional[str] = None,
     ) -> dict:
         """
         Generate explanation for pre-computed advice using LLM.
 
-        Numbers come from advice (deterministic), LLM only explains.
+        Numbers come from advice (deterministic), LLM only explains. `distance_pct` and
+        `severity` are the engine's (true liquidation, adaptive tiers) when known.
         """
         if self._use_mock:
-            return self._mock_explain_advice(position, advice, language)
+            return self._mock_explain_advice(position, advice, language, distance_pct, severity)
 
         system_prompt = self._get_advice_system_prompt(language)
 
@@ -259,23 +262,19 @@ Response format:
         self,
         position: Position,
         advice: ActionableAdvice,
-        language: str
+        language: str,
+        distance_pct: Optional[float] = None,
+        known_severity: Optional[str] = None,
     ) -> dict:
         """Generate deterministic mock explanation."""
-        distance = position.distance_to_liquidation_pct
+        distance = position.distance_to_liquidation_pct if distance_pct is None else distance_pct
 
-        if distance <= 5:
-            severity = "emergency"
-            urgency = "immediate"
-        elif distance <= 10:
-            severity = "critical"
-            urgency = "high"
-        elif distance <= 20:
-            severity = "warning"
-            urgency = "medium"
-        else:
-            severity = "safe"
-            urgency = "none"
+        if known_severity is None:
+            known_severity = (
+                "emergency" if distance <= 5 else "critical" if distance <= 10 else "warning" if distance <= 20 else "safe"
+            )
+        severity = known_severity
+        urgency = {"emergency": "immediate", "critical": "high", "warning": "medium"}.get(severity, "none")
 
         if language == "zh-TW":
             if severity == "emergency":
@@ -720,7 +719,8 @@ Question: {question}"""
         advice = AdviceCalculator.calculate_margin_to_add(position)
         if margin_to_safety and margin_to_safety > 0:
             advice = dataclasses.replace(advice, margin_to_add_usd=margin_to_safety, estimated_cost_usd=margin_to_safety)
-        result = await self.explain_risk_with_advice(position, advice, language)
+        level = getattr(severity, "value", severity)
+        result = await self.explain_risk_with_advice(position, advice, language, distance_pct=distance_pct, severity=level)
         return result.get("explanation", AdviceCalculator.format_advice_text(advice, language))
 
     async def get_structured_risk_assessment(self, alert: Alert) -> dict:
