@@ -9,20 +9,17 @@ import logging
 import sys
 from typing import Optional
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-from liqguard.alerts import EscalationService, PositionMonitor
 from liqguard.config import Settings
 from liqguard.core import AppContext
 from liqguard.logsafe import install_log_redaction
 from liqguard.storage import EncryptedStorage, EncryptionKeyError
-from liqguard.telegram import BotHandlers, TelegramNotifier, attach_bridges
+from liqguard.telegram.app import wire_bot
 from liqguard.telegram.polling import make_session, polling_kwargs
-from liqguard.telegram.ui import build_ui
 
 logger = logging.getLogger("liqguard")
 
@@ -92,26 +89,9 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
         except Exception as e:
             logger.warning("Could not read bot username (Telegram Login Widget disabled): %s", type(e).__name__)
 
-    ui = build_ui(ctx)
-    ctx.simulations.on_create(attach_bridges(bot, ui.alert_markup))
-
-    dp = Dispatcher(storage=MemoryStorage())
-    ui.register(dp)
-    BotHandlers(ctx).register(dp, bot)
-    await ui.set_commands(bot)
-
-    notifier = TelegramNotifier(bot, ui.alert_markup)
-    escalation = EscalationService(notifier, ctx.escalations)
-    monitor = PositionMonitor(
-        users=ctx.storage.get_all_users_with_bindings,
-        positions=ctx.positions.snapshot_for,
-        notifier=notifier,
-        alert_manager=ctx.alerts,
-        explainer=ctx.llm,
-        poll_interval=settings.poll_interval,
-        prefunding_lead_minutes=settings.prefunding_lead_minutes,
-        escalation=escalation,
-    )
+    app = wire_bot(ctx, bot)
+    await app.ui.set_commands(bot)
+    dp, escalation, monitor = app.dispatcher, app.escalation, app.monitor
 
     dashboard_server = None
     if settings.dashboard_enabled:
