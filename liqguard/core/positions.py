@@ -58,8 +58,10 @@ class PositionService:
         wicks: Optional[WickService] = None,
         low_liquidity_hours: Optional[tuple[int, int]] = None,
         stop_buffer_pct: Optional[float] = None,
+        demo_seed: Optional[int] = None,
     ):
         self.simulations = simulations
+        self.demo_seed = demo_seed
         self._adapter_factory = adapter_factory
         self.market = market
         self.fees = fees or FeeSchedule()
@@ -72,7 +74,7 @@ class PositionService:
     def demo_adapter(self, user_id: int, scenario: Optional[str] = None) -> DemoAdapter:
         adapter = self._demo.get(user_id)
         if adapter is None:
-            adapter = self._demo[user_id] = DemoAdapter(scenario or "normal")
+            adapter = self._demo[user_id] = DemoAdapter(scenario or "normal", seed=self.demo_seed)
         elif scenario:
             adapter.set_scenario(scenario)
         return adapter

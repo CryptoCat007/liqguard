@@ -44,6 +44,7 @@ SYMBOL_LABEL = re.compile(r"^\W*[A-Z0-9]{2,12}(USDT)?\b")
 NEUTRAL_LABELS = {v for k, v in catalog(EN).items() if k.startswith("kb.") and catalog(ZH).get(k) == v}
 SETTLE = 0.4
 QUIET_CHECKS = 4
+DEMO_SEED = 7
 SIM_OPTIONS = {"tick_interval": 0.03, "escalation_seconds_per_minute": 0.002}
 
 
@@ -93,6 +94,7 @@ class Session:
         storage = EncryptedStorage(db_path=settings.db_path, encryption_key=EncryptedStorage.generate_key())
         self.ctx = await AppContext.create(settings, storage=storage, llm=MetaLLMClient(use_mock=True),
                                            simulation_options=dict(SIM_OPTIONS), wicks=WickService(sources=[]))
+        self.ctx.positions.demo_seed = DEMO_SEED
         self.tg = FakeTelegram.create(self.ctx)
         self.tg.app.ui.services.binding = BindingService(
             self.ctx.storage, binance_factory=ReadOnlyKeyAdapter, hyperliquid_factory=ReadOnlyKeyAdapter,
