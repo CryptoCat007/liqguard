@@ -10,7 +10,7 @@ from liqguard.logsafe import REDACTED, RedactingFilter, redact
 
 PACKAGE = Path(__file__).resolve().parents[1]
 FRAMEWORKS = {"aiogram", "fastapi", "starlette", "uvicorn"}
-CORE_PACKAGES = ["models", "risk", "ai", "exchanges", "alerts", "protect", "simulation", "storage", "auth", "core"]
+CORE_PACKAGES = ["i18n", "models", "risk", "ai", "exchanges", "alerts", "protect", "simulation", "storage", "auth", "core"]
 
 
 def module_name(path: Path) -> str:
