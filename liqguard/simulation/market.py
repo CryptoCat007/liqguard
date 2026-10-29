@@ -273,8 +273,10 @@ class MarketSimulation:
         clock_start: Optional[datetime] = None,
         escalation_seconds_per_minute: float = ESCALATION_SECONDS_PER_MINUTE,
         scenario: Optional[str] = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.llm = llm_client
+        self.clock = clock
         self.scenario = DEFAULT_SCENARIO if scenario is None else scenario
         self.owner_id = owner_id
         self.threshold = threshold or UserThreshold()
@@ -294,6 +296,7 @@ class MarketSimulation:
         self.escalation = EscalationTracker()
         self._protection_cache: dict[tuple, PositionProtection] = {}
         self._escalation_task: Optional[asyncio.Task] = None
+        self._reminder_lock = asyncio.Lock()
         self.steps = steps
         self.tick_interval = tick_interval
         self.seed = seed
@@ -747,7 +750,7 @@ class MarketSimulation:
         """End every pending wake-up reminder of this demo now (✅ / 😴 / Dismiss / ⏹ Stop demo, or the run ending)."""
         await self._stop_escalation()
         pending = self.escalation.pending_for(self.owner_id)
-        now = time.monotonic()
+        now = self.clock()
         for ack in pending:
             self.escalation.acknowledge(self.owner_id, ack.id, now)
         if pending:
@@ -877,6 +880,7 @@ class MarketSimulation:
             return
         await self._check_prefunding()
         await self._check_alerts()
+        await self._send_due_reminders()
         await self._check_protection()
         await self._check_portfolio()
 
@@ -1157,7 +1161,7 @@ class MarketSimulation:
             return
         text = f"{level.upper()} alert: {pos.symbol} {pos.distance_to_liquidation_pct:.1f}% from liquidation"
         ack = self.escalation.open(
-            self.owner_id, pos.venue.value, pos.symbol, level, text, time.monotonic(),
+            self.owner_id, pos.venue.value, pos.symbol, level, text, self.clock(),
             interval_seconds=t.escalation_interval_minutes * self.escalation_seconds_per_minute,
             max_reminders=t.escalation_max_reminders, distance_pct=pos.distance_to_liquidation_pct,
             meta={"alert_id": alert["id"]},
@@ -1169,13 +1173,20 @@ class MarketSimulation:
             self._escalation_task = asyncio.create_task(self._escalation_loop())
 
     async def _escalation_loop(self) -> None:
+        """Paces reminders between steps on the clock; every step also sends the ones already due."""
         tick = max(0.05, min(0.25, self.escalation_seconds_per_minute / 4))
         while True:
             await asyncio.sleep(tick)
-            now = time.monotonic()
+            await self._send_due_reminders()
+            if self.muted or (not self.escalation.active_for(self.owner_id) and not self.is_running):
+                return
+
+    async def _send_due_reminders(self) -> None:
+        async with self._reminder_lock:
+            now = self.clock()
             for ack in self.escalation.due(now):
                 if self.muted:
-                    break
+                    return
                 n = ack.reminders_sent + 1
                 minutes = (now - ack.opened_at) / self.escalation_seconds_per_minute
                 event = {
@@ -1202,12 +1213,10 @@ class MarketSimulation:
                     "escalation_reminder", ack.symbol,
                     f"{event['urgency']} {n}/{ack.max_reminders}: {ack.severity} alert unacknowledged for {minutes:.0f} demo min",
                 )
-            if self.muted or (not self.escalation.active_for(self.owner_id) and not self.is_running):
-                return
 
     async def snooze(self, ack_id: str, minutes: float = 30, source: str = "web") -> Optional[dict]:
         """Hold reminders for one alert for `minutes` demo minutes."""
-        ack = self.escalation.snooze(self.owner_id, ack_id, time.monotonic() + minutes * self.escalation_seconds_per_minute)
+        ack = self.escalation.snooze(self.owner_id, ack_id, self.clock() + minutes * self.escalation_seconds_per_minute)
         if ack is None:
             return None
         await self._add_audit("alert_snoozed", ack.symbol, f"reminders paused for {minutes:g} demo min from {source}", source)
@@ -1216,7 +1225,7 @@ class MarketSimulation:
 
     async def acknowledge(self, ack_id: str, source: str = "web") -> Optional[dict]:
         """The owner tapped "I'm awake": stop reminders for that alert and mute the rest of this demo."""
-        ack = self.escalation.acknowledge(self.owner_id, ack_id, time.monotonic())
+        ack = self.escalation.acknowledge(self.owner_id, ack_id, self.clock())
         if ack is None:
             return None
         event = {

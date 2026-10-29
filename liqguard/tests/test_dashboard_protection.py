@@ -16,6 +16,11 @@ from .conftest import first_pending_ack, until
 
 CSRF = {"X-LiqGuard-CSRF": "1"}
 ALICE, BOB = 1001, 2002
+# Default script, 2-minute reminder interval, one demo minute per step: BTC turns critical at step 24.
+EXPECTED_REMINDERS = [
+    ("BTCUSDT", 1), ("BTCUSDT", 2), ("BTCUSDT", 3), ("SOLUSDT", 1), ("ETH", 1), ("BTCUSDT", 1),
+    ("SOLUSDT", 2), ("ETH", 2), ("BTCUSDT", 2), ("ETH", 3), ("BTCUSDT", 3), ("SOLUSDT", 1),
+]
 
 
 @pytest.fixture
@@ -80,13 +85,28 @@ class TestDemoAck:
         assert client.post("/api/demo/ack", json={"ack_id": bad}, headers=CSRF).status_code == 422
 
     def test_reminders_escalate_and_reach_the_snapshot(self, client, sim):
+        sim.clock = lambda: sim.step * sim.escalation_seconds_per_minute
         run_to_end(client, sim)
-        for _ in range(200):
-            if sim.escalation_log:
-                break
-            client.portal.call(asyncio.sleep, 0.02)
         log = client.get("/api/demo/snapshot").json()["escalation_log"]
-        assert log and log[0]["reminder"] == 1 and "I'm awake" in log[0]["text"]
+        assert [(e["symbol"], e["reminder"]) for e in log] == EXPECTED_REMINDERS
+        assert log[0]["severity"] == "critical" and "I'm awake" in log[0]["text"]
+        assert log[0]["minutes_since_alert"] == 2.0
+        assert log == sim.escalation_log
+
+    async def test_concurrent_reminder_passes_send_each_reminder_once(self):
+        sim = MarketSimulation(MetaLLMClient(use_mock=True), tick_interval=0, escalation_seconds_per_minute=0.01)
+        now = [0.0]
+        sim.clock = lambda: now[0]
+        sim.subscribe("slow-channel", lambda event: asyncio.sleep(0.01))
+        for i, symbol in enumerate(("BTCUSDT", "SOLUSDT", "ETH")):
+            pos = next(p for p in sim.positions if p.symbol == symbol)
+            sim._open_escalation("critical", pos, {"id": f"alert_{i}"})
+        before = len(sim.escalation_log)
+        now[0] = 1.0
+        await asyncio.gather(*(sim._send_due_reminders() for _ in range(5)))
+        sent = [(e["symbol"], e["reminder"]) for e in sim.escalation_log[before:]]
+        assert sorted(sent) == [("BTCUSDT", 1), ("ETH", 1), ("SOLUSDT", 1)]
+        await sim.silence()
 
 
 @pytest.fixture
