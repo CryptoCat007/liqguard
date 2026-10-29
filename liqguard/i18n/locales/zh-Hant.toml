@@ -231,6 +231,12 @@ LiqGuard 盯住你的永續合約倉位，在被強平之前提醒你，並算�
 指令：/menu · /positions · /risk · /demo · /settings · /dashboard · /stopdemo · /lang"""
 
 [kb]
+risk_rescue = "🛟 {symbol} 救倉選項"
+risk_rescue_first = "🎯 先救 {symbol}"
+risk_add_margin = "💰 為 {symbol} 追加 ${amount}"
+risk_details = "📋 倉位明細"
+risk_refresh = "🔄 重新整理"
+risk_back = "📊 回到總覽"
 back_menu = "⬅️ 返回主選單"
 positions = "📊 我的倉位"
 triage = "🚨 先處理哪個"
@@ -426,6 +432,7 @@ hyperliquid_ok = "✅ 已綁定 Hyperliquid 錢包 {hint}（只讀取公開資�
 private_only = "🔒 看板連結是個人專屬的，請在與 LiqGuard 的私訊中點「🖥️ 網頁看板」。"
 disabled = "🖥️ 這個 LiqGuard 沒有啟用網頁看板，所有功能都可以在這裡使用。"
 link = "🖥️ 你的專屬 LiqGuard 看板\n\n{url}\n\n• 只能使用一次，{minutes} 分鐘內有效\n• 只會顯示你自己的倉位、警報與紀錄\n• 請勿分享：連結被使用前，任何人都能用它登入成你\n• 輸入 /dashboard revoke 可登出所有裝置"
+revoked = "🔒 已登出所有裝置上的看板，尚未使用的登入連結也已失效。"
 
 [demo]
 not_running = "⏹ 目前沒有進行中的 Demo，不會再傳送任何訊息。"

@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from liqguard.alerts import DEMO_VENUE
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.binding import BindingService
 from liqguard.core.positions import LABEL_SIMULATION
@@ -144,41 +145,45 @@ class UIServices:
         await self.ctx.storage.set_demo_mode(user_id, enabled)
         if enabled and scenario:
             self.ctx.positions.demo_adapter(user_id, scenario)
+            self.ctx.demo_alerts.open(user_id)
         if not enabled:
             self.ctx.positions.drop_demo(user_id)
+            await self.ctx.mute_demo(user_id, source="telegram")
 
     async def acknowledge(self, user_id: int, ack_id: str) -> Optional[tuple[str, bool]]:
         """(symbol, is_demo) of the caller's own acknowledged alert (live monitor first, then their simulation).
-        A live position stays silenced until it materially worsens; a demo alert mutes the rest of that demo."""
+        A live position stays silenced until it materially worsens; any demo alert mutes the whole demo."""
         ack = self.ctx.escalations.acknowledge(user_id, ack_id, time.time())
         if ack is not None:
+            if ack.venue == DEMO_VENUE:
+                await self.ctx.mute_demo(user_id, source="telegram")
+                return ack.symbol, True
             return ack.symbol, False
         sim = self.ctx.simulations.get(user_id)
         event = await sim.acknowledge(ack_id, source="telegram") if sim is not None else None
-        return (event["symbol"], True) if event else None
+        if event is None:
+            return None
+        await self.ctx.mute_demo(user_id, source="telegram")
+        return event["symbol"], True
 
     async def snooze(self, user_id: int, ack_id: str, minutes: float = 30) -> Optional[tuple[str, bool]]:
-        """(symbol, is_demo). A live alert is held for `minutes`; a demo alert mutes the rest of that demo."""
+        """(symbol, is_demo). A live alert is held for `minutes`; any demo alert mutes the whole demo."""
         ack = self.ctx.escalations.snooze(user_id, ack_id, time.time() + minutes * 60)
         if ack is not None:
+            if ack.venue == DEMO_VENUE:
+                await self.ctx.mute_demo(user_id, source="telegram")
+                return ack.symbol, True
             return ack.symbol, False
         sim = self.ctx.simulations.get(user_id)
-        if sim is None:
+        event = await sim.snooze(ack_id, minutes, source="telegram") if sim is not None else None
+        if event is None:
             return None
-        symbol = sim.pending_symbol(ack_id)
-        if symbol is None:
-            return None
-        await sim.mute(source="telegram")
-        return symbol, True
+        await self.ctx.mute_demo(user_id, source="telegram")
+        return event["symbol"], True
 
     async def stop_demo(self, user_id: int) -> bool:
-        """End the caller's demo and all its reminders now; True if one was running."""
-        sim = self.ctx.simulations.get(user_id)
-        if sim is None:
-            return False
-        running = sim.is_running
-        await sim.stop(source="telegram")
-        return running
+        """End the caller's demo — simulation, demo-book alerts and every demo reminder — now; True if any was active."""
+        return await self.ctx.mute_demo(user_id, source="telegram", stop=True)
 
     async def dashboard_link(self, user_id: int) -> Optional[tuple[str, int]]:
         """(one-time URL, minutes valid), or None when the dashboard is not enabled."""

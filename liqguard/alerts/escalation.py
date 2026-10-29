@@ -22,11 +22,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from liqguard.i18n import EN, t
+from liqguard.models import Venue
 
 logger = logging.getLogger(__name__)
 
 ESCALATING = ("critical", "emergency")
 ACK_PREFIX = "ack:"
+DEMO_VENUE = Venue.DEMO.value
 
 
 @dataclass
@@ -228,6 +230,13 @@ class EscalationTracker:
         self._silenced.pop((user_id, venue, symbol), None)
         return self._pending.pop((user_id, venue, symbol), None)
 
+    def acknowledge_venue(self, user_id: Optional[int], venue: str, now: float) -> int:
+        """Acknowledge every pending alert of this owner on one venue (e.g. the whole demo book)."""
+        acks = [a for a in self.pending_for(user_id) if a.venue == venue]
+        for ack in acks:
+            self.acknowledge(user_id, ack.id, now)
+        return len(acks)
+
     def pending_for(self, user_id: Optional[int]) -> list[PendingAck]:
         """Unacknowledged alerts, including ones whose reminders hit the cap (still acknowledgeable)."""
         return [a for a in self._pending.values() if a.user_id == user_id]
@@ -278,7 +287,8 @@ class EscalationService:
             lang = self.languages.get(ack.user_id, EN)
             text = reminder_text(ack, n, (now - ack.opened_at) / 60, lang=lang)
             try:
-                await self.notifier.notify(ack.user_id, text, actions=[ack_action(ack, lang), rescue_action_for(ack, lang)], lang=lang)
+                await self.notifier.notify(ack.user_id, text, actions=[ack_action(ack, lang), rescue_action_for(ack, lang)],
+                                           lang=lang, demo=ack.venue == DEMO_VENUE)
             except Exception as e:
                 logger.error("Escalation reminder for user %s failed: %s", ack.user_id, type(e).__name__)
                 continue

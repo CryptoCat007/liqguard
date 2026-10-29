@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from liqguard.ai import MetaLLMClient
-from liqguard.alerts import AlertManager, EscalationTracker
+from liqguard.alerts import DEMO_VENUE, AlertManager, DemoAlertWindow, EscalationTracker
 from liqguard.auth import LoginLinkService, SessionSigner
 from liqguard.config import Settings
 from liqguard.protect import (
@@ -40,6 +41,7 @@ class AppContext:
     fees: FeeSchedule
     wicks: WickService
     escalations: EscalationTracker
+    demo_alerts: DemoAlertWindow = field(default_factory=DemoAlertWindow)
 
     @classmethod
     async def create(
@@ -106,6 +108,25 @@ class AppContext:
             wicks=wicks,
             escalations=EscalationTracker(),
         )
+
+    async def mute_demo(self, user_id: int, source: str, stop: bool = False) -> bool:
+        """
+        The owner has seen their demo (✅ / 😴 / Dismiss, or ⏹ / /stopdemo with `stop`): no further demo
+        message of any kind — simulation alerts, advice and reminders, and the demo book's monitor alerts
+        and reminders. `stop` also ends a running simulation (otherwise its prices keep ticking silently).
+        True if anything was still active.
+        """
+        active = self.demo_alerts.close(user_id)
+        active = self.escalations.acknowledge_venue(user_id, DEMO_VENUE, time.time()) > 0 or active
+        sim = self.simulations.get(user_id)
+        if sim is not None:
+            running = sim.is_running
+            if stop:
+                await sim.stop(source=source)
+            else:
+                await sim.mute(source=source)
+            active = active or running
+        return active
 
     def dashboard_login_url(self, raw_token: str) -> str:
         return f"{self.settings.dashboard_url}/auth/login?token={raw_token}"

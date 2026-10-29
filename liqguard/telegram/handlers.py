@@ -15,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from liqguard.ai import get_news_stub
-from liqguard.alerts import ACK_PREFIX
+from liqguard.alerts import ACK_PREFIX, DEMO_VENUE
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.positions import LABEL_SIMULATION
 from liqguard.core.user_settings import apply_setting as apply_user_setting
@@ -438,23 +438,23 @@ class BotHandlers:
                 text += f"\n\n**{pos.symbol} liquidation & funding · stress test**\n" + "\n".join(extra)
                 if riskiest.severity is not None:
                     buttons.append([InlineKeyboardButton(
-                        text=f"🛟 Rescue options for {riskiest.symbol}", callback_data=self._rescue_callback(snapshot, pos),
+                        text=t(user.language, "kb.risk_rescue", symbol=riskiest.symbol), callback_data=self._rescue_callback(snapshot, pos),
                     )])
         top = insights.top
         if top is not None and (riskiest is None or top.symbol != riskiest.symbol):
             pos = next((p for p in snapshot.positions if p.symbol == top.symbol and p.venue.value == top.venue), None)
             if pos is not None:
                 buttons.insert(0, [InlineKeyboardButton(
-                    text=f"🎯 Rescue {top.symbol} first", callback_data=self._rescue_callback(snapshot, pos),
+                    text=t(user.language, "kb.risk_rescue_first", symbol=top.symbol), callback_data=self._rescue_callback(snapshot, pos),
                 )])
         if riskiest and riskiest.margin_advice:
             buttons.append([InlineKeyboardButton(
-                text=f"💰 Add ${riskiest.margin_advice.margin_to_add_usd:.0f} to {riskiest.symbol}",
+                text=t(user.language, "kb.risk_add_margin", amount=f"{riskiest.margin_advice.margin_to_add_usd:,.0f}", symbol=riskiest.symbol),
                 callback_data=f"action:propose:{riskiest.symbol}",
             )])
         buttons.append([
-            InlineKeyboardButton(text="📋 Detailed Positions", callback_data="risk:positions"),
-            InlineKeyboardButton(text="🔄 Refresh", callback_data="risk:refresh"),
+            InlineKeyboardButton(text=t(user.language, "kb.risk_details"), callback_data="risk:positions"),
+            InlineKeyboardButton(text=t(user.language, "kb.risk_refresh"), callback_data="risk:refresh"),
         ])
         if len(text) > 4000:
             text = text[:3900] + "\n\n... (truncated — see /dashboard for everything)"
@@ -543,7 +543,7 @@ class BotHandlers:
                     f"  Distance: {a.distance_to_liquidation_pct:.1f}% | PnL: ${pos.unrealized_pnl:,.2f}{lights}\n"
                 )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Back to Overview", callback_data="risk:refresh")],
+                [InlineKeyboardButton(text=t(user.language, "kb.risk_back"), callback_data="risk:refresh")],
             ])
             await callback.message.edit_text(response, parse_mode="Markdown", reply_markup=keyboard)
             await callback.answer()
@@ -556,11 +556,13 @@ class BotHandlers:
         user_id = callback.from_user.id
         lang = await self._lang(user_id)
         ack = self.ctx.escalations.acknowledge(user_id, ack_id, time.time())
-        symbol, demo = (ack.symbol, False) if ack else (None, False)
+        symbol, demo = (ack.symbol, ack.venue == DEMO_VENUE) if ack else (None, False)
         if ack is None:
             sim = self.simulations.get(user_id)
             event = await sim.acknowledge(ack_id, source="telegram") if sim is not None else None
             symbol, demo = (event["symbol"], True) if event else (None, False)
+        if demo:
+            await self.ctx.mute_demo(user_id, source="telegram")
         if symbol is None:
             await callback.answer(t(lang, "alerts.gone"))
             return
@@ -775,9 +777,7 @@ class BotHandlers:
         if scenario == "disable":
             await self.storage.set_demo_mode(user_id, False)
             self.positions.drop_demo(user_id)
-            sim = self.simulations.get(user_id)
-            if sim is not None:
-                await sim.stop(source="telegram")
+            await self.ctx.mute_demo(user_id, source="telegram", stop=True)
             await callback.message.edit_text(
                 "📊 Demo mode **disabled**.\n\nUse /positions to view your live positions.", parse_mode="Markdown"
             )
@@ -795,6 +795,7 @@ class BotHandlers:
             return
         await self.storage.set_demo_mode(user_id, True)
         self.positions.demo_adapter(user_id, scenario)
+        self.ctx.demo_alerts.open(user_id)
         await callback.message.edit_text(
             f"🎮 Demo mode **enabled** with **{scenario}** scenario.\n\n"
             "Use /positions to view simulated positions.\nUse /demo again to change scenario or start a simulation.",
@@ -821,9 +822,7 @@ class BotHandlers:
 
     async def callback_demo_control(self, callback: CallbackQuery) -> None:
         if callback.data.split(":")[1] == "stop":
-            sim = self.simulations.get(callback.from_user.id)
-            if sim is not None:
-                await sim.stop(source="telegram")
+            await self.ctx.mute_demo(callback.from_user.id, source="telegram", stop=True)
             lang = await self._lang(callback.from_user.id)
             try:
                 await callback.message.edit_reply_markup(reply_markup=None)
@@ -989,9 +988,9 @@ class BotHandlers:
         user_id = callback.from_user.id
 
         if kind == "dismiss":
-            sim = self.simulations.get(user_id)
-            if sim is not None:
-                await sim.mute(source="telegram")
+            user = await self.storage.get_user(user_id)
+            if self.simulations.get(user_id) is not None or (user is not None and user.is_demo_mode):
+                await self.ctx.mute_demo(user_id, source="telegram")
             await self._delete_quietly(callback.message)
             await callback.answer(t(await self._lang(user_id), "alerts.dismissed_toast"))
             return
@@ -1048,19 +1047,17 @@ class BotHandlers:
 
     async def cmd_dashboard(self, message: Message, command: Optional[CommandObject] = None) -> None:
         if message.chat.type != ChatType.PRIVATE:
-            await message.answer("🔒 Dashboard links are personal. Send /dashboard to me in a private chat.")
+            lang = message.from_user.language_code if message.from_user else None
+            await message.answer(t(lang, "dashboard.private_only"))
             return
         user = await self.get_or_create_user(message)
         arg = ((command.args if command else None) or "").strip().lower()
         if arg == "revoke":
             await self.storage.bump_session_epoch(user.telegram_id)
-            await message.answer("🔒 Signed out of the dashboard everywhere. Unused login links no longer work.")
+            await message.answer(t(user.language, "dashboard.revoked"))
             return
         if not self.ctx.settings.dashboard_login_available:
-            await message.answer(
-                "🖥 The web dashboard is not enabled on this LiqGuard instance. "
-                "Everything is available here in Telegram: /positions, /risk, /actions."
-            )
+            await message.answer(t(user.language, "dashboard.disabled"))
             return
 
         token = await self.ctx.login_links.create(user.telegram_id)
@@ -1068,14 +1065,11 @@ class BotHandlers:
         minutes = max(1, self.ctx.settings.login_link_ttl // 60)
         keyboard = None
         if url.startswith("https://"):
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Open my dashboard", url=url)]])
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=t(user.language, "kb.open_dashboard"), url=url)]]
+            )
         await message.answer(
-            "🖥 Your private LiqGuard dashboard\n\n"
-            f"{url}\n\n"
-            f"• Works once and expires in {minutes} min\n"
-            "• Shows only your positions, alerts and audit log\n"
-            "• Don't share it — anyone with the link can sign in as you until it's used\n"
-            "• /dashboard revoke signs out every device",
+            t(user.language, "dashboard.link", url=url, minutes=minutes),
             reply_markup=keyboard,
             parse_mode=None,
             disable_web_page_preview=True,

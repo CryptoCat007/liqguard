@@ -21,6 +21,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from fastapi.testclient import TestClient
 
 from liqguard.alerts import PositionMonitor
+from liqguard.i18n import EN, t
 from liqguard.web import create_app
 
 from .conftest import ALICE, BOB, fake_callback, fake_message
@@ -164,7 +165,7 @@ async def test_two_users_end_to_end(ctx, handlers, fsm):
     sent: list[tuple[int, str]] = []
 
     class Notifier:
-        async def notify(self, user_id: int, text: str, actions=None, lang=None) -> None:
+        async def notify(self, user_id: int, text: str, actions=None, lang=None, demo=False) -> None:
             sent.append((user_id, text))
 
     monitor = PositionMonitor(
@@ -236,7 +237,7 @@ async def test_dashboard_command_without_a_dashboard(ctx, handlers):
     ctx.settings = dataclasses.replace(ctx.settings, public_url=None, dashboard_enabled=False)
     message = fake_message(ALICE, "/dashboard")
     await handlers.cmd_dashboard(message, None)
-    assert "not enabled" in message.answer.call_args.args[0]
+    assert message.answer.call_args.args[0] == t(EN, "dashboard.disabled")
     assert "token=" not in message.answer.call_args.args[0]
 
 

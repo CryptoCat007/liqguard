@@ -23,6 +23,7 @@ from liqguard.risk import (
     stress_band,
 )
 
+from .demo_window import DemoAlertWindow
 from .escalation import ESCALATING, EscalationService, ack_action
 from .manager import AlertManager
 from .messages import (
@@ -52,8 +53,10 @@ Action = tuple[str, str]
 
 
 class Notifier(Protocol):
-    async def notify(self, user_id: int, text: str, actions: Optional[list[Action]] = None, lang: str = EN) -> None:
-        """Deliver `text` (and optional action buttons) to exactly one user; `lang` is the language `text` is in."""
+    async def notify(self, user_id: int, text: str, actions: Optional[list[Action]] = None, lang: str = EN,
+                     demo: bool = False) -> None:
+        """Deliver `text` (and optional action buttons) to exactly one user; `lang` is the language `text` is in,
+        `demo` marks an alert about the user's demo book (it gets a ⏹ Stop demo button)."""
 
 
 class BookSnapshotLike(Protocol):
@@ -140,6 +143,7 @@ class PositionMonitor:
         prefunding_lead_minutes: float = 30.0,
         escalation: Optional[EscalationService] = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        demo_window: Optional[DemoAlertWindow] = None,
     ):
         self._users = users
         self._positions = positions
@@ -157,6 +161,10 @@ class PositionMonitor:
         self._stress_band: dict[int, Optional[str]] = {}
         self._concentrated: dict[int, bool] = {}
         self.clock = clock
+        self.demo_window = demo_window
+
+    async def _notify(self, user: User, text: str, actions: Optional[list[Action]] = None) -> None:
+        await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language, demo=user.is_demo_mode)
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -197,6 +205,8 @@ class PositionMonitor:
         and informational messages wait (their state is left untouched so they
         fire once quiet hours end).
         """
+        if user.is_demo_mode and self.demo_window is not None and not self.demo_window.allows(user.telegram_id):
+            return 0
         quiet = user.threshold.in_quiet_hours(self.clock())
         result = await self._positions(user)
         if isinstance(result, list):
@@ -269,7 +279,7 @@ class PositionMonitor:
         actions = [rescue_action(position, lang)]
         severity = assessment.severity.value if assessment.severity else None
         self._open_escalation(user, position, severity, text, assessment.distance_to_liquidation_pct, actions)
-        await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language)
+        await self._notify(user, text, actions)
         return 1
 
     async def _send_triage(self, user: User, due: list, insights: PortfolioInsights) -> int:
@@ -285,7 +295,7 @@ class PositionMonitor:
         actions = [rescue_action(position, user.language)]
         self._open_escalation(user, position, assessment.severity.value if assessment.severity else None, text,
                               assessment.distance_to_liquidation_pct, actions)
-        await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language)
+        await self._notify(user, text, actions)
         return 1
 
     async def _check_portfolio(self, user: User, insights: PortfolioInsights) -> int:
@@ -296,7 +306,7 @@ class PositionMonitor:
         self._oversized[uid] = oversized
         if new:
             checks = [s.to_dict() for s in insights.oversized if (s.venue, s.symbol) in new]
-            await self.notifier.notify(uid, format_sizing_message(checks, lang=lang), lang=lang)
+            await self._notify(user, format_sizing_message(checks, lang=lang))
             sent += 1
         worst = insights.worst_stress()
         band = stress_band(worst.first_liquidation if worst else None)
@@ -306,8 +316,8 @@ class PositionMonitor:
         if worse or (flagged and not self._concentrated.get(uid, False)):
             data = insights.to_dict()
             comps = [c for c in data["comparisons"] if worst is None or c["symbol"] in worst.symbols]
-            await self.notifier.notify(uid, format_correlation_message(
-                worst.to_dict() if worst else None, data["concentration"], comps, band, lang=lang), lang=lang)
+            await self._notify(user, format_correlation_message(
+                worst.to_dict() if worst else None, data["concentration"], comps, band, lang=lang))
             sent += 1
         if worse or band is None:
             self._stress_band[uid] = band
@@ -332,8 +342,7 @@ class PositionMonitor:
             except Exception as e:
                 logger.error("Stop-loss explanation failed: %s", type(e).__name__)
         lang = user.language
-        await self.notifier.notify(user.telegram_id, format_stop_message(check.to_dict(), explanation, lang=lang),
-                                   actions=[rescue_action(position, lang)], lang=lang)
+        await self._notify(user, format_stop_message(check.to_dict(), explanation, lang=lang), [rescue_action(position, lang)])
         return 1
 
     async def _check_adl(self, user: User, position: Position, adl: dict) -> int:
@@ -341,9 +350,8 @@ class PositionMonitor:
         if self._adl_state.get(key, 0) >= adl["lights"]:
             return 0
         self._adl_state[key] = adl["lights"]
-        await self.notifier.notify(user.telegram_id, format_adl_message(
-            position.symbol, position.venue.value, position.side.value, adl, position.unrealized_pnl, lang=user.language),
-            lang=user.language)
+        await self._notify(user, format_adl_message(
+            position.symbol, position.venue.value, position.side.value, adl, position.unrealized_pnl, lang=user.language))
         return 1
 
     async def _check_prefunding(self, user: User, positions: list[Position], context: RiskContext) -> int:
@@ -366,9 +374,6 @@ class PositionMonitor:
                 continue
             self._prefunding_sent[key] = warning.settlement_time
             lang = user.language
-            await self.notifier.notify(
-                user.telegram_id, format_prefunding_message(warning.to_dict(), lang=lang),
-                actions=[rescue_action(position, lang)], lang=lang,
-            )
+            await self._notify(user, format_prefunding_message(warning.to_dict(), lang=lang), [rescue_action(position, lang)])
             sent += 1
         return sent

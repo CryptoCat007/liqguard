@@ -231,6 +231,12 @@ On an alert: 🚑 Handle this first opens the rescue sim, ✅ I'm awake stops wa
 Commands: /menu · /positions · /risk · /demo · /settings · /dashboard · /stopdemo · /lang"""
 
 [kb]
+risk_rescue = "🛟 Rescue options for {symbol}"
+risk_rescue_first = "🎯 Rescue {symbol} first"
+risk_add_margin = "💰 Add ${amount} to {symbol}"
+risk_details = "📋 Detailed positions"
+risk_refresh = "🔄 Refresh"
+risk_back = "📊 Back to overview"
 back_menu = "⬅️ Main menu"
 positions = "📊 My positions"
 triage = "🚨 What first"
@@ -426,6 +432,7 @@ hyperliquid_ok = "✅ Hyperliquid wallet {hint} connected (public data only)"
 private_only = "🔒 Dashboard links are personal. Tap 🖥️ Dashboard in your private chat with LiqGuard."
 disabled = "🖥️ The web dashboard isn't enabled on this LiqGuard instance; everything is available here."
 link = "🖥️ Your private LiqGuard dashboard\n\n{url}\n\n• Works once and expires in {minutes} min\n• Shows only your own positions, alerts and audit log\n• Don't share it: until it's used, anyone with the link can sign in as you\n• /dashboard revoke signs out every device"
+revoked = "🔒 Signed out of the dashboard everywhere. Unused login links no longer work."
 
 [demo]
 not_running = "⏹ No demo is running; nothing more will be sent."

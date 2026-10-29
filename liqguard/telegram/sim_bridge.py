@@ -244,14 +244,18 @@ class TelegramNotifier:
         self.bot = bot
         self.alert_markup = alert_markup
 
-    async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None, lang: str = EN) -> None:
+    async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None, lang: str = EN,
+                     demo: bool = False) -> None:
+        """Every demo message (alerts, info warnings and reminders alike) carries ⏹ Stop demo."""
+        actions = list(actions or [])
         keyboard = None
-        if actions and self.alert_markup is not None:
-            keyboard = self.alert_markup(user_id, actions, lang=lang)
-        if actions and keyboard is None:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=label, callback_data=data) for label, data in actions]
-            ])
+        if (actions or demo) and self.alert_markup is not None:
+            keyboard = self.alert_markup(user_id, actions, lang=lang, demo=demo)
+        if (actions or demo) and keyboard is None:
+            rows = [[InlineKeyboardButton(text=label, callback_data=data) for label, data in actions]] if actions else []
+            if demo:
+                rows.append([InlineKeyboardButton(text=t(lang, "kb.sim_stop"), callback_data=STOP_DEMO)])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
         try:
             await self.bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:

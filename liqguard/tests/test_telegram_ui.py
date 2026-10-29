@@ -767,7 +767,7 @@ class TestDemoClickThrough:
             assert handled == action and toast(cb)[0] != T(ERROR)
 
         cb, handled = await click(ui, ALICE, ui.signer(ALICE)("dx"), state)
-        assert handled == "dx" and shown(cb)[0].startswith(T("demo.not_running"))
+        assert handled == "dx" and shown(cb)[0].startswith(T("demo.stopped"))
         await click(ui, ALICE, ui.signer(ALICE)("ss", "escalation", "on"), state)
         assert (await ctx.storage.get_user(ALICE)).threshold.escalation_enabled
 

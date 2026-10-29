@@ -1,7 +1,9 @@
 """Per-user alert deduplication, the background position monitor and wake-up escalation."""
 
+from .demo_window import DEMO_ALERT_WINDOW_SECONDS, DemoAlertWindow
 from .escalation import (
     ACK_PREFIX,
+    DEMO_VENUE,
     ESCALATING,
     EscalationService,
     EscalationTracker,
@@ -38,6 +40,9 @@ from .monitor import (
 
 __all__ = [
     "ACK_PREFIX",
+    "DEMO_ALERT_WINDOW_SECONDS",
+    "DEMO_VENUE",
+    "DemoAlertWindow",
     "ESCALATING",
     "EscalationService",
     "EscalationTracker",
