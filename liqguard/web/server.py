@@ -7,8 +7,12 @@ FastAPI dashboard.
   connected exchanges, positions and protective-action audit log. Every
   handler derives the user id from the verified session cookie only.
 
-Read-only by design: no endpoint binds accounts or proposes, confirms or
-executes trades, and no credential is ever serialized.
+Read-only by design: no endpoint proposes, confirms or executes trades, and
+no credential is ever serialized. The only write paths are the signed-in
+user's own alert settings and self-serve binding (`/api/me/bindings/*`),
+which accepts read-only Binance keys (trade/withdraw permission rejected) or
+a Hyperliquid wallet address, stores them encrypted per user and answers
+with masked hints only.
 """
 
 from __future__ import annotations
@@ -30,6 +34,10 @@ from pydantic import BaseModel, Field
 from liqguard.ai import MetaLLMClient
 from liqguard.auth import SessionClaims
 from liqguard.core import AppContext
+from liqguard.core.binding import SECURITY_NOTE, BindingService
+from liqguard.core.position_tools import TOOLS, report
+from liqguard.core.user_settings import apply_setting, settings_dict
+from liqguard.models import User
 from liqguard.risk import (
     PortfolioAnalyzer,
     RescueSimulator,
@@ -52,6 +60,37 @@ class AckRequest(BaseModel):
 
 class ScenarioRequest(BaseModel):
     scenario: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z_]+$")
+
+
+class SettingRequest(BaseModel):
+    key: str = Field(..., min_length=1, max_length=16, pattern=r"^[a-z]+$")
+    value: str = Field(..., min_length=1, max_length=8, pattern=r"^[a-z0-9.\-]+$")
+
+
+class UnbindRequest(BaseModel):
+    venue: str = Field(..., pattern=r"^(binance|hyperliquid)$")
+    network: str = Field("mainnet", pattern=r"^(mainnet|testnet)$")
+    confirm: bool = False
+
+
+TOOL_PATTERN = "^(" + "|".join(TOOLS) + ")$"
+
+
+async def _credential_fields(request: Request, *names: str) -> list[str]:
+    """Read credential strings by hand: FastAPI's 422 errors would echo the submitted value back."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "請以 JSON 傳送")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "請以 JSON 傳送")
+    values = []
+    for name in names:
+        value = body.get(name)
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise HTTPException(400, "欄位缺少或格式不正確")
+        values.append(value)
+    return values
 
 WS_POLICY_VIOLATION = 1008
 
@@ -212,6 +251,18 @@ def create_app(
                 raise HTTPException(404, "No such position in this simulation")
             return JSONResponse(result)
 
+        @app.get(f"{prefix}/position-tool")
+        async def position_tool(symbol: str = Query(..., max_length=32), tool: str = Query(..., pattern=TOOL_PATTERN),
+                                sim: MarketSimulation = Depends(resolve)):
+            """救倉試算 / 插針壓測 / 止損檢查 / 資金費影響 for one simulated position (same text as the Telegram buttons)."""
+            position = next((p for p in sim.positions if p.symbol == symbol), None)
+            if position is None:
+                raise HTTPException(404, "No such position in this simulation")
+            context = sim.risk_context()
+            plan = sim.build_rescue_plan(symbol) if tool == "rescue" else None
+            return JSONResponse(report(tool, position, context, sim.protection(position, context).to_dict(),
+                                       plan.to_dict() if plan else None, demo=True))
+
         @app.post(f"{prefix}/simulate", dependencies=[Depends(require_csrf)])
         async def simulate(sim: MarketSimulation = Depends(guard)):
             started = await sim.start(source="web")
@@ -265,6 +316,87 @@ def create_app(
     add_simulation_routes("/api/demo", public_simulation, public_simulation)
     if ctx is not None:
         add_simulation_routes("/api/me", my_simulation, my_simulation_configured)
+        app.state.binding = BindingService(ctx.storage, default_threshold=ctx.settings.default_threshold)
+
+        async def own_user(claims: SessionClaims):
+            user = await ctx.storage.get_user(claims.user_id)
+            if user is None:
+                user = User(telegram_id=claims.user_id, username=claims.username, threshold=ctx.settings.default_threshold())
+                await ctx.storage.save_user(user)
+            return user
+
+        @app.get("/api/me/settings")
+        async def my_settings(claims: SessionClaims = Depends(auth.required)):
+            """Same settings as Telegram 🔔 通知設定."""
+            return settings_dict((await own_user(claims)).threshold)
+
+        @app.post("/api/me/settings", dependencies=[Depends(require_csrf)])
+        async def update_my_settings(body: SettingRequest, claims: SessionClaims = Depends(auth.required)):
+            user = await own_user(claims)
+            updated = apply_setting(user.threshold, body.key, body.value)
+            if updated is None:
+                raise HTTPException(400, "無法套用：門檻必須維持 緊急 < 嚴重 < 警告，且數值在允許範圍內")
+            await ctx.storage.update_threshold(claims.user_id, updated)
+            sim = ctx.simulations.get(claims.user_id)
+            if sim is not None and not sim.is_running:
+                sim.configure(updated, user.language)
+            return settings_dict(updated)
+
+        @app.get("/api/me/bindings")
+        async def my_bindings(claims: SessionClaims = Depends(auth.required)):
+            return {"bindings": await app.state.binding.list(claims.user_id), "security_note": SECURITY_NOTE}
+
+        @app.post("/api/me/bindings/binance", dependencies=[Depends(require_csrf)])
+        async def bind_binance(request: Request, claims: SessionClaims = Depends(auth.required)):
+            """Read-only Binance key: checked with Binance, trade/withdraw permission rejected, stored encrypted."""
+            api_key, api_secret = await _credential_fields(request, "api_key", "api_secret")
+            result = await app.state.binding.bind_binance(claims.user_id, api_key, api_secret)
+            return JSONResponse(result.to_dict(), status_code=200 if result.ok else 400)
+
+        @app.post("/api/me/bindings/hyperliquid", dependencies=[Depends(require_csrf)])
+        async def bind_hyperliquid(request: Request, claims: SessionClaims = Depends(auth.required)):
+            (address,) = await _credential_fields(request, "address")
+            result = await app.state.binding.bind_hyperliquid(claims.user_id, address)
+            return JSONResponse(result.to_dict(), status_code=200 if result.ok else 400)
+
+        @app.post("/api/me/bindings/unbind", dependencies=[Depends(require_csrf)])
+        async def unbind(body: UnbindRequest, claims: SessionClaims = Depends(auth.required)):
+            if not body.confirm:
+                raise HTTPException(400, "請確認後再解除綁定")
+            if not await app.state.binding.unbind(claims.user_id, body.venue, body.network):
+                raise HTTPException(404, "這個綁定不存在")
+            return {"status": "unbound", "venue": body.venue, "network": body.network}
+
+        @app.post("/api/me/live/snooze", dependencies=[Depends(require_csrf)])
+        async def my_live_snooze(body: AckRequest, claims: SessionClaims = Depends(auth.required)):
+            """😴 Pause reminders for 30 minutes on one of the signed-in user's own live alerts."""
+            ack = ctx.escalations.snooze(claims.user_id, body.ack_id, time.time() + 30 * 60)
+            if ack is None:
+                raise HTTPException(404, "No pending reminder with that id")
+            return {"status": "snoozed", "symbol": ack.symbol, "minutes": 30}
+
+        @app.get("/api/me/position-tool/live")
+        async def my_live_position_tool(
+            symbol: str = Query(..., max_length=32),
+            venue: str = Query(..., max_length=16),
+            tool: str = Query(..., pattern=TOOL_PATTERN),
+            claims: SessionClaims = Depends(auth.required),
+        ):
+            """Quick actions for one of the signed-in user's own positions (demo book or exchange bindings)."""
+            user = await ctx.storage.get_user(claims.user_id)
+            if user is None:
+                raise HTTPException(404, "No such position")
+            snapshot = await ctx.positions.snapshot_for(user)
+            position = next((p for p in snapshot.positions if p.symbol == symbol and p.venue.value == venue), None)
+            if position is None:
+                raise HTTPException(404, "No such position")
+            c = snapshot.context
+            protection = position_protection(position, c, user.threshold).to_dict()
+            plan = None
+            if tool == "rescue":
+                plan = RescueSimulator(c.fees, user.threshold.safety_target_pct).simulate(
+                    position, c.account_for(position), c.funding_for(position), c.now).to_dict()
+            return JSONResponse(report(tool, position, c, protection, plan, demo=venue == "demo"))
 
         @app.get("/api/me/session")
         async def my_session(claims: SessionClaims = Depends(auth.required)):

@@ -363,12 +363,7 @@ function renderPositions(positions) {
       fundingDetail(p.funding),
       protectionChips(S.protection[sym]),
       insightChips(sym),
-      el("div", { class: "pos-actions" },
-        el("button", {
-          class: "mini-btn", type: "button", title: "Compare add margin, reduce and hedge",
-          onclick: (ev) => { ev.stopPropagation(); loadRescue(sym); },
-        }, "🛟 Rescue"),
-      ),
+      el("div", { class: "pos-actions" }, toolButtons(sym, p.venue, false)),
     );
     return node;
   }));
@@ -1517,6 +1512,7 @@ async function setupScope() {
   $("account").hidden = false;
   await refreshAccount();
   setInterval(refreshAccount, 30000);
+  setupAccountPanels();
   return true;
 }
 
@@ -1542,7 +1538,7 @@ async function refreshAccount() {
     el("span", {}, b.binding_type === "wallet" ? "wallet" : (b.permissions || []).join(" · ") || "api key"),
     el("span", { class: "hint" }, b.api_key || b.wallet_address || ""),
   )));
-  if (!data.bindings?.length) binds.append(empty("🔌", "No exchanges connected", "Use /bind in Telegram (read-only Binance key or Hyperliquid wallet)."));
+  if (!data.bindings?.length) binds.append(empty("🔌", "No exchanges connected", "在下方「🔑 綁定帳號」或 Telegram 主選單綁定（Binance 唯讀金鑰或 Hyperliquid 錢包）。"));
 
   $("accountPositionsLabel").textContent = data.label ? data.label.replace(/^📊\s*/, "") : "Positions";
   const box = $("accountPositions");
@@ -1555,7 +1551,8 @@ async function refreshAccount() {
       p.true_liquidation?.price && Math.abs(p.true_liquidation.price - p.liquidation_price) / (p.liquidation_price || 1) > 0.0005
         ? ` · true ${price(p.true_liquidation.price)}` : ""),
     el("span", { class: `d c-${tierFor(p.distance_to_liquidation_pct)}` }, pct(p.distance_to_liquidation_pct)),
-    el("button", { class: "mini-btn", type: "button", onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
+    el("button", { class: "mini-btn", type: "button", title: "Rescue simulator", onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
+    toolButtons(p.symbol, p.venue, true),
     protectionChips((data.protection || []).find((x) => x.symbol === p.symbol && x.venue === p.venue)),
     p.funding ? el("span", { class: "acct-fund" },
       `funding ${p.funding.rate_pct >= 0 ? "+" : ""}${p.funding.rate_pct.toFixed(4)}%/${p.funding.interval_hours}h · next ${duration(p.funding.minutes_to_settlement)} · `
@@ -1569,7 +1566,11 @@ async function refreshAccount() {
     box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${a.severity.toUpperCase()} · ${a.reminders_sent}/${a.max_reminders} reminders `,
       el("button", { class: "mini-btn ack-btn", type: "button", onclick: async () => {
         if (await postJson("/api/me/live/ack", { ack_id: a.id })) refreshAccount();
-      } }, "✅ I'm awake")));
+      } }, "✅ 我醒了"),
+      el("button", { class: "mini-btn", type: "button", onclick: async () => {
+        const res = await postJson("/api/me/live/snooze", { ack_id: a.id });
+        if (res) { toast("😴", "暫停提醒 30 分鐘", `${res.symbol} 的提醒暫停 30 分鐘。`, COLORS.text, `snooze-${a.id}`); refreshAccount(); }
+      } }, "😴 暫停提醒 30 分鐘")));
   }
 
   const acts = $("accountActions");
@@ -1609,6 +1610,204 @@ function accountInsights(ins) {
   return parts.length ? el("div", { class: "acct-insights" }, ...parts) : null;
 }
 
+/* ---------------- quick actions (same reports as the Telegram buttons) ---------------- */
+
+const TOOLS = [["rescue", "🛟 救倉試算"], ["wick", "🕯 插針壓測"], ["stop", "🛑 止損檢查"], ["funding", "💸 資金費影響"]];
+
+function toolButtons(symbol, venue, live) {
+  return el("div", { class: "tool-row", lang: "zh-Hant-TW" }, ...TOOLS.map(([tool, label]) => el("button", {
+    class: "mini-btn tool-btn", type: "button", "data-tool": tool,
+    onclick: (ev) => { ev.stopPropagation(); openTool(tool, symbol, venue, live); },
+  }, label)));
+}
+
+function toolLineClass(line) {
+  if (/^(⚠️|🛑|⛔)/.test(line)) return "tool-line warn";
+  if (/^(✅|💡)/.test(line)) return "tool-line good";
+  if (/^\s{2,}/.test(line)) return "tool-line indent";
+  return "tool-line";
+}
+
+async function openTool(tool, symbol, venue, live) {
+  const dlg = $("toolDialog");
+  const label = Object.fromEntries(TOOLS)[tool];
+  $("toolTitle").textContent = `${label} · ${symbol}`;
+  $("toolTabs").replaceChildren(...TOOLS.map(([t, l]) => el("button", {
+    class: `mini-btn${t === tool ? " active" : ""}`, type: "button", onclick: () => openTool(t, symbol, venue, live),
+  }, l)));
+  $("toolBody").replaceChildren(el("div", { class: "tool-line muted" }, "載入中…"));
+  if (!dlg.open) dlg.showModal();
+  const q = `symbol=${encodeURIComponent(symbol)}&tool=${tool}`;
+  const url = live ? `/api/me/position-tool/live?${q}&venue=${encodeURIComponent(venue)}` : `${API}/position-tool?${q}`;
+  try {
+    const r = await fetch(url, { credentials: "same-origin" });
+    if (r.status === 401) { toLogin(); return; }
+    if (r.status === 404) {
+      $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, "這個倉位已不存在（可能已平倉或模擬已結束）。"));
+      return;
+    }
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    $("toolTitle").textContent = data.title;
+    const body = data.lines.map((line) => line ? el("div", { class: toolLineClass(line) }, line) : el("div", { class: "tool-gap" }));
+    if (tool === "rescue") {
+      body.push(el("button", { class: "btn btn-ghost tool-more", type: "button", onclick: () => {
+        dlg.close();
+        if (live) loadLiveRescue(symbol, venue); else loadRescue(symbol);
+      } }, "📊 在救倉模擬器中比較"));
+    }
+    $("toolBody").replaceChildren(...body);
+  } catch (err) {
+    $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, "暫時無法載入，請稍後再試。"));
+  }
+}
+
+/* ---------------- 🔔 通知設定 & 🔑 綁定帳號 (signed-in only) ---------------- */
+
+const SETTING_META = {
+  warning: ["⚠️ 警告門檻", "%"], critical: ["🚨 嚴重門檻", "%"], emergency: ["🆘 緊急門檻", "%"],
+  interval: ["⏰ 提醒間隔", " 分鐘"], max: ["🔁 最多提醒", " 次"], quiet: ["🌙 勿擾時段", ""],
+};
+const TOGGLE_META = { escalation: "⏰ 喚醒提醒", adaptive: "📈 自適應門檻", stops: "🛑 止損檢查" };
+
+function quietText(v) {
+  if (!v || v === "off") return "關閉";
+  const [a, b] = String(v).split("-").map(Number);
+  return `${String(a).padStart(2, "0")}:00–${String(b).padStart(2, "0")}:00`;
+}
+
+async function sendJson(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: "POST", credentials: "same-origin",
+      headers: { ...CSRF_HEADERS, "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (r.status === 401) { toLogin(); return { ok: false }; }
+    const data = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data };
+  } catch (err) {
+    return { ok: false, status: 0, data: { detail: "無法連線到伺服器，請稍後再試。" } };
+  }
+}
+
+function panelMsg(id, text, ok) {
+  const box = $(id);
+  box.textContent = text || "";
+  box.className = `panel-msg${text ? (ok ? " ok" : " err") : ""}`;
+}
+
+async function refreshSettings() {
+  try {
+    const r = await fetch("/api/me/settings", { credentials: "same-origin" });
+    if (r.status === 401) { toLogin(); return; }
+    renderSettings(await r.json());
+  } catch (err) {
+    panelMsg("settingsMsg", "無法載入通知設定，請稍後再試。", false);
+  }
+}
+
+function renderSettings(cur) {
+  const rows = Object.entries(SETTING_META).map(([key, [label, unit]]) => {
+    const current = key === "quiet" ? (cur.quiet || "off") : cur[key];
+    const options = [...new Set([...(cur.presets[key] || []).map(String), String(current)])];
+    const select = el("select", { class: "field", "data-setting": key, "aria-label": label,
+      onchange: (ev) => saveSetting(key, ev.target.value) },
+      ...options.map((v) => {
+        const o = el("option", { value: v }, key === "quiet" ? quietText(v) : `${v}${unit}`);
+        if (v === String(current)) o.selected = true;
+        return o;
+      }));
+    return el("label", { class: "setting-row" }, el("span", {}, label), select);
+  });
+  const toggles = Object.entries(TOGGLE_META).map(([key, label]) => {
+    const box = el("input", { type: "checkbox", "data-setting": key, onchange: (ev) => saveSetting(key, ev.target.checked ? "on" : "off") });
+    box.checked = !!cur[key];
+    return el("label", { class: "toggle-row" }, box, el("span", {}, label));
+  });
+  $("settingsForm").replaceChildren(...rows, el("div", { class: "toggles" }, ...toggles),
+    el("div", { class: "panel-sub" }, `勿擾時段以 UTC${cur.quiet_utc_offset_hours >= 0 ? "+" : ""}${cur.quiet_utc_offset_hours}（台北時間）計算。`));
+}
+
+async function saveSetting(key, value) {
+  const res = await sendJson("/api/me/settings", { key, value });
+  if (res.ok) {
+    renderSettings(res.data);
+    panelMsg("settingsMsg", "✅ 已儲存，Telegram 也會套用同樣設定。", true);
+  } else {
+    panelMsg("settingsMsg", `❌ ${res.data?.detail || "無法套用這個設定"}`, false);
+    refreshSettings();
+  }
+}
+
+function bindingLabel(b) {
+  const venue = b.venue === "binance" ? "🟡 Binance" : "🟢 Hyperliquid";
+  return `${venue}${b.network === "testnet" ? " 測試網" : ""}`;
+}
+
+async function refreshBindings() {
+  let data;
+  try {
+    const r = await fetch("/api/me/bindings", { credentials: "same-origin" });
+    if (r.status === 401) { toLogin(); return; }
+    data = await r.json();
+  } catch (err) {
+    panelMsg("bindMsg", "無法載入綁定狀態，請稍後再試。", false);
+    return;
+  }
+  $("securityNote").textContent = data.security_note;
+  const list = $("bindList");
+  list.replaceChildren(...data.bindings.map((b) => el("div", { class: "binding" },
+    el("span", {}, bindingLabel(b)),
+    el("span", { class: "hint" }, b.api_key || b.wallet_address || ""),
+    el("button", { class: "mini-btn danger", type: "button", onclick: () => confirmUnbind(b) }, "🗑 解除綁定"),
+  )));
+  if (!data.bindings.length) list.append(empty("🔌", "尚未綁定", "選擇下方交易所開始綁定。"));
+}
+
+function confirmUnbind(b) {
+  const dlg = $("confirmDialog");
+  $("confirmText").textContent = `確定要解除 ${bindingLabel(b)}（${b.api_key || b.wallet_address || ""}）？解除後會刪除加密保存的金鑰／地址，並停止監控這個帳號。`;
+  $("confirmYes").onclick = async () => {
+    dlg.close();
+    const res = await sendJson("/api/me/bindings/unbind", { venue: b.venue, network: b.network || "mainnet", confirm: true });
+    panelMsg("bindMsg", res.ok ? `✅ 已解除 ${bindingLabel(b)} 的綁定，金鑰已刪除。` : `❌ ${res.data?.detail || "解除失敗"}`, res.ok);
+    refreshBindings();
+    refreshAccount();
+  };
+  $("confirmNo").onclick = () => dlg.close();
+  dlg.showModal();
+}
+
+function setupAccountPanels() {
+  document.querySelectorAll(".bind-tab").forEach((tab) => tab.addEventListener("click", () => {
+    document.querySelectorAll(".bind-tab").forEach((t) => {
+      const on = t === tab;
+      t.classList.toggle("active", on);
+      t.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    $("bindBinance").hidden = tab.dataset.venue !== "binance";
+    $("bindHyperliquid").hidden = tab.dataset.venue !== "hyperliquid";
+    panelMsg("bindMsg", "");
+  }));
+  const submit = (formId, path, fields) => $(formId).addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const form = ev.target;
+    const body = Object.fromEntries(fields.map((f) => [f, form.elements[f].value.trim()]));
+    form.reset();
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    panelMsg("bindMsg", "🔄 驗證中…", true);
+    const res = await sendJson(path, body);
+    button.disabled = false;
+    panelMsg("bindMsg", res.data?.message || res.data?.detail || (res.ok ? "✅ 已綁定" : "❌ 綁定失敗"), res.ok);
+    if (res.ok) { refreshBindings(); refreshAccount(); }
+  });
+  submit("bindBinance", "/api/me/bindings/binance", ["api_key", "api_secret"]);
+  submit("bindHyperliquid", "/api/me/bindings/hyperliquid", ["address"]);
+  refreshSettings();
+  refreshBindings();
+}
+
 async function bootstrap() {
   if (!(await setupScope())) return;
   try {
@@ -1634,6 +1833,10 @@ document.addEventListener("DOMContentLoaded", () => {
     await fetch("/auth/logout", { method: "POST", headers: CSRF_HEADERS, credentials: "same-origin" });
     location.assign("/");
   });
+  $("toolClose").addEventListener("click", () => $("toolDialog").close());
+  for (const id of ["toolDialog", "confirmDialog"]) {
+    $(id).addEventListener("click", (ev) => { if (ev.target === ev.currentTarget) ev.currentTarget.close(); });
+  }
   setInterval(() => { if (ws && ws.readyState === 1) ws.send("ping"); }, 25000);
   bootstrap();
 });

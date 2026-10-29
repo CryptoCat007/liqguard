@@ -75,6 +75,39 @@
           <div id="accountActions" class="audit scroll account-actions"></div>
         </div>
       </div>
+      <div class="account-grid account-grid-2" lang="zh-Hant-TW">
+        <div class="panel" id="settingsPanel">
+          <div class="account-label">🔔 通知設定 <span class="label-en">Alert settings</span></div>
+          <div class="panel-sub">與 Telegram「🔔 通知設定」同步：警示門檻、喚醒提醒、勿擾時段（嚴重／緊急警報仍會送達）。</div>
+          <div id="settingsForm" class="settings-form"></div>
+          <div class="panel-msg" id="settingsMsg" role="status"></div>
+        </div>
+        <div class="panel" id="bindPanel">
+          <div class="account-label">🔑 綁定帳號 <span class="label-en">Connect an exchange</span></div>
+          <div class="security-note" id="securityNote"></div>
+          <div id="bindList" class="bindings"></div>
+          <div class="bind-tabs" role="tablist">
+            <button class="mini-btn bind-tab active" type="button" data-venue="binance" role="tab" aria-selected="true">🟡 綁定 Binance</button>
+            <button class="mini-btn bind-tab" type="button" data-venue="hyperliquid" role="tab" aria-selected="false">🟢 綁定 Hyperliquid</button>
+          </div>
+          <form class="bind-form" id="bindBinance" autocomplete="off">
+            <ol class="bind-steps">
+              <li>登入 Binance →「API 管理」→ 建立 API（系統生成）</li>
+              <li>權限只勾 ✅「允許讀取 Enable Reading」；❌ 不要勾 合約交易、現貨與槓桿交易、提現、萬向劃轉</li>
+              <li>（建議）設定 IP 存取限制，然後貼上 Key 與 Secret</li>
+            </ol>
+            <input class="field" name="api_key" type="password" placeholder="API Key" autocomplete="off" spellcheck="false" required>
+            <input class="field" name="api_secret" type="password" placeholder="Secret Key" autocomplete="off" spellcheck="false" required>
+            <button class="btn btn-primary" type="submit">驗證並綁定（唯讀）</button>
+          </form>
+          <form class="bind-form" id="bindHyperliquid" autocomplete="off" hidden>
+            <ol class="bind-steps"><li>貼上錢包地址（0x 開頭、42 字元）。只讀取公開倉位資料，不需要任何金鑰。</li></ol>
+            <input class="field" name="address" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" required>
+            <button class="btn btn-primary" type="submit">綁定錢包</button>
+          </form>
+          <div class="panel-msg" id="bindMsg" role="status"></div>
+        </div>
+      </div>
     </section>
 
     <section class="wake card" id="wake" hidden aria-live="assertive">
@@ -290,9 +323,25 @@
 
     <footer class="foot">
       <span id="footScope">Public demo · simulated data only.</span>
-      Read-only view · no API keys or wallet secrets are sent to the browser · actions require confirmation in Telegram and run on testnet only.
+      Read-only view · API keys you bind are encrypted per user and never sent back to the browser (masked hints only) · actions require confirmation in Telegram and run on testnet only.
     </footer>
   </main>
+
+  <dialog class="tool-dialog" id="toolDialog" lang="zh-Hant-TW">
+    <div class="tool-head">
+      <div class="card-title" id="toolTitle"></div>
+      <button class="mini-btn" type="button" id="toolClose" aria-label="關閉">✕</button>
+    </div>
+    <div class="tool-tabs" id="toolTabs"></div>
+    <div class="tool-body" id="toolBody"></div>
+  </dialog>
+  <dialog class="tool-dialog confirm-dialog" id="confirmDialog" lang="zh-Hant-TW">
+    <div class="tool-body" id="confirmText"></div>
+    <div class="confirm-actions">
+      <button class="btn btn-ghost" type="button" id="confirmNo">取消</button>
+      <button class="btn btn-danger" type="button" id="confirmYes">確認解除</button>
+    </div>
+  </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 </body>
