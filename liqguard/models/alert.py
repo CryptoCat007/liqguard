@@ -102,6 +102,19 @@ class UserThreshold:
     risk_per_trade_pct: float = 2.0
     max_margin_pct: float = 25.0
 
+    # Quiet hours (local hours at `quiet_utc_offset_hours`, default Taipei): warning-tier and
+    # informational alerts are held back; critical and emergency alerts always go out.
+    quiet_hours_start: Optional[int] = None
+    quiet_hours_end: Optional[int] = None
+    quiet_utc_offset_hours: float = 8.0
+
+    def in_quiet_hours(self, now: datetime) -> bool:
+        if self.quiet_hours_start is None or self.quiet_hours_end is None or self.quiet_hours_start == self.quiet_hours_end:
+            return False
+        hour = (now.astimezone(timezone.utc).hour + now.minute / 60 + self.quiet_utc_offset_hours) % 24
+        start, end = self.quiet_hours_start, self.quiet_hours_end
+        return start <= hour < end if start < end else hour >= start or hour < end
+
     def get_severity_for_distance(self, distance_pct: float) -> Optional[AlertSeverity]:
         """Get alert severity based on distance to liquidation."""
         if distance_pct <= self.emergency_distance_pct:
@@ -130,6 +143,9 @@ class UserThreshold:
             "stop_loss_checks": self.stop_loss_checks,
             "risk_per_trade_pct": self.risk_per_trade_pct,
             "max_margin_pct": self.max_margin_pct,
+            "quiet_hours_start": self.quiet_hours_start,
+            "quiet_hours_end": self.quiet_hours_end,
+            "quiet_utc_offset_hours": self.quiet_utc_offset_hours,
         }
 
     @classmethod
@@ -151,4 +167,14 @@ class UserThreshold:
             stop_loss_checks=bool(data.get("stop_loss_checks", True)),
             risk_per_trade_pct=float(data.get("risk_per_trade_pct", 2.0)),
             max_margin_pct=float(data.get("max_margin_pct", 25.0)),
+            quiet_hours_start=_opt_hour(data.get("quiet_hours_start")),
+            quiet_hours_end=_opt_hour(data.get("quiet_hours_end")),
+            quiet_utc_offset_hours=float(data.get("quiet_utc_offset_hours", 8.0)),
         )
+
+
+def _opt_hour(value) -> Optional[int]:
+    try:
+        return None if value is None else int(value) % 24
+    except (TypeError, ValueError):
+        return None

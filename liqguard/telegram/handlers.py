@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import re
 import time
@@ -19,6 +18,7 @@ from liqguard.ai import get_news_stub
 from liqguard.alerts import ACK_PREFIX
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.positions import LABEL_SIMULATION
+from liqguard.core.user_settings import apply_setting as apply_user_setting
 from liqguard.exchanges import SCENARIOS, BinanceAdapter, HyperliquidAdapter
 from liqguard.models import MAINNET, TESTNET, ExchangeBinding, Position, Side, User
 from liqguard.risk import (
@@ -612,40 +612,7 @@ class BotHandlers:
     @staticmethod
     def apply_setting(threshold, key: str, value: str):
         """New `UserThreshold` with one setting changed, or None if the input is invalid."""
-        fields = {"escalation": "escalation_enabled", "adaptive": "adaptive_thresholds", "stops": "stop_loss_checks"}
-        try:
-            if key == "interval":
-                minutes = float(value)
-                if not 0.5 <= minutes <= 60:
-                    return None
-                return dataclasses.replace(threshold, escalation_interval_minutes=minutes)
-            if key == "max":
-                n = int(value)
-                if not 1 <= n <= 20:
-                    return None
-                return dataclasses.replace(threshold, escalation_max_reminders=n)
-            if key == "risk":
-                pct = float(value.rstrip("%"))
-                if not 0.1 <= pct <= 20:
-                    return None
-                return dataclasses.replace(threshold, risk_per_trade_pct=pct)
-            if key == "maxmargin":
-                pct = float(value.rstrip("%"))
-                if not 1 <= pct <= 100:
-                    return None
-                return dataclasses.replace(threshold, max_margin_pct=pct)
-        except ValueError:
-            return None
-        if key in fields:
-            current = getattr(threshold, fields[key])
-            if value == "toggle":
-                new = not current
-            elif value in ("on", "off"):
-                new = value == "on"
-            else:
-                return None
-            return dataclasses.replace(threshold, **{fields[key]: new})
-        return None
+        return apply_user_setting(threshold, key, value)
 
     async def _save_settings(self, user: User, threshold) -> None:
         user.threshold = threshold

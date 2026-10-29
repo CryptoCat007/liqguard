@@ -1143,6 +1143,14 @@ class MarketSimulation:
             if not self.escalation.active_for(self.owner_id) and not self.is_running:
                 return
 
+    async def snooze(self, ack_id: str, minutes: float = 30, source: str = "web") -> Optional[dict]:
+        """Hold reminders for one alert for `minutes` demo minutes."""
+        ack = self.escalation.snooze(self.owner_id, ack_id, time.monotonic() + minutes * self.escalation_seconds_per_minute)
+        if ack is None:
+            return None
+        await self._add_audit("alert_snoozed", ack.symbol, f"reminders paused for {minutes:g} demo min from {source}", source)
+        return {"ack_id": ack.id, "symbol": ack.symbol, "minutes": minutes, "source": source}
+
     async def acknowledge(self, ack_id: str, source: str = "web") -> Optional[dict]:
         """The owner tapped "I'm awake": stop reminders for that alert."""
         ack = self.escalation.acknowledge(self.owner_id, ack_id, time.monotonic())

@@ -42,11 +42,13 @@ class PendingAck:
     reminders_sent: int = 0
     distance_pct: Optional[float] = None
     acknowledged_at: Optional[float] = None
+    snoozed_until: Optional[float] = None
     meta: dict = field(default_factory=dict)
 
     @property
     def next_due(self) -> float:
-        return self.last_sent_at + self.interval_seconds
+        due = self.last_sent_at + self.interval_seconds
+        return max(due, self.snoozed_until) if self.snoozed_until is not None else due
 
     @property
     def exhausted(self) -> bool:
@@ -63,6 +65,7 @@ class PendingAck:
             "interval_seconds": self.interval_seconds,
             "distance_pct": None if self.distance_pct is None else round(self.distance_pct, 2),
             "acknowledged": self.acknowledged_at is not None,
+            "snoozed_until": self.snoozed_until,
             **self.meta,
         }
 
@@ -159,6 +162,17 @@ class EscalationTracker:
         self._forget(key)
         return ack
 
+    def snooze(self, user_id: Optional[int], ack_id: str, until: float) -> Optional[PendingAck]:
+        """Hold the owner's reminders for this alert until `until` (still pending; "I'm awake" still works)."""
+        key = self._superseded.get(ack_id)
+        if key is None:
+            key = next((k for k, a in self._pending.items() if a.id == ack_id), None)
+        ack = self._pending.get(key) if key is not None else None
+        if ack is None or ack.user_id != user_id:
+            return None
+        ack.snoozed_until = until
+        return ack
+
     def _forget(self, key: tuple) -> None:
         for old in [i for i, k in self._superseded.items() if k == key]:
             del self._superseded[old]
@@ -208,6 +222,9 @@ class EscalationService:
 
     def acknowledge(self, user_id: int, ack_id: str) -> Optional[PendingAck]:
         return self.tracker.acknowledge(user_id, ack_id, self.clock())
+
+    def snooze(self, user_id: int, ack_id: str, minutes: float = 30) -> Optional[PendingAck]:
+        return self.tracker.snooze(user_id, ack_id, self.clock() + minutes * 60)
 
     async def tick(self) -> int:
         now = self.clock()
