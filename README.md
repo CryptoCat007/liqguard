@@ -78,8 +78,9 @@ liqguard
 
 ### Using it as a user (end to end)
 
-1. Open the bot in Telegram and send **/start**.
-2. Send **/bind** and pick one:
+1. Open the bot in Telegram and send **/start**. You get the 🏠 主選單 button grid (see
+   [Telegram menu](#telegram-menu-主選單)); everything below is also reachable by tapping.
+2. Tap **🔑 綁定帳號** (or send **/bind**) and pick one:
    - **Binance**: create an API key with only *Enable Reading* ticked (no trading, no
      withdrawals; IP restriction recommended) and send the key, then the secret. Both
      messages are deleted right away. LiqGuard asks Binance what this key may do and
@@ -112,6 +113,45 @@ liqguard
 | `/killswitch` | Emergency stop for all actions |
 | `/language` | Change language (English/繁體中文) |
 | `/status` | View account status |
+| `/menu` | 🏠 主選單 (inline keyboard) |
+
+## Telegram menu (主選單)
+
+`/start`, `/menu` and every ⬅️ 返回主選單 button show an inline-keyboard menu (all text in
+zh-Hant-TW). The bot's command list is registered with `setMyCommands` on startup.
+
+| Button | Screen |
+|--------|--------|
+| 📊 我的倉位 | One button per position → 救倉試算 · 插針壓測 · 止損檢查 · 資金費影響 · ⬅️ 返回主選單 (edited in place) |
+| 🚨 先處理哪個 | Priority triage, with a button straight to the top position |
+| 🧪 壓力測試 | Per-account portfolio stress test and correlated liquidation |
+| 💸 資金費率/手續費 | Funding drift, next settlement and close fees per position |
+| 🔔 通知設定 | Alert thresholds (presets), wake-up escalation interval and on/off, quiet hours (UTC+8; only critical/emergency alerts get through) |
+| 🔑 綁定帳號 | Guided self-serve binding (below) |
+| 🖥️ 網頁看板 | One-time dashboard login link (private chat only) |
+| 🎬 Demo | Demo on/off, both scenarios (mixed book, 5 longs one wallet), start/stop the simulation; every other button then works on the demo data |
+| ❓ 幫助 | What each button does and the security model |
+
+Alerts carry **🚑 先處理這個** (rescue simulator for that position), **😴 暫停提醒 30 分鐘**
+(snoozes wake-up reminders) and **✅ 我醒了** (acknowledge).
+
+**🔑 綁定帳號.** 綁定 Binance walks through creating a key with only *Enable Reading*, then asks
+for the key and the secret in two messages. Each message is deleted as soon as it is read, the
+key is checked with Binance, keys that can trade, withdraw or transfer are rejected, and accepted
+keys are encrypted per user. 綁定 Hyperliquid takes a wallet address (`0x` + 40 hex). 查看已綁定
+shows masked hints only; 解除綁定 asks for confirmation. Anything that looks like a private key
+or seed phrase is refused and deleted. Binding only works in a private chat. The web dashboard
+has the same bind / status / unbind panel (`core/binding.py` is shared).
+
+**Layout** (`liqguard/telegram/ui/`), built so that changing one feature cannot break another:
+
+| Module | Role |
+|--------|------|
+| `codec.py` | Versioned callback data `1.<action>.<args>.<ts>.<tag>`. The tag is an HMAC over the user id and payload, so a button only works for the user it was sent to. Max 64 bytes; malformed, tampered, oversized, future-dated and unknown payloads are rejected |
+| `actions.py` | Registry: action code → feature, argument patterns, TTL |
+| `keyboards.py` | Pure keyboard builders (no I/O) |
+| `router.py` | Dispatch table. Decodes, checks the user and the arguments, runs the handler and edits the message. `answerCallbackQuery` is always called, errors included. Expired buttons fall back to the main menu with a notice |
+| `features/*.py` | One module per menu entry, each exporting `HANDLERS`. Features never import each other; they reach the domain only through `services.py` (`UIServices`), which is always keyed by the caller's user id |
 
 ## Liquidation, Funding & Rescue
 
@@ -444,8 +484,8 @@ other, and `test_architecture.py` enforces both rules plus the absence of import
 | `simulation/` | Deterministic market simulation and `SimulationRegistry` (one per user + one public demo) |
 | `storage/` | SQLite schema, envelope encryption (`KeyManager`), per-user repositories |
 | `auth/` | Signed session tokens, one-time login links, Telegram Login Widget verification |
-| `core/` | `AppContext` (wires everything once), `PositionService.snapshot_for(user)` (positions + accounts + funding), `MarketDataService` (shared public funding cache), testnet action executor |
-| `telegram/` | aiogram handlers, Telegram notifier, owner-only simulation bridge |
+| `core/` | `AppContext` (wires everything once), `BindingService` (self-serve bind/unbind shared by Telegram and web), `position_tools` (the four per-position reports), `user_settings`, `PositionService.snapshot_for(user)` (positions + accounts + funding), `MarketDataService` (shared public funding cache), testnet action executor |
+| `telegram/` | aiogram handlers, the inline-keyboard UI (`telegram/ui/`: codec, router, keyboards, per-feature handlers), Telegram notifier, owner-only simulation bridge |
 | `web/` | Dashboard app, session/CSRF guards, static frontend |
 | `config.py` · `logsafe.py` · `main.py` | Settings from env, log redaction, process entry point |
 
@@ -678,7 +718,9 @@ private run. Set `LIQGUARD_PUBLIC_URL` to the address users open (https in produ
 | Muse summary banner | Overall risk level plus a one-line Muse summary naming the riskiest position (the same summary `/risk` shows) |
 | KPIs | Total notional, margin used, unrealized PnL, net exposure, closest distance to liquidation, margin needed to restore the safety buffer |
 | Chart | **Distance** tab: every position's distance to liquidation over simulated time, with shaded warning/critical/emergency bands and ▲ funding settlements. **Per-symbol** tabs: mark price vs the true liquidation line (which steps when the shared wallet pays funding), plus the price where each tier fires |
-| Positions | Venue, side, leverage, distance gauge with tier markers, mark and **true** liquidation price (cross wallet, other positions' PnL and maintenance), funding rate, next payment and 8 h / 24 h drift "at current rate", 🛟 Rescue button |
+| Positions | Venue, side, leverage, distance gauge with tier markers, mark and **true** liquidation price (cross wallet, other positions' PnL and maintenance), funding rate, next payment and 8 h / 24 h drift "at current rate", quick actions 救倉試算 · 插針壓測 · 止損檢查 · 資金費影響 (same text as the Telegram buttons) |
+| 🔔 通知設定 (signed in) | Same settings as the Telegram screen: threshold presets, escalation interval / on-off, quiet hours |
+| 🔑 綁定帳號 (signed in) | Security note, masked bindings, bind Binance (read-only key) or Hyperliquid (address), unbind with confirmation |
 | Rescue simulator | Add margin vs reduce vs hedge side by side: new liquidation, distance, fees, realized loss, 24 h funding, capital, recommended option, Muse trade-offs. Opens automatically on each alert |
 | Funding & wallets | Cross wallet per venue, each position's rate and next settlement, drift, recent settlements |
 | Concentration banner | Appears when exposure is concentrated one way across correlated coins: share, coins, average correlation, effective independent bets, and the market move that liquidates the account |
@@ -728,7 +770,11 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 | `…/insights` | GET | Priority triage, per-account stress test, platform vs correlated liquidation, concentration and sizing for this simulation |
 | `…/scenario` | POST | `{"scenario": "mixed" \| "cross_longs"}`: switch the demo book (CSRF header required; 409 while running) |
 | `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, per-position protection (wicks, tiers, stop, ADL), portfolio insights (triage, stress, liq comparison, concentration, sizing), pending live reminders, audit log |
-| `/api/me/live/ack` | POST | Acknowledge one of *your* live monitor's reminders (CSRF header required) |
+| `/api/me/live/ack` · `/api/me/live/snooze` | POST | Acknowledge or snooze (30 min) one of *your* live monitor's reminders (CSRF header required) |
+| `…/position-tool?symbol=&tool=` · `/api/me/position-tool/live?symbol=&venue=&tool=` | GET | `tool` = `rescue` \| `wick` \| `stop` \| `funding`: the per-position report for a simulated or live position |
+| `/api/me/settings` | GET · POST | Read / change one notification setting (`{"key", "value"}`, CSRF header required) |
+| `/api/me/bindings` | GET | Masked bindings and the security note |
+| `/api/me/bindings/binance` · `/api/me/bindings/hyperliquid` · `/api/me/bindings/unbind` | POST | Self-serve bind (read-only key policy enforced) and unbind (`"confirm": true` required); CSRF header required, credentials are never echoed, even in validation errors |
 | `/api/health` · `/api/auth/config` | GET | Status (incl. funding and wick feed freshness/errors); login options (no secrets) |
 | `/auth/login?token=` · `/auth/telegram` | GET | One-time link / Telegram widget sign-in |
 | `/auth/logout` | POST | Sign out (CSRF header required) |
@@ -736,7 +782,7 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 
 ### Security
 
-- **No trading from the web.** The only write endpoints are simulation controls (including the scenario switch), alert acknowledgements and logout. Binding accounts and confirming actions stay in Telegram (tier 1, testnet only).
+- **No trading from the web.** The write endpoints are simulation controls (including the scenario switch), alert acknowledgements / snooze, notification settings, read-only binding / unbinding and logout. Confirming protective actions stays in Telegram (tier 1, testnet only).
 - **No secrets in the browser.** Responses carry no API keys, secrets or ciphertexts; bindings show a masked hint. Tests check this.
 - **Hardened by default.** Binds to `127.0.0.1`, strict Content-Security-Policy, `X-Frame-Options: DENY`, `Cache-Control: no-store`. Chart.js (jsDelivr) and, on `/login`, the Telegram widget script are the only external scripts.
 
@@ -767,8 +813,10 @@ python3 -m pytest liqguard/tests/ -q
 | `test_telegram_protection.py` | `/positions` and `/risk` protection lines, `/settings` (buttons, text args, validation, per-user), "I'm awake" for live and simulated alerts (owner only) |
 | `test_dashboard_protection.py` | Snapshot protection data, stop/ADL/escalation events, `…/ack` (CSRF, id validation, once only), live ack and cross-user isolation, account protection payload |
 | `test_portfolio_risk.py` | Correlation factors, account surplus and liquidation move, ±5/10/20 % shocks, platform vs correlated liquidation gap, concentration and effective bets, sizing (equity, stop vs liquidation exit, both limits), triage ordering and labels, consolidated monitor alert and dedupe, the 5-long scenario, Telegram `/risk` / `/positions` / `/settings` / `/demo`, dashboard insights and scenario endpoints, per-user isolation, env defaults |
+| `test_telegram_ui.py` | Inline-keyboard UI: codec roundtrip and malformed / tampered / oversized / future rejection; every keyboard button routes to a registered handler; features don't import each other; user B can't use user A's buttons; `answerCallbackQuery` always called (incl. handler errors); stale and expired buttons; a crawl of every menu path in demo mode, including alert buttons during a simulation; the guided binding flow (message deletion, secret-material refusal, permission rejection, encryption, masked status, confirmed unbind) |
+| `test_dashboard_account_tools.py` | Web quick actions (same text as Telegram), settings panel, binding panel (no echo, CSRF, confirm), live snooze, quiet hours in the monitor |
 
-546 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
+692 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
 
 ## Environment Variables
 
