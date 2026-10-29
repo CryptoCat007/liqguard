@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LiqGuard · Liquidation early-warning</title>
+  <title data-i18n="title">LiqGuard · Liquidation early-warning</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
   <link rel="stylesheet" href="/static/app.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
@@ -11,9 +11,9 @@
 </head>
 <body>
   <div class="ribbon" id="ribbon">
-    <b>DEMO DATA</b>
-    <span id="ribbonText">Public demo with simulated positions — nothing here belongs to a real account.</span>
-    <a href="/login" id="ribbonLink">Sign in to see your own account →</a>
+    <b id="ribbonTag" data-i18n="ribbon_tag">DEMO DATA</b>
+    <span id="ribbonText" data-i18n="ribbon_text">Public demo with simulated positions — nothing here belongs to a real account.</span>
+    <a href="/login" id="ribbonLink" data-i18n="ribbon_link">Sign in to see your own account →</a>
   </div>
   <header class="topbar">
     <div class="brand">
@@ -24,30 +24,31 @@
       </svg>
       <div>
         <div class="brand-name">LiqGuard</div>
-        <div class="brand-sub">Liquidation early-warning · Binance + Hyperliquid</div>
+        <div class="brand-sub" data-i18n="brand_sub">Liquidation early-warning · Binance + Hyperliquid</div>
       </div>
     </div>
 
     <div class="pills">
-      <span class="pill pill-demo" id="scopePill" title="Simulated positions; no exchange keys are used">DEMO DATA</span>
-      <span class="pill" id="musePill" title="Muse explains numbers computed in code">Muse · —</span>
-      <span class="pill" id="channelsPill" title="Where alerts are delivered">Channels · —</span>
-      <span class="pill" id="connPill"><span class="dot"></span><span id="connText">Connecting</span></span>
+      <span class="pill pill-demo" id="scopePill" data-i18n="scope_pill" data-i18n-title="scope_pill_title" title="Simulated positions; no exchange keys are used">DEMO DATA</span>
+      <span class="pill" id="musePill" data-i18n-title="muse_title" title="Muse explains numbers computed in code">Muse · —</span>
+      <span class="pill" id="channelsPill" data-i18n-title="channels_title" title="Where alerts are delivered">Channels · —</span>
+      <span class="pill" id="connPill"><span class="dot"></span><span id="connText" data-i18n="connecting">Connecting</span></span>
     </div>
 
     <div class="controls">
-      <label class="scenario" title="Demo book to simulate">
-        <span class="sr-only">Demo scenario</span>
-        <select id="scenarioSelect" aria-label="Demo scenario"></select>
+      <label class="scenario" data-i18n-title="scenario_label" title="Demo scenario">
+        <span class="sr-only" data-i18n="scenario_label">Demo scenario</span>
+        <select id="scenarioSelect" data-i18n-aria="scenario_label" aria-label="Demo scenario"></select>
       </label>
       <button class="btn btn-primary" id="simulateBtn" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-        Simulate market
+        <span id="simulateLabel" data-i18n="simulate">Simulate market</span>
       </button>
-      <button class="btn btn-ghost" id="stopBtn" type="button" disabled>Stop</button>
-      <button class="btn btn-ghost" id="resetBtn" type="button">Reset</button>
-      <a class="btn btn-ghost" id="signInBtn" href="/login">Sign in</a>
-      <button class="btn btn-ghost" id="signOutBtn" type="button" hidden>Sign out</button>
+      <button class="btn btn-ghost" id="stopBtn" type="button" disabled data-i18n="stop">Stop</button>
+      <button class="btn btn-ghost" id="resetBtn" type="button" data-i18n="reset">Reset</button>
+      <a class="btn btn-ghost" id="signInBtn" href="/login" data-i18n="sign_in">Sign in</a>
+      <button class="btn btn-ghost" id="signOutBtn" type="button" hidden data-i18n="sign_out">Sign out</button>
+      <button class="btn btn-ghost lang-btn" id="langBtn" type="button" data-i18n="lang_toggle" data-i18n-title="lang_toggle_title" title="切換為繁體中文" lang="zh-Hant-TW">中文</button>
     </div>
   </header>
   <div class="progress"><div class="progress-fill" id="progressFill"></div></div>
@@ -56,14 +57,14 @@
     <section class="card account" id="account" hidden>
       <div class="card-head">
         <div>
-          <div class="card-title">Your account</div>
-          <div class="card-sub" id="accountSub">Live data from your own exchange connections · refreshed every 30 s</div>
+          <div class="card-title" data-i18n="account_title">Your account</div>
+          <div class="card-sub" id="accountSub" data-i18n="account_sub">Live data from your own exchange connections · refreshed every 30 s</div>
         </div>
-        <span class="tag tag-ro">PRIVATE · READ-ONLY</span>
+        <span class="tag tag-ro" data-i18n="private_tag">PRIVATE · READ-ONLY</span>
       </div>
       <div class="account-grid">
         <div>
-          <div class="account-label">Connected exchanges</div>
+          <div class="account-label" data-i18n="connected_exchanges">Connected exchanges</div>
           <div id="accountBindings" class="bindings"></div>
         </div>
         <div>
@@ -71,39 +72,39 @@
           <div id="accountPositions" class="account-positions"></div>
         </div>
         <div>
-          <div class="account-label">Protective actions (your audit log)</div>
+          <div class="account-label" data-i18n="actions_log">Protective actions (your audit log)</div>
           <div id="accountActions" class="audit scroll account-actions"></div>
         </div>
       </div>
-      <div class="account-grid account-grid-2" lang="zh-Hant-TW">
+      <div class="account-grid account-grid-2">
         <div class="panel" id="settingsPanel">
-          <div class="account-label">🔔 通知設定 <span class="label-en">Alert settings</span></div>
-          <div class="panel-sub">與 Telegram「🔔 通知設定」同步：警示門檻、喚醒提醒、勿擾時段（嚴重／緊急警報仍會送達）。</div>
+          <div class="account-label" data-i18n="settings_title">🔔 Alert settings</div>
+          <div class="panel-sub" data-i18n="settings_sub"></div>
           <div id="settingsForm" class="settings-form"></div>
           <div class="panel-msg" id="settingsMsg" role="status"></div>
         </div>
         <div class="panel" id="bindPanel">
-          <div class="account-label">🔑 綁定帳號 <span class="label-en">Connect an exchange</span></div>
+          <div class="account-label" data-i18n="bind_title">🔑 Connect an exchange</div>
           <div class="security-note" id="securityNote"></div>
           <div id="bindList" class="bindings"></div>
           <div class="bind-tabs" role="tablist">
-            <button class="mini-btn bind-tab active" type="button" data-venue="binance" role="tab" aria-selected="true">🟡 綁定 Binance</button>
-            <button class="mini-btn bind-tab" type="button" data-venue="hyperliquid" role="tab" aria-selected="false">🟢 綁定 Hyperliquid</button>
+            <button class="mini-btn bind-tab active" type="button" data-venue="binance" role="tab" aria-selected="true" data-i18n="bind_binance">🟡 Connect Binance</button>
+            <button class="mini-btn bind-tab" type="button" data-venue="hyperliquid" role="tab" aria-selected="false" data-i18n="bind_hl">🟢 Connect Hyperliquid</button>
           </div>
           <form class="bind-form" id="bindBinance" autocomplete="off">
             <ol class="bind-steps">
-              <li>登入 Binance →「API 管理」→ 建立 API（系統生成）</li>
-              <li>權限只勾 ✅「允許讀取 Enable Reading」；❌ 不要勾 合約交易、現貨與槓桿交易、提現、萬向劃轉</li>
-              <li>（建議）設定 IP 存取限制，然後貼上 Key 與 Secret</li>
+              <li data-i18n="bind_step1"></li>
+              <li data-i18n="bind_step2"></li>
+              <li data-i18n="bind_step3"></li>
             </ol>
             <input class="field" name="api_key" type="password" placeholder="API Key" autocomplete="off" spellcheck="false" required>
             <input class="field" name="api_secret" type="password" placeholder="Secret Key" autocomplete="off" spellcheck="false" required>
-            <button class="btn btn-primary" type="submit">驗證並綁定（唯讀）</button>
+            <button class="btn btn-primary" type="submit" data-i18n="bind_submit">Verify and connect (read-only)</button>
           </form>
           <form class="bind-form" id="bindHyperliquid" autocomplete="off" hidden>
-            <ol class="bind-steps"><li>貼上錢包地址（0x 開頭、42 字元）。只讀取公開倉位資料，不需要任何金鑰。</li></ol>
+            <ol class="bind-steps"><li data-i18n="hl_step"></li></ol>
             <input class="field" name="address" type="text" placeholder="0x…" autocomplete="off" spellcheck="false" required>
-            <button class="btn btn-primary" type="submit">綁定錢包</button>
+            <button class="btn btn-primary" type="submit" data-i18n="hl_submit">Connect wallet</button>
           </form>
           <div class="panel-msg" id="bindMsg" role="status"></div>
         </div>
@@ -113,7 +114,7 @@
     <section class="wake card" id="wake" hidden aria-live="assertive">
       <div class="wake-icon">⏰</div>
       <div class="wake-body">
-        <div class="wake-title" id="wakeTitle">Wake-up escalation</div>
+        <div class="wake-title" id="wakeTitle" data-i18n="wake_title">Wake-up escalation</div>
         <div class="wake-sub" id="wakeSub"></div>
       </div>
       <div class="wake-list" id="wakeList"></div>
@@ -123,13 +124,13 @@
       <div class="banner-level" id="riskLevel">—</div>
       <div class="banner-body">
         <div class="banner-label">
-          <span class="muse-glyph">✦</span> Muse portfolio summary
+          <span class="muse-glyph">✦</span> <span data-i18n="muse_summary">Muse portfolio summary</span>
           <span class="tag" id="summaryTag" hidden>MOCK</span>
         </div>
-        <div class="banner-headline" id="headline">Loading portfolio…</div>
+        <div class="banner-headline" id="headline" data-i18n="loading_portfolio">Loading portfolio…</div>
       </div>
       <div class="banner-riskiest">
-        <div class="banner-label">Riskiest position · triage #1</div>
+        <div class="banner-label" data-i18n="riskiest">Riskiest position · triage #1</div>
         <div class="riskiest-chip" id="riskiest">—</div>
         <div class="riskiest-why faint" id="riskiestWhy"></div>
       </div>
@@ -138,33 +139,33 @@
     <section class="conc card" id="concBanner" hidden role="alert">
       <div class="conc-icon">🧲</div>
       <div class="conc-body">
-        <div class="conc-title" id="concTitle">Concentrated, correlated exposure</div>
+        <div class="conc-title" id="concTitle" data-i18n="conc_title">Concentrated, correlated exposure</div>
         <div class="conc-sub" id="concSub"></div>
       </div>
-      <div class="conc-stat"><div class="conc-n" id="concBets">—</div><div class="faint">independent bets</div></div>
+      <div class="conc-stat"><div class="conc-n" id="concBets">—</div><div class="faint" data-i18n="independent_bets">independent bets</div></div>
     </section>
 
     <section class="kpis">
-      <div class="kpi card"><div class="kpi-label">Total notional</div><div class="kpi-value" id="kpiNotional">—</div><div class="kpi-sub" id="kpiVenues">—</div></div>
-      <div class="kpi card"><div class="kpi-label">Margin used</div><div class="kpi-value" id="kpiMargin">—</div><div class="kpi-sub" id="kpiLeverage">—</div></div>
-      <div class="kpi card"><div class="kpi-label">Unrealized PnL</div><div class="kpi-value" id="kpiPnl">—</div><div class="kpi-sub">across all venues</div></div>
-      <div class="kpi card"><div class="kpi-label">Net exposure</div><div class="kpi-value" id="kpiNet">—</div><div class="kpi-sub" id="kpiLongShort">—</div></div>
-      <div class="kpi card"><div class="kpi-label">Closest to liquidation (raw %)</div><div class="kpi-value" id="kpiMinDist">—</div><div class="kpi-sub" id="kpiMinDistSym">—</div></div>
-      <div class="kpi card"><div class="kpi-label">Margin to reach safety</div><div class="kpi-value" id="kpiSafety">—</div><div class="kpi-sub" id="kpiSafetySub">—</div></div>
+      <div class="kpi card"><div class="kpi-label" data-i18n="kpi_notional">Total notional</div><div class="kpi-value" id="kpiNotional">—</div><div class="kpi-sub" id="kpiVenues">—</div></div>
+      <div class="kpi card"><div class="kpi-label" data-i18n="kpi_margin">Margin used</div><div class="kpi-value" id="kpiMargin">—</div><div class="kpi-sub" id="kpiLeverage">—</div></div>
+      <div class="kpi card"><div class="kpi-label" data-i18n="kpi_pnl">Unrealized PnL</div><div class="kpi-value" id="kpiPnl">—</div><div class="kpi-sub" data-i18n="kpi_pnl_sub">across all venues</div></div>
+      <div class="kpi card"><div class="kpi-label" data-i18n="kpi_net">Net exposure</div><div class="kpi-value" id="kpiNet">—</div><div class="kpi-sub" id="kpiLongShort">—</div></div>
+      <div class="kpi card"><div class="kpi-label" data-i18n="kpi_min">Closest to liquidation (raw %)</div><div class="kpi-value" id="kpiMinDist">—</div><div class="kpi-sub" id="kpiMinDistSym">—</div></div>
+      <div class="kpi card"><div class="kpi-label" data-i18n="kpi_safety">Margin to reach safety</div><div class="kpi-value" id="kpiSafety">—</div><div class="kpi-sub" id="kpiSafetySub">—</div></div>
     </section>
 
     <section class="row-main">
       <div class="card chart-card">
         <div class="card-head">
           <div>
-            <div class="card-title" id="chartTitle">Distance to liquidation</div>
-            <div class="card-sub" id="chartSub">All positions · tier bands at warning / critical / emergency</div>
+            <div class="card-title" data-i18n="chart_title" id="chartTitle">Distance to liquidation</div>
+            <div class="card-sub" id="chartSub" data-i18n="chart_sub">All positions · tier bands at warning / critical / emergency</div>
           </div>
           <div class="tabs" id="chartTabs" role="tablist"></div>
         </div>
         <div class="chart-wrap">
-          <canvas id="chart" aria-label="Price versus liquidation chart"></canvas>
-          <div class="chart-empty" id="chartEmpty" hidden>Chart library failed to load (offline?). Live data is still shown in the panels.</div>
+          <canvas id="chart" data-i18n-aria="chart_aria" aria-label="Price versus liquidation chart"></canvas>
+          <div class="chart-empty" id="chartEmpty" hidden data-i18n="chart_empty">Chart library failed to load (offline?). Live data is still shown in the panels.</div>
         </div>
         <div class="legend" id="chartLegend"></div>
       </div>
@@ -172,8 +173,8 @@
       <div class="card positions-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Positions</div>
-            <div class="card-sub">True liquidation (cross margin aware) · funding drift at current rate</div>
+            <div class="card-title" data-i18n="positions">Positions</div>
+            <div class="card-sub" data-i18n="positions_sub">True liquidation (cross margin aware) · funding drift at current rate</div>
           </div>
         </div>
         <div class="positions" id="positions"></div>
@@ -184,8 +185,8 @@
       <div class="card triage-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Priority triage</div>
-            <div class="card-sub">Which position to handle first · time to liquidation at typical volatility, distance vs tiers, size</div>
+            <div class="card-title" data-i18n="triage_title">Priority triage</div>
+            <div class="card-sub" data-i18n="triage_sub">Which position to handle first · time to liquidation at typical volatility, distance vs tiers, size</div>
           </div>
           <span class="tag" id="triageTag">—</span>
         </div>
@@ -196,8 +197,8 @@
       <div class="card pstress-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Portfolio stress test</div>
-            <div class="card-sub">If everything moves together (correlated coins by their beta) · per cross-margin account</div>
+            <div class="card-title" data-i18n="pstress_title">Portfolio stress test</div>
+            <div class="card-sub" data-i18n="pstress_sub">If everything moves together (correlated coins by their beta) · per cross-margin account</div>
           </div>
         </div>
         <div class="pstress" id="pstress"></div>
@@ -208,8 +209,8 @@
       <div class="card liqcmp-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Platform liq vs real liq</div>
-            <div class="card-sub">The exchange's line assumes your other positions stand still · LiqGuard moves them together</div>
+            <div class="card-title" data-i18n="liqcmp_title">Platform liq vs real liq</div>
+            <div class="card-sub" data-i18n="liqcmp_sub">The exchange's line assumes your other positions stand still · LiqGuard moves them together</div>
           </div>
         </div>
         <div class="liqcmp" id="liqcmp"></div>
@@ -218,8 +219,8 @@
       <div class="card sizing-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Position sizing</div>
-            <div class="card-sub" id="sizingSub">Loss at the exit vs account equity · margin share · suggested size</div>
+            <div class="card-title" data-i18n="sizing_title">Position sizing</div>
+            <div class="card-sub" id="sizingSub" data-i18n="sizing_sub">Loss at the exit vs account equity · margin share · suggested size</div>
           </div>
           <span class="tag" id="sizingTag">—</span>
         </div>
@@ -231,8 +232,8 @@
       <div class="card stress-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Wick stress test &amp; adaptive tiers</div>
-            <div class="card-sub" id="stressSub">Deepest adverse 1m / 5m wicks over 30 days · how many fit before liquidation</div>
+            <div class="card-title" data-i18n="stress_title">Wick stress test &amp; adaptive tiers</div>
+            <div class="card-sub" id="stressSub" data-i18n="stress_sub">Deepest adverse 1m / 5m wicks over 30 days · how many fit before liquidation</div>
           </div>
           <span class="tag" id="stressTag">DEMO WICKS</span>
         </div>
@@ -243,10 +244,10 @@
       <div class="card stops-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Stop-loss sanity &amp; ADL</div>
-            <div class="card-sub">Does the stop fire before liquidation? · auto-deleverage queue (1–5 lights)</div>
+            <div class="card-title" data-i18n="stops_title">Stop-loss sanity &amp; ADL</div>
+            <div class="card-sub" data-i18n="stops_sub">Does the stop fire before liquidation? · auto-deleverage queue (1–5 lights)</div>
           </div>
-          <span class="tag tag-ro" title="LiqGuard reads open orders; it never places or edits them">READ-ONLY ORDERS</span>
+          <span class="tag tag-ro" data-i18n="readonly_orders" data-i18n-title="readonly_orders_title" title="LiqGuard reads open orders; it never places or edits them">READ-ONLY ORDERS</span>
         </div>
         <div class="stops" id="stops"></div>
       </div>
@@ -256,8 +257,8 @@
       <div class="card rescue-card" id="rescueCard">
         <div class="card-head">
           <div>
-            <div class="card-title">Rescue simulator</div>
-            <div class="card-sub" id="rescueSub">Add margin vs reduce vs hedge · new liquidation, distance and full cost of each</div>
+            <div class="card-title" data-i18n="rescue_title">Rescue simulator</div>
+            <div class="card-sub" id="rescueSub" data-i18n="rescue_sub">Add margin vs reduce vs hedge · new liquidation, distance and full cost of each</div>
           </div>
           <div class="tabs" id="rescueTabs" role="tablist"></div>
         </div>
@@ -267,8 +268,8 @@
       <div class="card funding-card">
         <div class="card-head">
           <div>
-            <div class="card-title">Funding &amp; wallets</div>
-            <div class="card-sub" id="fundingSub">Rates, next settlement and liquidation drift at current rate</div>
+            <div class="card-title" data-i18n="funding_title">Funding &amp; wallets</div>
+            <div class="card-sub" id="fundingSub" data-i18n="funding_sub">Rates, next settlement and liquidation drift at current rate</div>
           </div>
           <span class="tag" id="fundingTag">DEMO RATES</span>
         </div>
@@ -281,19 +282,19 @@
       <div class="card">
         <div class="card-head">
           <div>
-            <div class="card-title">Alert timeline</div>
-            <div class="card-sub">Triage, stress, sizing, adaptive tiers, stop-loss, ADL, pre-funding and wake-up reminders · same events as Telegram</div>
+            <div class="card-title" data-i18n="timeline_title">Alert timeline</div>
+            <div class="card-sub" data-i18n="timeline_sub">Triage, stress, sizing, adaptive tiers, stop-loss, ADL, pre-funding and wake-up reminders · same events as Telegram</div>
           </div>
           <div class="tier-counts">
-            <span class="tc tc-triage" title="Triage (several positions at once)"><i></i><b id="cntTriage">0</b></span>
-            <span class="tc tc-corr" title="Correlation / stress"><i></i><b id="cntCorr">0</b></span>
-            <span class="tc tc-sizing" title="Position sizing"><i></i><b id="cntSizing">0</b></span>
-            <span class="tc tc-stop" title="Stop-loss"><i></i><b id="cntStop">0</b></span>
-            <span class="tc tc-adl" title="ADL"><i></i><b id="cntAdl">0</b></span>
-            <span class="tc tc-funding" title="Pre-funding"><i></i><b id="cntFunding">0</b></span>
-            <span class="tc tc-warning" title="Warning"><i></i><b id="cntWarning">0</b></span>
-            <span class="tc tc-critical" title="Critical"><i></i><b id="cntCritical">0</b></span>
-            <span class="tc tc-emergency" title="Emergency"><i></i><b id="cntEmergency">0</b></span>
+            <span class="tc tc-triage" data-i18n-title="cnt_triage" title="Triage (several positions at once)"><i></i><b id="cntTriage">0</b></span>
+            <span class="tc tc-corr" data-i18n-title="cnt_corr" title="Correlation / stress"><i></i><b id="cntCorr">0</b></span>
+            <span class="tc tc-sizing" data-i18n-title="cnt_sizing" title="Position sizing"><i></i><b id="cntSizing">0</b></span>
+            <span class="tc tc-stop" data-i18n-title="cnt_stop" title="Stop-loss"><i></i><b id="cntStop">0</b></span>
+            <span class="tc tc-adl" data-i18n-title="cnt_adl" title="ADL"><i></i><b id="cntAdl">0</b></span>
+            <span class="tc tc-funding" data-i18n-title="cnt_funding" title="Pre-funding"><i></i><b id="cntFunding">0</b></span>
+            <span class="tc tc-warning" data-i18n-title="cnt_warning" title="Warning"><i></i><b id="cntWarning">0</b></span>
+            <span class="tc tc-critical" data-i18n-title="cnt_critical" title="Critical"><i></i><b id="cntCritical">0</b></span>
+            <span class="tc tc-emergency" data-i18n-title="cnt_emergency" title="Emergency"><i></i><b id="cntEmergency">0</b></span>
           </div>
         </div>
         <ol class="timeline scroll" id="timeline"></ol>
@@ -302,8 +303,8 @@
       <div class="card">
         <div class="card-head">
           <div>
-            <div class="card-title">Muse advice</div>
-            <div class="card-sub">Numbers from code · wording from Muse</div>
+            <div class="card-title" data-i18n="advice_title">Muse advice</div>
+            <div class="card-sub" data-i18n="advice_sub">Numbers from code · wording from Muse</div>
           </div>
         </div>
         <div class="advice scroll" id="advice"></div>
@@ -312,34 +313,34 @@
       <div class="card">
         <div class="card-head">
           <div>
-            <div class="card-title">Action audit log</div>
-            <div class="card-sub">Every alert, suggestion and action step</div>
+            <div class="card-title" data-i18n="audit_title">Action audit log</div>
+            <div class="card-sub" data-i18n="audit_sub">Every alert, suggestion and action step</div>
           </div>
-          <span class="tag tag-ro" title="The dashboard cannot place, confirm or execute actions">READ-ONLY</span>
+          <span class="tag tag-ro" data-i18n="readonly" data-i18n-title="readonly_title" title="The dashboard cannot place, confirm or execute actions">READ-ONLY</span>
         </div>
         <div class="audit scroll" id="audit"></div>
       </div>
     </section>
 
     <footer class="foot">
-      <span id="footScope">Public demo · simulated data only.</span>
-      Read-only view · API keys you bind are encrypted per user and never sent back to the browser (masked hints only) · actions require confirmation in Telegram and run on testnet only.
+      <span id="footScope" data-i18n="foot_scope">Public demo · simulated data only.</span>
+      <span data-i18n="foot_note">Read-only view · API keys you bind are encrypted per user and never sent back to the browser (masked hints only) · actions require confirmation in Telegram and run on testnet only.</span>
     </footer>
   </main>
 
-  <dialog class="tool-dialog" id="toolDialog" lang="zh-Hant-TW">
+  <dialog class="tool-dialog" id="toolDialog">
     <div class="tool-head">
       <div class="card-title" id="toolTitle"></div>
-      <button class="mini-btn" type="button" id="toolClose" aria-label="關閉">✕</button>
+      <button class="mini-btn" type="button" id="toolClose" data-i18n-aria="close" aria-label="Close">✕</button>
     </div>
     <div class="tool-tabs" id="toolTabs"></div>
     <div class="tool-body" id="toolBody"></div>
   </dialog>
-  <dialog class="tool-dialog confirm-dialog" id="confirmDialog" lang="zh-Hant-TW">
+  <dialog class="tool-dialog confirm-dialog" id="confirmDialog">
     <div class="tool-body" id="confirmText"></div>
     <div class="confirm-actions">
-      <button class="btn btn-ghost" type="button" id="confirmNo">取消</button>
-      <button class="btn btn-danger" type="button" id="confirmYes">確認解除</button>
+      <button class="btn btn-ghost" type="button" id="confirmNo" data-i18n="cancel">Cancel</button>
+      <button class="btn btn-danger" type="button" id="confirmYes" data-i18n="confirm">Disconnect</button>
     </div>
   </dialog>
 

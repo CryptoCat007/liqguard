@@ -27,6 +27,7 @@ from typing import Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -37,7 +38,7 @@ from liqguard.core import AppContext
 from liqguard.core.binding import BindingService, security_note
 from liqguard.core.position_tools import TOOLS, report
 from liqguard.core.user_settings import apply_setting, settings_dict
-from liqguard.i18n import t
+from liqguard.i18n import normalize, t, web_catalog
 from liqguard.models import User
 from liqguard.risk import (
     PortfolioAnalyzer,
@@ -61,6 +62,10 @@ class AckRequest(BaseModel):
 
 class ScenarioRequest(BaseModel):
     scenario: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-z_]+$")
+
+
+class LanguageRequest(BaseModel):
+    language: str = Field(..., pattern=r"^(en|zh-Hant)$")
 
 
 class SettingRequest(BaseModel):
@@ -206,6 +211,12 @@ def create_app(
             return RedirectResponse("/login", status_code=303)
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/i18n/{lang}")
+    async def web_strings(lang: str = PathParam(..., max_length=16)):
+        """Dashboard UI strings (the `web.*` locale table) for the EN / 中文 toggle."""
+        code = normalize(lang)
+        return {"lang": code, "strings": web_catalog(code)}
+
     @app.get("/api/health")
     async def health():
         body = {
@@ -254,15 +265,17 @@ def create_app(
 
         @app.get(f"{prefix}/position-tool")
         async def position_tool(symbol: str = Query(..., max_length=32), tool: str = Query(..., pattern=TOOL_PATTERN),
+                                lang: Optional[str] = Query(None, max_length=16),
                                 sim: MarketSimulation = Depends(resolve)):
-            """救倉試算 / 插針壓測 / 止損檢查 / 資金費影響 for one simulated position (same text as the Telegram buttons)."""
+            """Rescue / wick / stop / funding report for one simulated position (same text as the Telegram buttons)."""
             position = next((p for p in sim.positions if p.symbol == symbol), None)
             if position is None:
                 raise HTTPException(404, "No such position in this simulation")
             context = sim.risk_context()
             plan = sim.build_rescue_plan(symbol) if tool == "rescue" else None
             return JSONResponse(report(tool, position, context, sim.protection(position, context).to_dict(),
-                                       plan.to_dict() if plan else None, demo=True, lang=sim.language))
+                                       plan.to_dict() if plan else None, demo=True,
+                                       lang=normalize(lang) if lang else sim.language))
 
         @app.post(f"{prefix}/simulate", dependencies=[Depends(require_csrf)])
         async def simulate(sim: MarketSimulation = Depends(guard)):
@@ -343,6 +356,22 @@ def create_app(
             if sim is not None and not sim.is_running:
                 sim.configure(updated, user.language)
             return settings_dict(updated, user.language)
+
+        @app.get("/api/me/language")
+        async def my_language(claims: SessionClaims = Depends(auth.required)):
+            user = await own_user(claims)
+            return {"language": normalize(user.language), "explicit": user.language_explicit}
+
+        @app.post("/api/me/language", dependencies=[Depends(require_csrf)])
+        async def set_my_language(body: LanguageRequest, claims: SessionClaims = Depends(auth.required)):
+            """Same per-user choice as Telegram 🌐 / /lang: bot messages, alerts and this dashboard follow it."""
+            await own_user(claims)
+            lang = normalize(body.language)
+            await ctx.storage.set_language(claims.user_id, lang, explicit=True)
+            sim = ctx.simulations.get(claims.user_id)
+            if sim is not None:
+                sim.set_language(lang)
+            return {"language": lang, "explicit": True}
 
         @app.get("/api/me/bindings")
         async def my_bindings(claims: SessionClaims = Depends(auth.required)):

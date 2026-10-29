@@ -59,6 +59,13 @@ def catalog(lang: str) -> dict[str, str]:
         return _flatten(tomllib.load(f))
 
 
+@lru_cache(maxsize=None)
+def web_catalog(lang: str) -> dict[str, str]:
+    """The dashboard's `web.*` strings with the prefix stripped (English fills any gap)."""
+    merged = {**catalog(EN), **catalog(lang)}
+    return {k[4:]: v for k, v in merged.items() if k.startswith("web.")}
+
+
 def has(key: str, lang: str = EN) -> bool:
     return key in catalog(lang)
 

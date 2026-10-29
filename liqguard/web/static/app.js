@@ -28,6 +28,42 @@ const OPTION_META = {
 const MODE = location.pathname.startsWith("/me") ? "me" : "demo";
 const API = MODE === "me" ? "/api/me" : "/api/demo";
 const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
+const LANG_KEY = "liqguard.lang";
+const I18N = { lang: "en", strings: {} };
+
+function L(key, params) {
+  const template = I18N.strings[key];
+  if (template == null) return key;
+  return template.replace(/\{(\w+)\}/g, (m, name) => (params && name in params ? String(params[name]) : m));
+}
+
+async function loadStrings(lang) {
+  const r = await fetch(`/api/i18n/${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(`${r.status}`);
+  const data = await r.json();
+  I18N.lang = data.lang;
+  I18N.strings = data.strings;
+  document.documentElement.lang = data.lang === "zh-Hant" ? "zh-Hant-TW" : "en";
+  for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = L(node.dataset.i18n);
+  for (const node of document.querySelectorAll("[data-i18n-title]")) node.title = L(node.dataset.i18nTitle);
+  for (const node of document.querySelectorAll("[data-i18n-aria]")) node.setAttribute("aria-label", L(node.dataset.i18nAria));
+  $("langBtn").lang = data.lang === "zh-Hant" ? "en" : "zh-Hant-TW";
+}
+
+async function initialLanguage() {
+  const fromUrl = new URLSearchParams(location.search).get("lang");
+  if (fromUrl) {
+    localStorage.setItem(LANG_KEY, fromUrl);
+    return fromUrl;
+  }
+  if (MODE === "me") {
+    try {
+      const r = await fetch("/api/me/language", { credentials: "same-origin" });
+      if (r.ok) return (await r.json()).language;
+    } catch (err) { /* fall back to the browser choice */ }
+  }
+  return localStorage.getItem(LANG_KEY) || "en";
+}
 
 const S = {
   history: {}, tierPrices: {}, thresholds: { warning: 20, critical: 10, emergency: 5 },
@@ -142,7 +178,7 @@ function applySnapshot(snap) {
   renderScenarios();
   if (S.view !== "distance" && !S.order.includes(S.view)) S.view = "distance";
 
-  $("musePill").textContent = snap.muse_mode === "live" ? "Muse · live" : "Muse · mock";
+  $("musePill").textContent = L(snap.muse_mode === "live" ? "muse_live" : "muse_mock");
   $("musePill").classList.toggle("live", snap.muse_mode === "live");
   renderChannels(snap.channels || []);
 
@@ -245,7 +281,7 @@ function onTick(data) {
 
 function renderChannels(channels) {
   const names = channels.map((c) => (c === "web" ? "Web" : c === "telegram" ? "Telegram" : c));
-  $("channelsPill").textContent = `Alerts → ${names.length ? names.join(" + ") : "none"}`;
+  $("channelsPill").textContent = L("channels", { names: names.length ? names.join(" + ") : L("channels_none") });
   $("channelsPill").classList.toggle("live", channels.includes("telegram"));
 }
 
@@ -290,7 +326,7 @@ function renderOverview(ov) {
 function renderSummary(summary) {
   if (!summary) {
     S.summaryRiskiest = null;
-    $("headline").textContent = "Muse is summarizing the portfolio…";
+    $("headline").textContent = L("muse_summarizing");
     $("summaryTag").hidden = true;
     return;
   }
@@ -861,7 +897,7 @@ function renderWake() {
   const esc = S.escalation || {};
   const worst = items.some((a) => a.severity === "emergency") ? "emergency" : "critical";
   wake.className = `wake card wake-${worst}${wake.classList.contains("ring") ? " ring" : ""}`;
-  $("wakeTitle").textContent = `${items.length} alert${items.length > 1 ? "s" : ""} waiting for “I'm awake”`;
+  $("wakeTitle").textContent = L("wake_waiting", { n: items.length });
   $("wakeSub").textContent = esc.interval_minutes
     ? `Reminders every ${esc.interval_minutes} min (demo: ${esc.seconds_per_minute}s per minute), up to ${esc.max_reminders}, louder each time · same button in Telegram`
     : "Reminders repeat until acknowledged";
@@ -1266,7 +1302,7 @@ function setStatus(st) {
   const sim = $("simulateBtn");
   sim.disabled = running;
   sim.classList.toggle("running", running);
-  sim.lastChild.textContent = running ? " Simulating…" : st.state === "finished" || st.state === "stopped" ? " Replay simulation" : " Simulate market";
+  $("simulateLabel").textContent = L(running ? "simulating" : st.state === "finished" || st.state === "stopped" ? "replay" : "simulate");
   $("stopBtn").disabled = !running;
   $("scenarioSelect").disabled = running;
   setProgress();
@@ -1389,7 +1425,7 @@ function buildChart() {
   };
 
   if (S.view === "distance") {
-    $("chartTitle").textContent = "Distance to liquidation";
+    $("chartTitle").textContent = L("chart_title");
     $("chartSub").textContent = S.minutesPerStep
       ? `All positions · tier bands · ▲ funding settlement · simulated clock (${S.minutesPerStep} min per step)`
       : "All positions · shaded bands are the warning / critical / emergency tiers";
@@ -1475,12 +1511,12 @@ function connect() {
   ws.onopen = () => {
     retry = 0;
     $("connPill").classList.add("connected");
-    $("connText").textContent = "Live";
+    $("connText").textContent = L("live");
   };
   ws.onclose = (ev) => {
     if (ev.code === 1008 && MODE === "me") { toLogin(); return; }
     $("connPill").classList.remove("connected");
-    $("connText").textContent = "Reconnecting";
+    $("connText").textContent = L("reconnecting");
     setTimeout(connect, Math.min(1000 * 2 ** retry++, 8000));
   };
   ws.onmessage = (ev) => {
@@ -1495,20 +1531,19 @@ async function setupScope() {
   const r = await fetch("/api/me/session", { credentials: "same-origin" });
   if (r.status === 401) { toLogin(); return false; }
   const me = await r.json();
-  const who = me.username ? `@${me.username}` : `user ${me.user_id}`;
+  const who = me.username ? `@${me.username}` : L("user_label", { id: me.user_id });
   document.title = `LiqGuard · ${who}`;
-  const ribbon = $("ribbon");
-  ribbon.classList.add("private");
-  ribbon.querySelector("b").textContent = "PRIVATE";
-  $("ribbonText").textContent = `Signed in as ${who}. Everything below is scoped to your account; the simulation is your own demo run and alerts go only to your Telegram chat.`;
+  $("ribbon").classList.add("private");
+  $("ribbonTag").textContent = L("ribbon_private_tag");
+  $("ribbonText").textContent = L("ribbon_private", { who });
   $("ribbonLink").hidden = true;
   const pill = $("scopePill");
-  pill.textContent = `DEMO SIM · ${who}`;
+  pill.textContent = L("scope_private", { who });
   pill.className = "pill pill-private";
-  pill.title = "Your private simulation (demo prices); your real positions are in 'Your account'";
+  pill.title = L("scope_private_title");
   $("signInBtn").hidden = true;
   $("signOutBtn").hidden = false;
-  $("footScope").textContent = `Signed in as ${who}.`;
+  $("footScope").textContent = L("foot_signed_in", { who });
   $("account").hidden = false;
   await refreshAccount();
   setInterval(refreshAccount, 30000);
@@ -1517,7 +1552,7 @@ async function setupScope() {
 }
 
 function venueTitle(b) {
-  return `${venueLabel(b.venue)}${b.network === "testnet" ? " testnet" : ""}`;
+  return `${venueLabel(b.venue)}${b.network === "testnet" ? L("testnet") : ""}`;
 }
 
 async function refreshAccount() {
@@ -1527,10 +1562,10 @@ async function refreshAccount() {
     if (r.status === 401) { toLogin(); return; }
     data = await r.json();
   } catch (err) {
-    $("accountSub").textContent = "Could not load account data — retrying in 30 s";
+    $("accountSub").textContent = L("account_sub_error");
     return;
   }
-  $("accountSub").textContent = "Live data from your own exchange connections · refreshed every 30 s";
+  $("accountSub").textContent = L("account_sub");
 
   const binds = $("accountBindings");
   binds.replaceChildren(...(data.bindings || []).map((b) => el("div", { class: "binding" },
@@ -1538,9 +1573,9 @@ async function refreshAccount() {
     el("span", {}, b.binding_type === "wallet" ? "wallet" : (b.permissions || []).join(" · ") || "api key"),
     el("span", { class: "hint" }, b.api_key || b.wallet_address || ""),
   )));
-  if (!data.bindings?.length) binds.append(empty("🔌", "No exchanges connected", "在下方「🔑 綁定帳號」或 Telegram 主選單綁定（Binance 唯讀金鑰或 Hyperliquid 錢包）。"));
+  if (!data.bindings?.length) binds.append(empty("🔌", L("no_exchanges"), L("no_exchanges_hint")));
 
-  $("accountPositionsLabel").textContent = data.label ? data.label.replace(/^📊\s*/, "") : "Positions";
+  $("accountPositionsLabel").textContent = data.label ? data.label.replace(/^📊\s*/, "") : L("positions");
   const box = $("accountPositions");
   const positions = data.positions?.positions || [];
   box.replaceChildren(...positions.map((p) => el("div", { class: "acct-pos" },
@@ -1551,7 +1586,7 @@ async function refreshAccount() {
       p.true_liquidation?.price && Math.abs(p.true_liquidation.price - p.liquidation_price) / (p.liquidation_price || 1) > 0.0005
         ? ` · true ${price(p.true_liquidation.price)}` : ""),
     el("span", { class: `d c-${tierFor(p.distance_to_liquidation_pct)}` }, pct(p.distance_to_liquidation_pct)),
-    el("button", { class: "mini-btn", type: "button", title: "Rescue simulator", onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
+    el("button", { class: "mini-btn", type: "button", title: L("rescue_sim"), onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
     toolButtons(p.symbol, p.venue, true),
     protectionChips((data.protection || []).find((x) => x.symbol === p.symbol && x.venue === p.venue)),
     p.funding ? el("span", { class: "acct-fund" },
@@ -1559,18 +1594,18 @@ async function refreshAccount() {
       + (p.funding.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ")
       + ` (${p.funding.label})`) : null,
   )));
-  if (!positions.length) box.append(empty("📭", "No open positions", data.label ? "Nothing open right now." : "Connect an exchange or enable /demo in Telegram."));
+  if (!positions.length) box.append(empty("📭", L("no_positions"), L(data.label ? "no_positions_open" : "no_positions_hint")));
   const live = accountInsights(data.insights);
   if (live) box.append(live);
   for (const a of data.escalations || []) {
-    box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${a.severity.toUpperCase()} · ${a.reminders_sent}/${a.max_reminders} reminders `,
+    box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${a.severity.toUpperCase()} · ${L("reminders", { sent: a.reminders_sent, max: a.max_reminders })} `,
       el("button", { class: "mini-btn ack-btn", type: "button", onclick: async () => {
         if (await postJson("/api/me/live/ack", { ack_id: a.id })) refreshAccount();
-      } }, "✅ 我醒了"),
+      } }, L("awake")),
       el("button", { class: "mini-btn", type: "button", onclick: async () => {
         const res = await postJson("/api/me/live/snooze", { ack_id: a.id });
-        if (res) { toast("😴", "暫停提醒 30 分鐘", `${res.symbol} 的提醒暫停 30 分鐘。`, COLORS.text, `snooze-${a.id}`); refreshAccount(); }
-      } }, "😴 暫停提醒 30 分鐘")));
+        if (res) { toast("😴", L("snoozed_title"), L("snoozed_body", { symbol: res.symbol }), COLORS.text, `snooze-${a.id}`); refreshAccount(); }
+      } }, L("snooze"))));
   }
 
   const acts = $("accountActions");
@@ -1581,7 +1616,7 @@ async function refreshAccount() {
       el("div", { class: "au-detail" }, [a.amount_usd ? money(a.amount_usd, { dp: 2 }) : null, a.details?.reason || a.details?.result].filter(Boolean).join(" · ")),
     ),
   )));
-  if (!data.actions?.length) acts.append(empty("📋", "No protective actions yet", data.protect_enabled ? "Proposals and confirmations from Telegram appear here." : "Protective actions are disabled on this server."));
+  if (!data.actions?.length) acts.append(empty("📋", L("no_actions"), L(data.protect_enabled ? "no_actions_hint" : "actions_disabled")));
 }
 
 function accountInsights(ins) {
@@ -1612,13 +1647,14 @@ function accountInsights(ins) {
 
 /* ---------------- quick actions (same reports as the Telegram buttons) ---------------- */
 
-const TOOLS = [["rescue", "🛟 救倉試算"], ["wick", "🕯 插針壓測"], ["stop", "🛑 止損檢查"], ["funding", "💸 資金費影響"]];
+const TOOLS = ["rescue", "wick", "stop", "funding"];
+const toolLabel = (tool) => L(`tool_${tool}`);
 
 function toolButtons(symbol, venue, live) {
-  return el("div", { class: "tool-row", lang: "zh-Hant-TW" }, ...TOOLS.map(([tool, label]) => el("button", {
+  return el("div", { class: "tool-row" }, ...TOOLS.map((tool) => el("button", {
     class: "mini-btn tool-btn", type: "button", "data-tool": tool,
     onclick: (ev) => { ev.stopPropagation(); openTool(tool, symbol, venue, live); },
-  }, label)));
+  }, toolLabel(tool))));
 }
 
 function toolLineClass(line) {
@@ -1630,20 +1666,19 @@ function toolLineClass(line) {
 
 async function openTool(tool, symbol, venue, live) {
   const dlg = $("toolDialog");
-  const label = Object.fromEntries(TOOLS)[tool];
-  $("toolTitle").textContent = `${label} · ${symbol}`;
-  $("toolTabs").replaceChildren(...TOOLS.map(([t, l]) => el("button", {
+  $("toolTitle").textContent = `${toolLabel(tool)} · ${symbol}`;
+  $("toolTabs").replaceChildren(...TOOLS.map((t) => el("button", {
     class: `mini-btn${t === tool ? " active" : ""}`, type: "button", onclick: () => openTool(t, symbol, venue, live),
-  }, l)));
-  $("toolBody").replaceChildren(el("div", { class: "tool-line muted" }, "載入中…"));
+  }, toolLabel(t))));
+  $("toolBody").replaceChildren(el("div", { class: "tool-line muted" }, L("tool_loading")));
   if (!dlg.open) dlg.showModal();
   const q = `symbol=${encodeURIComponent(symbol)}&tool=${tool}`;
-  const url = live ? `/api/me/position-tool/live?${q}&venue=${encodeURIComponent(venue)}` : `${API}/position-tool?${q}`;
+  const url = live ? `/api/me/position-tool/live?${q}&venue=${encodeURIComponent(venue)}` : `${API}/position-tool?${q}&lang=${I18N.lang}`;
   try {
     const r = await fetch(url, { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (r.status === 404) {
-      $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, "這個倉位已不存在（可能已平倉或模擬已結束）。"));
+      $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, L("tool_gone")));
       return;
     }
     if (!r.ok) throw new Error(`${r.status}`);
@@ -1654,24 +1689,22 @@ async function openTool(tool, symbol, venue, live) {
       body.push(el("button", { class: "btn btn-ghost tool-more", type: "button", onclick: () => {
         dlg.close();
         if (live) loadLiveRescue(symbol, venue); else loadRescue(symbol);
-      } }, "📊 在救倉模擬器中比較"));
+      } }, L("tool_compare")));
     }
     $("toolBody").replaceChildren(...body);
   } catch (err) {
-    $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, "暫時無法載入，請稍後再試。"));
+    $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, L("tool_failed")));
   }
 }
 
-/* ---------------- 🔔 通知設定 & 🔑 綁定帳號 (signed-in only) ---------------- */
+/* ---------------- 🔔 alert settings & 🔑 exchange connections (signed-in only) ---------------- */
 
-const SETTING_META = {
-  warning: ["⚠️ 警告門檻", "%"], critical: ["🚨 嚴重門檻", "%"], emergency: ["🆘 緊急門檻", "%"],
-  interval: ["⏰ 提醒間隔", " 分鐘"], max: ["🔁 最多提醒", " 次"], quiet: ["🌙 勿擾時段", ""],
-};
-const TOGGLE_META = { escalation: "⏰ 喚醒提醒", adaptive: "📈 自適應門檻", stops: "🛑 止損檢查" };
+const SETTING_UNITS = { warning: "%", critical: "%", emergency: "%", interval: "unit_minutes", max: "unit_times", quiet: "" };
+const TOGGLES = ["escalation", "adaptive", "stops"];
+const unitText = (unit) => (unit.startsWith("unit_") ? L(unit) : unit);
 
 function quietText(v) {
-  if (!v || v === "off") return "關閉";
+  if (!v || v === "off") return L("off");
   const [a, b] = String(v).split("-").map(Number);
   return `${String(a).padStart(2, "0")}:00–${String(b).padStart(2, "0")}:00`;
 }
@@ -1686,7 +1719,7 @@ async function sendJson(path, body) {
     const data = await r.json().catch(() => ({}));
     return { ok: r.ok, status: r.status, data };
   } catch (err) {
-    return { ok: false, status: 0, data: { detail: "無法連線到伺服器，請稍後再試。" } };
+    return { ok: false, status: 0, data: { detail: L("offline") } };
   }
 }
 
@@ -1702,46 +1735,48 @@ async function refreshSettings() {
     if (r.status === 401) { toLogin(); return; }
     renderSettings(await r.json());
   } catch (err) {
-    panelMsg("settingsMsg", "無法載入通知設定，請稍後再試。", false);
+    panelMsg("settingsMsg", L("settings_load_failed"), false);
   }
 }
 
 function renderSettings(cur) {
-  const rows = Object.entries(SETTING_META).map(([key, [label, unit]]) => {
+  const rows = Object.entries(SETTING_UNITS).map(([key, unit]) => {
+    const label = L(`setting_${key}`);
     const current = key === "quiet" ? (cur.quiet || "off") : cur[key];
     const options = [...new Set([...(cur.presets[key] || []).map(String), String(current)])];
     const select = el("select", { class: "field", "data-setting": key, "aria-label": label,
       onchange: (ev) => saveSetting(key, ev.target.value) },
       ...options.map((v) => {
-        const o = el("option", { value: v }, key === "quiet" ? quietText(v) : `${v}${unit}`);
+        const o = el("option", { value: v }, key === "quiet" ? quietText(v) : `${v}${unitText(unit)}`);
         if (v === String(current)) o.selected = true;
         return o;
       }));
     return el("label", { class: "setting-row" }, el("span", {}, label), select);
   });
-  const toggles = Object.entries(TOGGLE_META).map(([key, label]) => {
+  const toggles = TOGGLES.map((key) => {
+    const label = L(`toggle_${key}`);
     const box = el("input", { type: "checkbox", "data-setting": key, onchange: (ev) => saveSetting(key, ev.target.checked ? "on" : "off") });
     box.checked = !!cur[key];
     return el("label", { class: "toggle-row" }, box, el("span", {}, label));
   });
   $("settingsForm").replaceChildren(...rows, el("div", { class: "toggles" }, ...toggles),
-    el("div", { class: "panel-sub" }, `勿擾時段以 UTC${cur.quiet_utc_offset_hours >= 0 ? "+" : ""}${cur.quiet_utc_offset_hours}（台北時間）計算。`));
+    el("div", { class: "panel-sub" }, L("quiet_note", { offset: `${cur.quiet_utc_offset_hours >= 0 ? "+" : ""}${cur.quiet_utc_offset_hours}` })));
 }
 
 async function saveSetting(key, value) {
   const res = await sendJson("/api/me/settings", { key, value });
   if (res.ok) {
     renderSettings(res.data);
-    panelMsg("settingsMsg", "✅ 已儲存，Telegram 也會套用同樣設定。", true);
+    panelMsg("settingsMsg", L("settings_saved"), true);
   } else {
-    panelMsg("settingsMsg", `❌ ${res.data?.detail || "無法套用這個設定"}`, false);
+    panelMsg("settingsMsg", `❌ ${res.data?.detail || L("settings_failed")}`, false);
     refreshSettings();
   }
 }
 
 function bindingLabel(b) {
   const venue = b.venue === "binance" ? "🟡 Binance" : "🟢 Hyperliquid";
-  return `${venue}${b.network === "testnet" ? " 測試網" : ""}`;
+  return `${venue}${b.network === "testnet" ? L("testnet") : ""}`;
 }
 
 async function refreshBindings() {
@@ -1751,7 +1786,7 @@ async function refreshBindings() {
     if (r.status === 401) { toLogin(); return; }
     data = await r.json();
   } catch (err) {
-    panelMsg("bindMsg", "無法載入綁定狀態，請稍後再試。", false);
+    panelMsg("bindMsg", L("bind_load_failed"), false);
     return;
   }
   $("securityNote").textContent = data.security_note;
@@ -1759,18 +1794,18 @@ async function refreshBindings() {
   list.replaceChildren(...data.bindings.map((b) => el("div", { class: "binding" },
     el("span", {}, bindingLabel(b)),
     el("span", { class: "hint" }, b.api_key || b.wallet_address || ""),
-    el("button", { class: "mini-btn danger", type: "button", onclick: () => confirmUnbind(b) }, "🗑 解除綁定"),
+    el("button", { class: "mini-btn danger", type: "button", onclick: () => confirmUnbind(b) }, L("unbind")),
   )));
-  if (!data.bindings.length) list.append(empty("🔌", "尚未綁定", "選擇下方交易所開始綁定。"));
+  if (!data.bindings.length) list.append(empty("🔌", L("not_bound"), L("not_bound_hint")));
 }
 
 function confirmUnbind(b) {
   const dlg = $("confirmDialog");
-  $("confirmText").textContent = `確定要解除 ${bindingLabel(b)}（${b.api_key || b.wallet_address || ""}）？解除後會刪除加密保存的金鑰／地址，並停止監控這個帳號。`;
+  $("confirmText").textContent = L("confirm_unbind", { label: bindingLabel(b), hint: b.api_key || b.wallet_address || "" });
   $("confirmYes").onclick = async () => {
     dlg.close();
     const res = await sendJson("/api/me/bindings/unbind", { venue: b.venue, network: b.network || "mainnet", confirm: true });
-    panelMsg("bindMsg", res.ok ? `✅ 已解除 ${bindingLabel(b)} 的綁定，金鑰已刪除。` : `❌ ${res.data?.detail || "解除失敗"}`, res.ok);
+    panelMsg("bindMsg", res.ok ? L("unbound", { label: bindingLabel(b) }) : `❌ ${res.data?.detail || L("unbind_failed")}`, res.ok);
     refreshBindings();
     refreshAccount();
   };
@@ -1796,10 +1831,10 @@ function setupAccountPanels() {
     form.reset();
     const button = form.querySelector("button[type=submit]");
     button.disabled = true;
-    panelMsg("bindMsg", "🔄 驗證中…", true);
+    panelMsg("bindMsg", L("verifying"), true);
     const res = await sendJson(path, body);
     button.disabled = false;
-    panelMsg("bindMsg", res.data?.message || res.data?.detail || (res.ok ? "✅ 已綁定" : "❌ 綁定失敗"), res.ok);
+    panelMsg("bindMsg", res.data?.message || res.data?.detail || L(res.ok ? "bound" : "bind_failed"), res.ok);
     if (res.ok) { refreshBindings(); refreshAccount(); }
   });
   submit("bindBinance", "/api/me/bindings/binance", ["api_key", "api_secret"]);
@@ -1808,14 +1843,24 @@ function setupAccountPanels() {
   refreshBindings();
 }
 
+async function switchLanguage() {
+  const next = I18N.lang === "zh-Hant" ? "en" : "zh-Hant";
+  localStorage.setItem(LANG_KEY, next);
+  if (MODE === "me") await sendJson("/api/me/language", { language: next });
+  location.reload();
+}
+
 async function bootstrap() {
+  try {
+    await loadStrings(await initialLanguage());
+  } catch (err) { /* keep the built-in English text */ }
   if (!(await setupScope())) return;
   try {
     const r = await fetch(`${API}/snapshot`, { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (r.ok) applySnapshot(await r.json());
   } catch (err) {
-    $("headline").textContent = "Dashboard server unreachable — retrying…";
+    $("headline").textContent = L("unreachable");
   }
   connect();
 }
@@ -1834,6 +1879,7 @@ document.addEventListener("DOMContentLoaded", () => {
     location.assign("/");
   });
   $("toolClose").addEventListener("click", () => $("toolDialog").close());
+  $("langBtn").addEventListener("click", switchLanguage);
   for (const id of ["toolDialog", "confirmDialog"]) {
     $(id).addEventListener("click", (ev) => { if (ev.target === ev.currentTarget) ev.currentTarget.close(); });
   }
