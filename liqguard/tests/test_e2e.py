@@ -164,7 +164,7 @@ async def test_two_users_end_to_end(ctx, handlers, fsm):
     sent: list[tuple[int, str]] = []
 
     class Notifier:
-        async def notify(self, user_id: int, text: str, actions=None) -> None:
+        async def notify(self, user_id: int, text: str, actions=None, lang=None) -> None:
             sent.append((user_id, text))
 
     monitor = PositionMonitor(

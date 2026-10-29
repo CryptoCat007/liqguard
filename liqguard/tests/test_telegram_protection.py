@@ -4,10 +4,11 @@ import time
 
 import pytest
 
+from liqguard.i18n import EN, t
 from liqguard.models import User
 from liqguard.telegram.views import protection_lines, protection_summary
 
-from .conftest import fake_callback, fake_message
+from .conftest import fake_callback, fake_message, first_pending_ack, until
 
 ALICE, MALLORY = 1001, 2002
 
@@ -108,7 +109,7 @@ class TestAck:
         intruder = fake_callback(MALLORY, f"ack:{ack.id}")
         await handlers.callback_ack(intruder)
         assert ack.acknowledged_at is None
-        intruder.answer.assert_called_with("Already acknowledged or expired.")
+        intruder.answer.assert_called_with(t(EN, "alerts.gone"))
 
         owner = fake_callback(ALICE, f"ack:{ack.id}")
         await handlers.callback_ack(owner)
@@ -119,13 +120,15 @@ class TestAck:
     async def test_sim_ack_stops_simulated_reminders(self, ctx, handlers):
         await ctx.storage.save_user(User(telegram_id=ALICE, is_demo_mode=True))
         sim = handlers.simulation_for(await ctx.storage.get_user(ALICE))
+        sim.tick_interval = 0.02
         await sim.start()
-        await sim.wait()
-        pending = [a for a in sim.alerts if a.get("ack_id")]
-        assert pending
-        ack_id = pending[-1]["ack_id"]
+        assert await until(lambda: first_pending_ack(sim))
+        ack_id = first_pending_ack(sim)
+        symbol = sim.pending_symbol(ack_id)
         await handlers.callback_ack(fake_callback(MALLORY, f"ack:{ack_id}"))
+        assert not sim.muted
         owner = fake_callback(ALICE, f"ack:{ack_id}")
         await handlers.callback_ack(owner)
-        assert "reminders" in owner.message.answer.call_args.args[0]
-        sim.reset()
+        assert owner.message.answer.call_args.args[0] == t(EN, "alerts.demo_acked", symbol=symbol)
+        assert sim.muted and sim.escalation.pending_for(ALICE) == []
+        await sim.stop()

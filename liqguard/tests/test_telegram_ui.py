@@ -1,11 +1,15 @@
 """
-Inline-keyboard UI (zh-Hant-TW): callback codec, keyboard builders, router
-dispatch, user scoping, answerCallbackQuery, stale buttons, an end-to-end
-demo click-through and the guided binding flow.
+Inline-keyboard UI in both languages (English default, 繁體中文): callback
+codec, keyboard builders, router dispatch, user scoping, answerCallbackQuery,
+stale buttons, an end-to-end demo click-through, the guided binding flow,
+alert buttons that always match their message's language, and the demo's
+mute / stop guarantees (nothing is sent after ✅ I'm awake or ⏹ Stop demo).
 """
 
 import ast
+import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -17,31 +21,34 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from liqguard.core.binding import BindingService
+from liqguard.core.binding import BindingService, security_note
 from liqguard.exchanges.base import KeyCheck
+from liqguard.i18n import EN, LANGUAGES, ZH, Translator
 from liqguard.telegram import BotHandlers, TelegramNotifier
 from liqguard.telegram.sim_bridge import TelegramSimulationBridge
-from liqguard.telegram.ui import BOT_COMMANDS, TelegramUI
+from liqguard.telegram.ui import BOT_COMMANDS, TelegramUI, bot_commands
 from liqguard.telegram.ui import keyboards as kb
 from liqguard.telegram.ui.actions import ACTIONS
 from liqguard.telegram.ui.codec import MAX_BYTES, CallbackCodec, CallbackError, is_ui_payload
 from liqguard.telegram.ui.features import FEATURES, dispatch_table
 from liqguard.telegram.ui.features.binding import BindStates
-from liqguard.telegram.ui.router import ERROR, EXPIRED, INVALID, CallbackRouter
+from liqguard.telegram.ui.router import ERROR, EXPIRED, EXPIRED_TOAST, INVALID, CallbackRouter
 from liqguard.telegram.ui.screen import Signer
 from liqguard.telegram.ui.services import UIServices
-from liqguard.telegram.ui.texts import NOT_FOUND
 
-from .conftest import ALICE, BOB, fake_message
+from .conftest import ALICE, BOB, fake_message, until
 
 UI_DIR = Path(__file__).resolve().parents[1] / "telegram" / "ui"
 API_KEY = "Kq7" + "x" * 50 + "AB12"
 API_SECRET = "Sz9" + "y" * 50 + "CD34"
 WALLET = "0x" + "ab" * 20
+CJK = re.compile(r"[\u4e00-\u9fff]")
+EN_ALERT_WORDS = ("ALERT**", "REMINDER", "STOP-LOSS", "POSITIONS AT RISK", "PRE-FUNDING", "ADL WARNING",
+                  "POSITION SIZE", "STRESS TEST", "Muse (mock)", " · demo")
 
 SAMPLE_ARGS = {
-    "m": (), "h": (), "pl": (), "tr": (), "st": (), "ff": (), "se": (), "b": (), "bb": (), "bh": (), "bl": (), "bu": (),
-    "bc": (), "db": (), "dm": (), "dx": (), "do": (),
+    "m": (), "h": (), "l": (), "pl": (), "tr": (), "st": (), "ff": (), "se": (), "b": (), "bb": (), "bh": (), "bl": (),
+    "bu": (), "bc": (), "db": (), "dm": (), "dx": (), "do": (), "ls": ("zh",),
     "pd": ("sim", "BTCUSDT"), "pr": ("binance", "ETHUSDT"), "pw": ("hyperliquid", "kPEPE"), "ps": ("demo", "SOLUSDT"),
     "pf": ("sim", "AVAXUSDT"), "sp": ("quiet",), "ss": ("quiet", "23-7"), "bx": ("binance", "mainnet"),
     "by": ("hyperliquid", "mainnet"), "ds": ("cross_longs",), "aa": ("AbCdEf123_-x",), "az": ("AbCdEf123_-x",),
@@ -89,13 +96,20 @@ def fsm_storage():
     return MemoryStorage()
 
 
+@pytest.fixture(params=LANGUAGES)
+async def lang(request, ui):
+    """Run the test once per language, with ALICE having picked it."""
+    await ui.services.set_language(ALICE, request.param)
+    return request.param
+
+
 def state_for(storage, uid: int) -> FSMContext:
     return FSMContext(storage=storage, key=StorageKey(bot_id=1, chat_id=uid, user_id=uid))
 
 
-def make_callback(uid: int, data, chat_type: str = "private"):
+def make_callback(uid: int, data, chat_type: str = "private", language_code=None):
     cb = AsyncMock()
-    cb.from_user = MagicMock(id=uid)
+    cb.from_user = MagicMock(id=uid, language_code=language_code)
     cb.data = data
     cb.message = AsyncMock()
     cb.message.chat = MagicMock(type=chat_type, id=uid)
@@ -103,8 +117,8 @@ def make_callback(uid: int, data, chat_type: str = "private"):
     return cb
 
 
-async def click(ui, uid, data, state=None, chat_type="private"):
-    cb = make_callback(uid, data, chat_type)
+async def click(ui, uid, data, state=None, chat_type="private", language_code=None):
+    cb = make_callback(uid, data, chat_type, language_code)
     handled = await ui.router.handle(cb, state)
     return cb, handled
 
@@ -138,35 +152,51 @@ def labels(markup) -> list[str]:
     return [b.text for b in kb.iter_buttons(markup)]
 
 
-def all_keyboards(sign: Signer) -> list:
+def all_keyboards(T: Translator, sign: Signer) -> list:
     """Every keyboard builder with representative data (the source of every button the bot can render)."""
-    settings = {"warning": 20, "critical": 10, "emergency": 5, "interval": 2, "max": 5, "quiet_label": "關閉",
+    settings = {"warning": 20, "critical": 10, "emergency": 5, "interval": 2, "max": 5, "quiet_label": T("settings.quiet_off"),
                 "escalation": True, "adaptive": False, "stops": True}
     return [
-        kb.main_menu(sign),
-        kb.positions_list(sign, [("sim", "BTCUSDT", "🆘 BTCUSDT 多 · 3.0%"), ("binance", "ETHUSDT", "⚠️ ETHUSDT 空 · 12.0%")]),
-        kb.position_tools(sign, "sim", "BTCUSDT"),
-        kb.position_tools(sign, "sim", "BTCUSDT", current="pr"),
-        kb.triage(sign, [("sim", "BTCUSDT", "救 BTCUSDT（第 1 名）")]),
-        kb.stress(sign, [("sim", "BTCUSDT")]),
-        kb.refresh_back(sign, "ff"),
-        kb.no_account(sign),
-        kb.back_only(sign),
-        kb.settings(sign, settings),
-        *[kb.setting_options(sign, key, values, values[0]) for key, values in
+        kb.main_menu(T, sign),
+        kb.main_menu(T, sign, demo_running=True),
+        kb.language_menu(T, sign),
+        kb.positions_list(T, sign, [("sim", "BTCUSDT", "🆘 BTCUSDT · 3.0%"), ("binance", "ETHUSDT", "⚠️ ETHUSDT · 12.0%")]),
+        kb.position_tools(T, sign, "sim", "BTCUSDT"),
+        kb.position_tools(T, sign, "sim", "BTCUSDT", current="pr"),
+        kb.triage(T, sign, [("sim", "BTCUSDT", "BTCUSDT #1")]),
+        kb.stress(T, sign, [("sim", "BTCUSDT")]),
+        kb.refresh_back(T, sign, "ff"),
+        kb.no_account(T, sign),
+        kb.back_only(T, sign),
+        kb.settings(T, sign, settings),
+        *[kb.setting_options(T, sign, key, values, values[0]) for key, values in
           {"warning": (15, 20), "critical": (8, 10), "emergency": (3, 5), "interval": (1, 2), "max": (3, 5),
            "quiet": ("off", "23-7")}.items()],
-        kb.binding_menu(sign),
-        kb.binding_waiting(sign),
-        kb.binding_back(sign),
-        kb.unbind_list(sign, [("binance", "mainnet", "🟡 Binance …AB12"), ("hyperliquid", "mainnet", "🟢 Hyperliquid 0xabab…abab")]),
-        kb.unbind_confirm(sign, "binance", "mainnet"),
-        kb.dashboard(sign, "https://liqguard.test/auth/login?token=x"),
-        kb.demo_menu(sign, running=False, demo_mode=True),
-        kb.demo_menu(sign, running=True, demo_mode=True),
-        kb.demo_started(sign),
-        kb.alert_keyboard(sign, "sim", "BTCUSDT", "AbCdEf123_-x"),
+        kb.binding_menu(T, sign),
+        kb.binding_waiting(T, sign),
+        kb.binding_back(T, sign),
+        kb.unbind_list(T, sign, [("binance", "mainnet", "🟡 Binance …AB12"), ("hyperliquid", "mainnet", "🟢 Hyperliquid 0xabab…abab")]),
+        kb.unbind_confirm(T, sign, "binance", "mainnet"),
+        kb.dashboard(T, sign, "https://liqguard.test/auth/login?token=x"),
+        kb.demo_menu(T, sign, running=False, demo_mode=True),
+        kb.demo_menu(T, sign, running=True, demo_mode=True),
+        kb.demo_started(T, sign),
+        kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x"),
+        kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x", demo=True),
     ]
+
+
+def has_chinese(text: str) -> bool:
+    """CJK outside the language names that every language shows ("🌐 Language / 語言", "繁體中文")."""
+    return bool(CJK.search(text.replace("語言", "").replace("繁體中文", "")))
+
+
+def in_language(lang: str, text: str, markup) -> bool:
+    """Body and every button label written in `lang` (no CJK in English, no English alert heads or labels in 繁體中文)."""
+    names = labels(markup)
+    if lang == EN:
+        return not CJK.search(text) and not any(CJK.search(n) for n in names)
+    return not any(w in text for w in EN_ALERT_WORDS) and all(CJK.search(n) for n in names)
 
 
 async def enable_demo(ctx, uid: int, scenario: str = "critical") -> None:
@@ -287,37 +317,51 @@ class TestCodec:
 class TestKeyboards:
     sign = Signer(CallbackCodec(b"k" * 32), ALICE, now=1_800_000_000)
 
-    def test_main_menu_has_the_nine_entries(self):
-        assert labels(kb.main_menu(self.sign)) == [
-            "📊 我的倉位", "🚨 先處理哪個", "🧪 壓力測試", "💸 資金費率/手續費", "🔔 通知設定",
-            "🔑 綁定帳號", "🖥️ 網頁看板", "🎬 Demo", "❓ 幫助",
-        ]
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_main_menu_has_every_feature_and_the_language_button(self, lang):
+        T = Translator(lang)
+        keys = ["positions", "triage", "stress", "funding", "settings", "binding", "dashboard", "demo", "language", "help"]
+        assert labels(kb.main_menu(T, self.sign)) == [T(f"kb.{k}") for k in keys]
+        assert labels(kb.main_menu(T, self.sign, demo_running=True))[0] == T("kb.sim_stop")
+        assert T("kb.language") == "🌐 Language / 語言"
 
-    def test_every_position_gets_its_four_tools_and_a_way_back(self):
-        markup = kb.positions_list(self.sign, [("sim", "BTCUSDT", "BTC"), ("sim", "ETHUSDT", "ETH")])
-        names = labels(markup)
-        assert names == ["BTC", "🛟 救倉試算", "🕯 插針壓測", "🛑 止損檢查", "💸 資金費影響",
-                         "ETH", "🛟 救倉試算", "🕯 插針壓測", "🛑 止損檢查", "💸 資金費影響",
-                         "🔄 重新整理", "⬅️ 返回主選單"]
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_every_position_gets_its_four_tools_and_a_way_back(self, lang):
+        T = Translator(lang)
+        markup = kb.positions_list(T, self.sign, [("sim", "BTCUSDT", "BTC"), ("sim", "ETHUSDT", "ETH")])
+        tools = [T(f"tools.name.{n}") for n in ("rescue", "wick", "stop", "funding")]
+        assert labels(markup) == ["BTC", *tools, "ETH", *tools, T("kb.refresh"), T("kb.back_menu")]
         acts = [a for a, _ in actions_of_codec(self.sign, markup)]
         assert acts[:5] == ["pd", "pr", "pw", "ps", "pf"]
 
     def test_tool_screen_hides_the_current_tool(self):
-        names = labels(kb.position_tools(self.sign, "sim", "BTCUSDT", current="pw"))
-        assert "🕯 插針壓測" not in names and "🛟 救倉試算" in names and names[-1] == "⬅️ 返回主選單"
+        T = Translator(ZH)
+        names = labels(kb.position_tools(T, self.sign, "sim", "BTCUSDT", current="pw"))
+        assert T("tools.name.wick") not in names and T("tools.name.rescue") in names and names[-1] == T("kb.back_menu")
 
-    def test_alert_buttons(self):
-        assert labels(kb.alert_keyboard(self.sign, "sim", "BTCUSDT", "abcdef123")) == [
-            "🚑 先處理這個", "✅ 我醒了", "😴 暫停提醒 30 分鐘"]
-        assert labels(kb.alert_keyboard(self.sign, "sim", "BTCUSDT", None)) == ["🚑 先處理這個"]
-        assert kb.alert_keyboard(self.sign, None, None, None) is None
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_alert_buttons(self, lang):
+        T = Translator(lang)
+        assert labels(kb.alert_keyboard(T, self.sign, "sim", "BTCUSDT", "abcdef123")) == [
+            T("kb.alert_rescue"), T("kb.alert_awake"), T("kb.alert_snooze")]
+        assert labels(kb.alert_keyboard(T, self.sign, "sim", "BTCUSDT", "abcdef123", demo=True)) == [
+            T("kb.alert_rescue"), T("kb.alert_awake"), T("kb.alert_snooze_demo"), T("kb.sim_stop")]
+        assert labels(kb.alert_keyboard(T, self.sign, "sim", "BTCUSDT", None)) == [T("kb.alert_rescue")]
+        assert labels(kb.alert_keyboard(T, self.sign, None, None, None, demo=True)) == [T("kb.sim_stop")]
+        assert kb.alert_keyboard(T, self.sign, None, None, None) is None
 
-    def test_builders_are_pure(self):
-        assert [m.model_dump() for m in all_keyboards(self.sign)] == [m.model_dump() for m in all_keyboards(self.sign)]
+    def test_stop_demo_label(self):
+        assert Translator(EN)("kb.sim_stop") == "⏹ Stop demo" and Translator(ZH)("kb.sim_stop") == "⏹ 停止 Demo"
 
-    def test_every_button_fits_and_is_signed_for_its_user(self):
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_builders_are_pure(self, lang):
+        T = Translator(lang)
+        assert [m.model_dump() for m in all_keyboards(T, self.sign)] == [m.model_dump() for m in all_keyboards(T, self.sign)]
+
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_every_button_fits_and_is_signed_for_its_user(self, lang):
         codec = self.sign.codec
-        for markup in all_keyboards(self.sign):
+        for markup in all_keyboards(Translator(lang), self.sign):
             for b in kb.iter_buttons(markup):
                 if b.url:
                     continue
@@ -326,15 +370,24 @@ class TestKeyboards:
                 with pytest.raises(CallbackError):
                     codec.decode(BOB, b.callback_data, now=1_800_000_000)
 
-    def test_dashboard_url_button_only_for_https(self):
-        assert labels(kb.dashboard(self.sign, "http://localhost/x")) == ["⬅️ 返回主選單"]
-        assert labels(kb.dashboard(self.sign, "https://x.test/y"))[0] == "🖥️ 開啟我的看板"
+    def test_both_languages_render_the_same_buttons(self):
+        en = [actions_of_codec(self.sign, m) for m in all_keyboards(Translator(EN), self.sign)]
+        zh = [actions_of_codec(self.sign, m) for m in all_keyboards(Translator(ZH), self.sign)]
+        assert en == zh
 
-    def test_all_ui_text_is_traditional_chinese(self):
+    def test_dashboard_url_button_only_for_https(self):
+        T = Translator(EN)
+        assert labels(kb.dashboard(T, self.sign, "http://localhost/x")) == [T("kb.back_menu")]
+        assert labels(kb.dashboard(T, self.sign, "https://x.test/y"))[0] == T("kb.open_dashboard")
+
+    def test_chinese_labels_are_traditional_and_english_labels_have_no_chinese(self):
         simplified = set("险仓设绑帐户启关闭页种发误确认损费详")
-        for markup in all_keyboards(self.sign):
+        for markup in all_keyboards(Translator(ZH), self.sign):
             for name in labels(markup):
                 assert not simplified & set(name), name
+        for markup in all_keyboards(Translator(EN), self.sign):
+            for name in labels(markup):
+                assert not CJK.search(name) or name in ("🌐 Language / 語言", "🇹🇼 繁體中文"), name
 
 
 def actions_of_codec(sign: Signer, markup) -> list[tuple[str, tuple]]:
@@ -379,7 +432,8 @@ class TestModularity:
             if level:
                 assert module == "screen", module
             else:
-                assert module.split(".")[0] in ("__future__", "typing", "aiogram"), module
+                assert module.split(".")[0] in ("__future__", "typing", "aiogram") \
+                    or module in ("liqguard.i18n", "liqguard.core.user_settings"), module
 
     def test_codec_has_no_framework_dependencies(self):
         assert all(module.split(".")[0] not in ("aiogram", "liqguard") for _, module, _ in _imports(UI_DIR / "codec.py"))
@@ -405,24 +459,45 @@ class TestModularity:
 class TestRouterDispatch:
     def test_every_action_is_reachable_from_some_keyboard(self, ui):
         sign = ui.signer(ALICE)
-        reachable = {a for m in all_keyboards(sign) for a, _ in actions_of(ui, ALICE, m)}
-        assert reachable == set(ACTIONS)
+        for lang in LANGUAGES:
+            reachable = {a for m in all_keyboards(Translator(lang), sign) for a, _ in actions_of(ui, ALICE, m)}
+            assert reachable == set(ACTIONS), lang
 
-    async def test_every_button_routes_to_its_handler(self, ctx, ui, fsm_storage):
+    async def test_every_button_routes_to_its_handler_in_both_languages(self, ctx, ui, fsm_storage, lang):
         await enable_demo(ctx, ALICE)
+        T = Translator(lang)
         sign = ui.signer(ALICE)
         checked = 0
-        for markup in all_keyboards(sign):
+        for markup in all_keyboards(T, sign):
             for b in kb.iter_buttons(markup):
                 if not b.callback_data:
                     continue
                 expected = ui.codec.decode(ALICE, b.callback_data).action
+                if expected == "ls":
+                    continue
                 cb, handled = await click(ui, ALICE, b.callback_data, state_for(fsm_storage, ALICE))
                 assert handled == expected, (b.text, handled, expected)
-                assert toast(cb)[0] != ERROR, b.text
+                assert toast(cb)[0] != T(ERROR), b.text
                 assert cb.answer.await_count == 1
+                text, _ = shown(cb)
+                shown_text = text or toast(cb)[0]
+                assert shown_text and has_chinese(shown_text) == (lang == ZH), (lang, b.text, shown_text[:80])
                 checked += 1
         assert checked > 60
+
+    async def test_language_button_switches_and_is_saved(self, ctx, ui):
+        cb, handled = await click(ui, ALICE, ui.signer(ALICE)("ls", "zh"))
+        assert handled == "ls" and toast(cb)[0] == Translator(ZH)("lang.set_toast")
+        user = await ctx.storage.get_user(ALICE)
+        assert user.language == ZH and user.language_explicit
+        cb, _ = await click(ui, ALICE, ui.signer(ALICE)("m"), language_code="en")
+        assert shown(cb)[0].startswith(Translator(ZH)("menu.text", status="").split("\n")[0])
+
+    async def test_telegram_language_picks_the_default(self, ui):
+        cb, _ = await click(ui, ALICE, ui.signer(ALICE)("m"), language_code="zh-TW")
+        assert shown(cb)[0].startswith("🏠 主選單")
+        cb, _ = await click(ui, BOB, ui.signer(BOB)("m"), language_code="de")
+        assert shown(cb)[0].startswith("🏠 Main menu")
 
     async def test_legacy_callbacks_are_left_to_bot_handlers(self, ctx, ui):
         dp = Dispatcher(storage=MemoryStorage())
@@ -431,19 +506,24 @@ class TestRouterDispatch:
         assert dp.sub_routers[0] is ui.aiogram_router
         assert not is_ui_payload("rescue:sim:BTCUSDT")
 
-    async def test_set_my_commands(self, ui):
+    async def test_set_my_commands_for_default_and_zh(self, ui):
         bot = AsyncMock()
         await ui.set_commands(bot)
-        commands = bot.set_my_commands.await_args.args[0]
-        assert [c.command for c in commands] == [c for c, _ in BOT_COMMANDS]
-        assert {"start", "menu"} <= {c.command for c in commands}
-        assert all(c.command.islower() and len(c.command) <= 32 and c.description for c in commands)
+        calls = bot.set_my_commands.await_args_list
+        assert [c.kwargs.get("language_code") for c in calls] == [None, "zh"]
+        for c, lang in zip(calls, LANGUAGES):
+            commands = c.args[0]
+            assert [x.command for x in commands] == list(BOT_COMMANDS)
+            assert [x.description for x in commands] == [x.description for x in bot_commands(lang)]
+            assert all(x.command.islower() and len(x.command) <= 32 and x.description for x in commands)
+        assert "stopdemo" in BOT_COMMANDS and "lang" in BOT_COMMANDS
         bot.set_my_commands.side_effect = RuntimeError("telegram down")
         await ui.set_commands(bot)
 
     @pytest.mark.parametrize("text,command,action", [
-        ("/start", "start", "m"), ("/menu", "menu", "m"), ("/help", "help", "h"),
+        ("/start", "start", "m"), ("/menu", "menu", "m"), ("/help", "help", "h"), ("/lang", "lang", "l"),
         ("/positions", "positions", "pl"), ("/bind", "bind", "b"), ("/demo", "demo", "dm"), ("/settings", "settings", "se"),
+        ("/stopdemo", "stopdemo", "dx"),
     ])
     async def test_commands_open_their_screen(self, ui, fsm_storage, text, command, action):
         message = fake_message(ALICE, text)
@@ -457,13 +537,14 @@ class TestRouterDispatch:
         assert markup is not None
         assert await state.get_state() is None
 
-    async def test_start_shows_main_menu(self, ui, fsm_storage):
+    async def test_start_shows_main_menu(self, ui, fsm_storage, lang):
+        T = Translator(lang)
         message = fake_message(ALICE, "/start")
         message.bot = AsyncMock()
         await ui.on_command(message, state_for(fsm_storage, ALICE), MagicMock(command="start", args=None))
         text, markup = message.answer.await_args.args[0], message.answer.await_args.kwargs["reply_markup"]
-        assert text.startswith("🏠 主選單")
-        assert len(labels(markup)) == 9
+        assert text.split("\n")[0] == T("menu.text", status="").split("\n")[0]
+        assert len(labels(markup)) == 10 and T("kb.language") in labels(markup)
 
     async def test_settings_with_arguments_falls_through_to_legacy(self, ui, fsm_storage):
         with pytest.raises(SkipHandler):
@@ -480,7 +561,7 @@ class TestUserScoping:
         data = ui.signer(ALICE)("pl")
         cb, handled = await click(ui, BOB, data, chat_type="group")
         assert handled is None
-        assert toast(cb) == (INVALID, True)
+        assert toast(cb) == (Translator(EN)(INVALID), True)
         cb.message.edit_text.assert_not_awaited()
         cb.message.answer.assert_not_awaited()
 
@@ -492,25 +573,26 @@ class TestUserScoping:
         for action in ("pd", "pr", "pw", "ps", "pf"):
             cb, handled = await click(ui, BOB, ui.signer(BOB)(action, "demo", "BTCUSDT"))
             text, _ = shown(cb)
-            assert handled == action and text == NOT_FOUND
+            assert handled == action and text == Translator(EN)("positions.not_found")
         cb, _ = await click(ui, BOB, ui.signer(BOB)("pl"))
         assert "BTCUSDT" not in shown(cb)[0]
 
     async def test_b_cannot_ack_or_snooze_a_alert(self, ctx, ui):
+        T = Translator(EN)
         ack = ctx.escalations.open(ALICE, "binance", "BTCUSDT", "critical", "x", time.time(), 60, 5)
         for action in ("aa", "az"):
             cb, _ = await click(ui, BOB, ui.signer(BOB)(action, ack.id))
-            assert "已確認或已失效" in toast(cb)[0]
+            assert toast(cb)[0] == T("alerts.gone")
         assert ack.snoozed_until is None and ack.acknowledged_at is None
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("az", ack.id))
-        assert "30" in toast(cb)[0] and ack.snoozed_until >= time.time() + 29 * 60
+        assert toast(cb)[0] == T("alerts.snoozed_toast", minutes=30) and ack.snoozed_until >= time.time() + 29 * 60
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("aa", ack.id))
-        assert ack.acknowledged_at is not None
+        assert ack.acknowledged_at is not None and toast(cb)[0] == T("alerts.acked_toast")
 
     async def test_b_cannot_unbind_a(self, ctx, ui):
         assert (await ui.services.binding.bind_hyperliquid(ALICE, WALLET)).ok
         cb, _ = await click(ui, BOB, ui.signer(BOB)("by", "hyperliquid", "mainnet"))
-        assert "不存在" in shown(cb)[0]
+        assert shown(cb)[0] == Translator(EN)("binding.gone")
         assert len(await ui.services.binding.list(ALICE)) == 1
 
     async def test_settings_change_only_the_callers_thresholds(self, ctx, ui):
@@ -519,11 +601,18 @@ class TestUserScoping:
         bob = await ui.services.user(BOB)
         assert bob.threshold.warning_distance_pct == ctx.settings.default_threshold().warning_distance_pct
 
+    async def test_language_is_per_user(self, ctx, ui):
+        await click(ui, ALICE, ui.signer(ALICE)("ls", "zh"))
+        assert (await ctx.storage.get_user(ALICE)).language == ZH
+        cb, _ = await click(ui, BOB, ui.signer(BOB)("m"))
+        assert shown(cb)[0].startswith("🏠 Main menu")
+
     async def test_demo_simulation_is_private(self, ctx, ui):
         await click(ui, ALICE, ui.signer(ALICE)("ds", "cross_longs"))
         assert ctx.simulations.get(ALICE) is not None and ctx.simulations.get(BOB) is None
         cb, _ = await click(ui, BOB, ui.signer(BOB)("pl"))
         assert shown(cb)[0].startswith("🔌")
+        await ctx.simulations.get(ALICE).stop()
 
 
 # --------------------------------------------------------------------------- 6. answerCallbackQuery always
@@ -535,14 +624,14 @@ class TestAlwaysAnswered:
             cb, _ = await click(ui, ALICE, data)
             assert cb.answer.await_count == 1
 
-    async def test_handler_exception(self, ui, monkeypatch):
+    async def test_handler_exception(self, ui, monkeypatch, lang):
         async def boom(req):
             raise RuntimeError("db down")
 
         monkeypatch.setitem(ui.router.handlers, "pl", boom)
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("pl"))
         assert cb.answer.await_count == 1
-        assert toast(cb) == (ERROR, True)
+        assert toast(cb) == (Translator(lang)(ERROR), True)
 
     async def test_render_failure(self, ui):
         cb = make_callback(ALICE, ui.signer(ALICE)("m"))
@@ -551,7 +640,7 @@ class TestAlwaysAnswered:
         cb.bot.send_message.side_effect = RuntimeError("blocked by user")
         await ui.router.handle(cb)
         assert cb.answer.await_count == 1
-        assert toast(cb) == (ERROR, True)
+        assert toast(cb) == (Translator(EN)(ERROR), True)
 
     async def test_answer_failure_does_not_propagate(self, ui):
         cb = make_callback(ALICE, ui.signer(ALICE)("m"))
@@ -564,21 +653,22 @@ class TestAlwaysAnswered:
         monkeypatch.setattr(ui.services.binding, "list", AsyncMock(side_effect=RuntimeError("storage locked")))
         for action in ("m", "pl", "se", "b", "bl", "dm"):
             cb, _ = await click(ui, ALICE, ui.signer(ALICE)(action))
-            assert cb.answer.await_count == 1 and toast(cb)[0] == ERROR
+            assert cb.answer.await_count == 1 and toast(cb)[0] == Translator(EN)(ERROR)
 
 
 # --------------------------------------------------------------------------- 7. stale / expired buttons
 
 
 class TestStaleButtons:
-    async def test_expired_button_opens_a_fresh_main_menu(self, ctx, ui):
+    async def test_expired_button_opens_a_fresh_main_menu(self, ctx, ui, lang):
+        T = Translator(lang)
         await enable_demo(ctx, ALICE)
         old = ui.codec.encode(ALICE, "pr", "demo", "BTCUSDT", now=time.time() - 3 * 86400)
         cb, handled = await click(ui, ALICE, old)
         text, markup = shown(cb)
-        assert handled == "m" and text.startswith(EXPIRED)
-        assert toast(cb)[0] == "按鈕已過期"
-        assert labels(markup)[0] == "📊 我的倉位"
+        assert handled == "m" and text.startswith(T(EXPIRED))
+        assert toast(cb)[0] == T(EXPIRED_TOAST)
+        assert labels(markup)[0] == T("kb.positions")
 
     async def test_expired_unbind_confirmation_does_nothing(self, ui):
         assert (await ui.services.binding.bind_hyperliquid(ALICE, WALLET)).ok
@@ -587,23 +677,24 @@ class TestStaleButtons:
         assert handled == "m"
         assert len(await ui.services.binding.list(ALICE)) == 1
 
-    async def test_closed_position(self, ctx, ui):
+    async def test_closed_position(self, ctx, ui, lang):
+        T = Translator(lang)
         await enable_demo(ctx, ALICE)
         cb, handled = await click(ui, ALICE, ui.signer(ALICE)("pw", "demo", "NOPEUSDT"))
-        assert handled == "pw" and shown(cb)[0] == NOT_FOUND and toast(cb)[0] == "倉位已不存在"
+        assert handled == "pw" and shown(cb)[0] == T("positions.not_found") and toast(cb)[0] == T("positions.not_found_toast")
 
     async def test_simulation_buttons_after_demo_is_disabled(self, ctx, ui):
         await click(ui, ALICE, ui.signer(ALICE)("ds", "cross_longs"))
         stale = ui.signer(ALICE)("pr", "sim", "BTCUSDT")
         await click(ui, ALICE, ui.signer(ALICE)("do"))
         cb, _ = await click(ui, ALICE, stale)
-        assert shown(cb)[0] == NOT_FOUND
+        assert shown(cb)[0] == Translator(EN)("positions.not_found")
 
     async def test_already_acknowledged_alert(self, ctx, ui):
         ack = ctx.escalations.open(ALICE, "binance", "BTCUSDT", "critical", "x", time.time(), 60, 5)
         await click(ui, ALICE, ui.signer(ALICE)("aa", ack.id))
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("aa", ack.id))
-        assert "已確認或已失效" in toast(cb)[0]
+        assert toast(cb)[0] == Translator(EN)("alerts.gone")
         cb.message.edit_text.assert_not_awaited()
 
     async def test_unchanged_screen_is_not_resent(self, ui):
@@ -623,19 +714,17 @@ class TestStaleButtons:
     async def test_button_from_before_a_secret_rotation(self, ui):
         old = CallbackCodec(b"previous-secret" * 3).encode(ALICE, "pl")
         cb, handled = await click(ui, ALICE, old)
-        assert handled is None and toast(cb) == (INVALID, True)
+        assert handled is None and toast(cb) == (Translator(EN)(INVALID), True)
 
 
 # --------------------------------------------------------------------------- 8. end-to-end demo click-through
 
 
-async def crawl(ui, uid, start_markup, state, skip=frozenset({"do", "dx", "by", "bb", "bh", "db"}), limit=400):
+async def crawl(ui, uid, start_markup, state, skip=frozenset({"do", "dx", "by", "bb", "bh", "db", "ls"}), limit=400):
     """Breadth-first tap of every distinct button reachable from `start_markup`."""
-    visited: set[str] = set()
     seen: set[tuple] = set()
-    queue = []
-    for b in kb.iter_buttons(start_markup):
-        queue.append(b.callback_data)
+    visited: set[str] = set()
+    queue = [b.callback_data for b in kb.iter_buttons(start_markup)]
     while queue and len(seen) < limit:
         data = queue.pop(0)
         if data is None:
@@ -646,7 +735,7 @@ async def crawl(ui, uid, start_markup, state, skip=frozenset({"do", "dx", "by", 
         seen.add((d.action, d.args))
         cb, handled = await click(ui, uid, data, state)
         assert handled == d.action
-        assert toast(cb)[0] != ERROR, (d.action, d.args)
+        assert toast(cb)[0] not in (Translator(EN)(ERROR), Translator(ZH)(ERROR)), (d.action, d.args)
         assert cb.answer.await_count == 1
         text, markup = shown(cb)
         assert text, (d.action, d.args)
@@ -658,63 +747,72 @@ async def crawl(ui, uid, start_markup, state, skip=frozenset({"do", "dx", "by", 
 
 
 class TestDemoClickThrough:
-    async def test_every_menu_path_in_demo_mode(self, ctx, ui, fsm_storage):
+    async def test_every_menu_path_in_demo_mode(self, ctx, ui, fsm_storage, lang):
+        T = Translator(lang)
         state = state_for(fsm_storage, ALICE)
         start = fake_message(ALICE, "/start")
         start.bot = AsyncMock()
         await ui.on_command(start, state, MagicMock(command="start", args=None))
         menu = start.answer.await_args.kwargs["reply_markup"]
 
-        cb, _ = await click(ui, ALICE, ui.signer(ALICE)("ds", "critical"), state)
+        await click(ui, ALICE, ui.signer(ALICE)("ds", "critical"), state)
         visited, seen = await crawl(ui, ALICE, menu, state)
-        expected = set(ACTIONS) - {"do", "dx", "by", "bb", "bh", "bc", "db", "bx", "aa", "az"}
+        expected = set(ACTIONS) - {"do", "dx", "by", "bb", "bh", "bc", "db", "bx", "aa", "az", "ls"}
         assert expected <= visited, expected - visited
         tools = {(a, args) for a, args in seen if a in ("pr", "pw", "ps", "pf")}
-        assert {args for _, args in tools} >= {("sim", s) for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "AVAXUSDT")} \
-            or {args for _, args in tools} >= {("demo", s) for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT")}
+        assert {args for _, args in tools} >= {("demo", s) for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT")}
 
         for action in ("db", "bb", "bh", "bc"):
             cb, handled = await click(ui, ALICE, ui.signer(ALICE)(action), state)
-            assert handled == action and toast(cb)[0] != ERROR
+            assert handled == action and toast(cb)[0] != T(ERROR)
 
         cb, handled = await click(ui, ALICE, ui.signer(ALICE)("dx"), state)
-        assert handled == "dx" and shown(cb)[0].startswith("⏹ 模擬已停止")
-        cb, _ = await click(ui, ALICE, ui.signer(ALICE)("ss", "escalation", "on"), state)
-        assert "喚醒提醒：開" in shown(cb)[0]
+        assert handled == "dx" and shown(cb)[0].startswith(T("demo.not_running"))
+        await click(ui, ALICE, ui.signer(ALICE)("ss", "escalation", "on"), state)
+        assert (await ctx.storage.get_user(ALICE)).threshold.escalation_enabled
+
         sim = ctx.simulations.get_or_create(ALICE)
         taps: list[tuple] = []
+        after_ack: list[str] = []
+        claimed: list[str] = []
 
         async def on_event(event):
             data = event["data"]
-            if taps or event["type"] not in ("advice", "escalation") or not data.get("ack_id"):
+            if claimed:
+                if len(taps) == 2 and event["type"] in ("alert", "advice", "escalation"):
+                    after_ack.append(event["type"])
                 return
-            alert = ui.alert_markup(ALICE, [("", f"ack:{data['ack_id']}"), ("", f"rescue:sim:{data['symbol']}")])
-            rescue, awake, snooze = kb.iter_buttons(alert)
-            assert [rescue.text, awake.text, snooze.text] == ["🚑 先處理這個", "✅ 我醒了", "😴 暫停提醒 30 分鐘"]
-            for b in (snooze, rescue, awake):
+            if event["type"] != "advice" or not data.get("ack_id"):
+                return
+            claimed.append(data["ack_id"])
+            alert = ui.alert_markup(ALICE, [("", f"ack:{data['ack_id']}"), ("", f"rescue:sim:{data['symbol']}")], lang=lang, demo=True)
+            assert labels(alert) == [T("kb.alert_rescue"), T("kb.alert_awake"), T("kb.alert_snooze_demo"), T("kb.sim_stop")]
+            rescue, awake = list(kb.iter_buttons(alert))[:2]
+            for b in (rescue, awake):
                 cb, handled = await click(ui, ALICE, b.callback_data, state)
                 taps.append((handled, toast(cb)[0], shown(cb)[0]))
 
         sim.subscribe("click-through", on_event)
         await click(ui, ALICE, ui.signer(ALICE)("ds", "cross_longs"), state)
         await sim.wait()
-        assert [t[0] for t in taps] == ["az", "pr", "aa"], taps
-        assert "30 分鐘" in taps[0][1] and "救倉試算" in taps[1][2] and taps[2][1] == "已停止提醒"
+        assert [t[0] for t in taps] == ["pr", "aa"], taps
+        assert T("tools.name.rescue") in taps[0][2] and taps[1][1] == T("alerts.demo_acked_toast")
+        assert after_ack == [] and sim.muted and sim.state == "finished"
 
-        visited_sim, _ = await crawl(ui, ALICE, kb.demo_started(ui.signer(ALICE)), state)
+        visited_sim, _ = await crawl(ui, ALICE, kb.demo_started(T, ui.signer(ALICE)), state)
         assert {"pl", "pd", "pr", "pw", "ps", "pf", "tr", "st", "ff"} <= visited_sim
 
         assert (await ui.services.binding.bind_hyperliquid(ALICE, WALLET)).ok
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("bu"), state)
         bx = next(b for b in kb.iter_buttons(shown(cb)[1]) if b.text.startswith("🗑"))
         cb, handled = await click(ui, ALICE, bx.callback_data, state)
-        by = next(b for b in kb.iter_buttons(shown(cb)[1]) if b.text == "✅ 確認解除")
+        by = next(b for b in kb.iter_buttons(shown(cb)[1]) if b.text == T("kb.unbind_confirm"))
         cb, handled = await click(ui, ALICE, by.callback_data, state)
-        assert handled == "by" and "已解除" in shown(cb)[0]
+        assert handled == "by" and toast(cb)[0] == T("binding.unbound_toast")
 
         for action in ("dx", "do"):
             cb, handled = await click(ui, ALICE, ui.signer(ALICE)(action), state)
-            assert handled == action and toast(cb)[0] != ERROR
+            assert handled == action and toast(cb)[0] != T(ERROR)
         assert not (await ctx.storage.get_user(ALICE)).is_demo_mode
 
 
@@ -733,18 +831,19 @@ async def send_text(ui, uid, text, state, chat_type="private"):
 
 
 class TestBindingFlow:
-    async def test_binance_one_message(self, ctx, ui, fsm_storage, caplog):
+    async def test_binance_one_message(self, ctx, ui, fsm_storage, caplog, lang):
+        T = Translator(lang)
         caplog.set_level(logging.DEBUG)
         state = state_for(fsm_storage, ALICE)
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("bb"), state)
         text, markup = shown(cb)
-        assert "Enable Reading" in text and "唯讀" in text and "私鑰" in text
-        assert labels(markup) == ["❌ 取消綁定"]
+        assert text.startswith(T("binding.guide_binance").split("\n")[0]) and "Enable Reading" in text
+        assert labels(markup) == [T("kb.bind_cancel")]
         assert await state.get_state() == BindStates.binance_key.state
 
         message, calls, reply = await send_text(ui, ALICE, f"{API_KEY}\n{API_SECRET}", state)
         assert calls[0] == "delete"
-        assert "已綁定 Binance" in reply and "…AB12" in reply
+        assert T("binding.result.binance_ok", label="Binance", hint="…AB12", permissions="READ") in reply
         assert API_KEY not in reply and API_SECRET not in reply
         assert await state.get_state() is None and not (await state.get_data()).get("api_key")
         user = await ctx.storage.get_user(ALICE)
@@ -753,13 +852,14 @@ class TestBindingFlow:
         assert API_SECRET not in caplog.text and API_KEY not in caplog.text
 
     async def test_binance_key_then_secret(self, ctx, ui, fsm_storage):
+        T = Translator(EN)
         state = state_for(fsm_storage, ALICE)
         await click(ui, ALICE, ui.signer(ALICE)("bb"), state)
         _, calls, reply = await send_text(ui, ALICE, API_KEY, state)
-        assert calls == ["delete", "reply"] and "Secret" in reply and API_KEY not in reply
+        assert calls == ["delete", "reply"] and T("binding.key_received") in reply and API_KEY not in reply
         assert await state.get_state() == BindStates.binance_secret.state
         _, calls, reply = await send_text(ui, ALICE, API_SECRET, state)
-        assert calls[0] == "delete" and "已綁定" in reply
+        assert calls[0] == "delete" and "…AB12" in reply
         assert not (await state.get_data()).get("api_key")
 
     async def test_trade_or_withdraw_permission_rejected(self, ctx, ui, fsm_storage, adapter):
@@ -768,7 +868,7 @@ class TestBindingFlow:
         await click(ui, ALICE, ui.signer(ALICE)("bb"), state)
         _, calls, reply = await send_text(ui, ALICE, f"{API_KEY} {API_SECRET}", state)
         assert calls[0] == "delete"
-        assert "已拒絕" in reply and "FUTURES_TRADE" in reply and "WITHDRAW" in reply
+        assert Translator(EN)("binding.result.rejected_permissions", permissions="FUTURES_TRADE, WITHDRAW") in reply
         assert API_KEY not in reply
         assert (await ctx.storage.get_user(ALICE)) is None or not (await ctx.storage.get_user(ALICE)).bindings
         assert await state.get_state() == BindStates.binance_key.state
@@ -778,22 +878,25 @@ class TestBindingFlow:
         "0x" + "a1" * 32,
     ])
     async def test_seed_phrase_or_private_key_never_stored(self, ctx, ui, fsm_storage, material):
-        for start, st in (("bb", BindStates.binance_key), ("bh", BindStates.hyperliquid_address)):
+        T = Translator(EN)
+        for start, st, key in (("bb", BindStates.binance_key, "binding.secret_material"),
+                               ("bh", BindStates.hyperliquid_address, "binding.result.secret_material_wallet")):
             state = state_for(fsm_storage, ALICE)
             await click(ui, ALICE, ui.signer(ALICE)(start), state)
             _, calls, reply = await send_text(ui, ALICE, material, state)
-            assert calls[0] == "delete" and "私鑰或助記詞" in reply and material not in reply
+            assert calls[0] == "delete" and T(key) in reply and material not in reply
             assert await state.get_state() == st.state
         assert not FakeAdapter.seen
         assert await ui.services.binding.list(ALICE) == []
 
-    async def test_hyperliquid_address(self, ctx, ui, fsm_storage):
+    async def test_hyperliquid_address(self, ctx, ui, fsm_storage, lang):
+        T = Translator(lang)
         state = state_for(fsm_storage, ALICE)
         await click(ui, ALICE, ui.signer(ALICE)("bh"), state)
         _, calls, reply = await send_text(ui, ALICE, "0x1234", state)
-        assert calls[0] == "delete" and "格式不正確" in reply
+        assert calls[0] == "delete" and T("binding.result.wallet_format") in reply
         _, _, reply = await send_text(ui, ALICE, WALLET, state)
-        assert "已綁定 Hyperliquid" in reply and WALLET not in reply
+        assert "Hyperliquid" in reply and "0xabab" in reply and WALLET not in reply
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("bl"), state)
         assert "Hyperliquid" in shown(cb)[0] and WALLET not in shown(cb)[0]
         assert (await ctx.storage.get_user(ALICE)).bindings[0].wallet_address == WALLET
@@ -802,22 +905,24 @@ class TestBindingFlow:
         state = state_for(fsm_storage, ALICE)
         await click(ui, ALICE, ui.signer(ALICE)("bb"), state)
         _, calls, reply = await send_text(ui, ALICE, "short nope", state)
-        assert calls[0] == "delete" and "格式不正確" in reply
+        assert calls[0] == "delete" and Translator(EN)("binding.result.key_format") in reply
         assert not FakeAdapter.seen
 
-    async def test_cancel(self, ui, fsm_storage):
+    @pytest.mark.parametrize("word", ["cancel", "取消"])
+    async def test_cancel(self, ui, fsm_storage, word):
+        T = Translator(EN)
         state = state_for(fsm_storage, ALICE)
         await click(ui, ALICE, ui.signer(ALICE)("bb"), state)
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("bc"), state)
-        assert await state.get_state() is None and shown(cb)[0].startswith("🔑 綁定帳號")
+        assert await state.get_state() is None and shown(cb)[0].startswith(T("binding.menu", bound="").split("\n")[0])
         await click(ui, ALICE, ui.signer(ALICE)("bh"), state)
-        _, _, reply = await send_text(ui, ALICE, "取消", state)
-        assert reply == "已取消綁定。" and await state.get_state() is None
+        _, _, reply = await send_text(ui, ALICE, word, state)
+        assert reply == T("binding.cancelled") and await state.get_state() is None
 
     async def test_group_chat_refused(self, ui, fsm_storage):
         state = state_for(fsm_storage, ALICE)
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("bb"), state, chat_type="group")
-        assert "私訊" in shown(cb)[0] and toast(cb)[1] is True
+        assert shown(cb)[0] == Translator(EN)("binding.private_only") and toast(cb)[1] is True
         assert await state.get_state() is None
 
     async def test_other_commands_pass_through(self, ui, fsm_storage):
@@ -826,33 +931,36 @@ class TestBindingFlow:
         with pytest.raises(SkipHandler):
             await ui.on_bind_message(fake_message(ALICE, "/risk"), state)
 
-    async def test_unbind_needs_confirmation(self, ui):
+    async def test_unbind_needs_confirmation(self, ui, lang):
+        T = Translator(lang)
         assert (await ui.services.binding.bind_hyperliquid(ALICE, WALLET)).ok
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("bx", "hyperliquid", "mainnet"))
         text, markup = shown(cb)
-        assert "確定要解除" in text and labels(markup) == ["✅ 確認解除", "❌ 取消"]
+        assert text.startswith("⚠️") and labels(markup) == [T("kb.unbind_confirm"), T("kb.cancel")]
         assert len(await ui.services.binding.list(ALICE)) == 1
-        cancel = next(b for b in kb.iter_buttons(markup) if b.text == "❌ 取消")
+        cancel = next(b for b in kb.iter_buttons(markup) if b.text == T("kb.cancel"))
         cb, handled = await click(ui, ALICE, cancel.callback_data)
         assert handled == "bu" and len(await ui.services.binding.list(ALICE)) == 1
 
-    async def test_menu_shows_security_note_and_masked_bindings(self, ui):
+    async def test_menu_shows_security_note_and_masked_bindings(self, ui, lang):
         assert (await ui.services.binding.bind_binance(ALICE, API_KEY, API_SECRET)).ok
         cb, _ = await click(ui, ALICE, ui.signer(ALICE)("b"))
         text = shown(cb)[0]
-        assert "只接受「唯讀」API 金鑰" in text and "助記詞" in text and "…AB12" in text and API_KEY not in text
+        assert security_note(lang) in text and "…AB12" in text and API_KEY not in text
 
 
 # --------------------------------------------------------------------------- 10. alert buttons on live and simulated alerts
 
 
 class TestAlertButtons:
-    async def test_notifier_turns_alert_actions_into_ui_buttons(self, ui):
+    @pytest.mark.parametrize("alert_lang", LANGUAGES)
+    async def test_notifier_buttons_use_the_alerts_language(self, ui, alert_lang):
+        T = Translator(alert_lang)
         bot = AsyncMock()
         notifier = TelegramNotifier(bot, ui.alert_markup)
-        await notifier.notify(ALICE, "🚨", [("🛟 Rescue options", "rescue:binance:BTCUSDT"), ("✅ I'm awake", "ack:AbCdEf123_-x")])
+        await notifier.notify(ALICE, "🚨", [("🛟", "rescue:binance:BTCUSDT"), ("✅", "ack:AbCdEf123_-x")], lang=alert_lang)
         markup = bot.send_message.await_args.kwargs["reply_markup"]
-        assert labels(markup) == ["🚑 先處理這個", "✅ 我醒了", "😴 暫停提醒 30 分鐘"]
+        assert labels(markup) == [T("kb.alert_rescue"), T("kb.alert_awake"), T("kb.alert_snooze")]
         assert [a for a, _ in actions_of(ui, ALICE, markup)] == ["pr", "aa", "az"]
         for b in kb.iter_buttons(markup):
             with pytest.raises(CallbackError):
@@ -868,21 +976,26 @@ class TestAlertButtons:
         await TelegramNotifier(bot, ui.alert_markup).notify(ALICE, "x", [("🛟", "rescue:hyperliquid:@107")])
         assert [b.callback_data for b in kb.iter_buttons(bot.send_message.await_args.kwargs["reply_markup"])] == ["rescue:hyperliquid:@107"]
 
-    async def test_simulation_alerts_lead_with_ui_buttons(self, ctx, ui):
+    async def test_live_alert_body_and_buttons_share_the_users_language(self, ctx, ui, lang):
+        from liqguard.alerts import AlertManager, EscalationService, PositionMonitor
+        from liqguard.models import UserThreshold
+
+        await enable_demo(ctx, ALICE, "critical")
+        user = await ctx.storage.get_user(ALICE)
+        user.threshold = UserThreshold(adaptive_thresholds=False)
         bot = AsyncMock()
-        sim = ctx.simulations.get_or_create(ALICE)
-        TelegramSimulationBridge(bot, sim, ui.alert_markup)
-        sim.set_scenario("cross_longs")
-        await sim.start(source="test")
-        await sim.wait()
-        alerts = [c.kwargs["reply_markup"] for c in bot.send_message.await_args_list
-                  if c.kwargs.get("reply_markup") and "🚑 先處理這個" in labels(c.kwargs["reply_markup"])]
-        assert alerts
-        with_ack = [m for m in alerts if "😴 暫停提醒 30 分鐘" in labels(m)]
-        assert with_ack and all("✅ 我醒了" in labels(m) for m in with_ack)
-        for markup in alerts:
-            assert not any(b.callback_data in (None, "") for b in kb.iter_buttons(markup))
-            assert not any((b.callback_data or "").startswith("ack:") for b in kb.iter_buttons(markup))
+        notifier = TelegramNotifier(bot, ui.alert_markup)
+
+        async def users():
+            return [user]
+
+        monitor = PositionMonitor(users, ctx.positions.snapshot_for, notifier, AlertManager(), ctx.llm,
+                                  escalation=EscalationService(notifier))
+        await monitor.check_all_users()
+        sent = [(c.args[1], c.kwargs.get("reply_markup")) for c in bot.send_message.await_args_list]
+        assert any(markup and Translator(lang)("kb.alert_awake") in labels(markup) for _, markup in sent)
+        for text, markup in sent:
+            assert in_language(lang, text, markup), (lang, text[:120], labels(markup))
 
     async def test_live_snooze_holds_reminders(self, ctx, ui):
         now = time.time()
@@ -891,3 +1004,126 @@ class TestAlertButtons:
         await click(ui, ALICE, ui.signer(ALICE)("az", ack.id))
         assert ack not in ctx.escalations.due(now + 60)
         assert ack in ctx.escalations.due(now + 31 * 60)
+
+
+# --------------------------------------------------------------------------- 11. demo: one language, ⏹ everywhere, silent after ✅ / 😴 / ❌ / ⏹
+
+
+def sent_messages(bot) -> list[tuple[str, object]]:
+    return [(c.args[1], c.kwargs.get("reply_markup")) for c in bot.send_message.await_args_list]
+
+
+def button_for(ui, markup, action: str):
+    return next((b for b in kb.iter_buttons(markup) if b.callback_data and is_ui_payload(b.callback_data)
+                 and ui.codec.decode(ALICE, b.callback_data).action == action), None)
+
+
+class TestDemoIsBoundedAndSilencedByTheUser:
+    SETTLE = 0.3
+
+    async def start(self, ctx, ui, scenario: str = "mixed"):
+        bot = AsyncMock()
+        sim = ctx.simulations.get_or_create(ALICE)
+        sim.tick_interval, sim.escalation_seconds_per_minute = 0.03, 0.002
+        TelegramSimulationBridge(bot, sim, ui.alert_markup)
+        cb, handled = await click(ui, ALICE, ui.signer(ALICE)("ds", scenario))
+        assert handled == "ds" and sim.is_running
+        return bot, sim
+
+    async def first_message_with(self, ui, bot, action: str):
+        assert await until(lambda: any(m and button_for(ui, m, action) for _, m in sent_messages(bot))), action
+        return next((t, m) for t, m in sent_messages(bot) if m and button_for(ui, m, action))
+
+    async def assert_silent_from_now(self, bot, sim):
+        sent = bot.send_message.await_count
+        await sim.wait()
+        await asyncio.sleep(self.SETTLE)
+        assert bot.send_message.await_count == sent, [t[:60] for t, _ in sent_messages(bot)[sent:]]
+        assert sim.escalation.pending_for(ALICE) == []
+        assert sim._escalation_task is None or sim._escalation_task.done()
+
+    async def test_start_demo_press_im_awake_no_further_demo_messages(self, ctx, ui, lang):
+        """The live bug: ✅ 我醒了 on a demo alert, yet the demo kept raising new alerts and reminders."""
+        T = Translator(lang)
+        bot, sim = await self.start(ctx, ui)
+        _, markup = await self.first_message_with(ui, bot, "aa")
+        cb, handled = await click(ui, ALICE, button_for(ui, markup, "aa").callback_data)
+        assert handled == "aa" and toast(cb)[0] == T("alerts.demo_acked_toast")
+        assert sim.muted and sim.is_running
+        await self.assert_silent_from_now(bot, sim)
+        assert sim.state == "finished" and sim.step == sim.steps
+
+    async def test_awake_after_reminders_started(self, ctx, ui):
+        bot, sim = await self.start(ctx, ui)
+        assert await until(lambda: len(sim.escalation_log) >= 2)
+        _, markup = await self.first_message_with(ui, bot, "aa")
+        await click(ui, ALICE, button_for(ui, markup, "aa").callback_data)
+        await self.assert_silent_from_now(bot, sim)
+
+    async def test_mute_this_demo_stops_everything(self, ctx, ui):
+        bot, sim = await self.start(ctx, ui)
+        _, markup = await self.first_message_with(ui, bot, "az")
+        cb, handled = await click(ui, ALICE, button_for(ui, markup, "az").callback_data)
+        assert handled == "az" and toast(cb)[0] == Translator(EN)("alerts.demo_quiet_toast")
+        await self.assert_silent_from_now(bot, sim)
+
+    async def test_dismiss_stops_everything(self, ctx, ui):
+        from .conftest import fake_callback
+
+        bot, sim = await self.start(ctx, ui)
+        assert await until(lambda: any(m and any(b.callback_data == "action:dismiss" for b in kb.iter_buttons(m))
+                                       for _, m in sent_messages(bot)))
+        await BotHandlers(ctx).callback_action_confirm(fake_callback(ALICE, "action:dismiss"))
+        await self.assert_silent_from_now(bot, sim)
+
+    async def test_stop_button_on_a_demo_alert_stops_everything(self, ctx, ui, lang):
+        bot, sim = await self.start(ctx, ui)
+        _, markup = await self.first_message_with(ui, bot, "aa")
+        cb, handled = await click(ui, ALICE, button_for(ui, markup, "dx").callback_data)
+        assert handled == "dx" and shown(cb)[0].startswith(Translator(lang)("demo.stopped"))
+        assert sim.state == "stopped"
+        await self.assert_silent_from_now(bot, sim)
+
+    async def test_stopdemo_command(self, ctx, ui, fsm_storage, lang):
+        bot, sim = await self.start(ctx, ui)
+        await self.first_message_with(ui, bot, "aa")
+        message = fake_message(ALICE, "/stopdemo")
+        message.bot = AsyncMock()
+        await ui.on_command(message, state_for(fsm_storage, ALICE), MagicMock(command="stopdemo", args=None))
+        assert message.answer.await_args.args[0].startswith(Translator(lang)("demo.stopped"))
+        assert sim.state == "stopped"
+        await self.assert_silent_from_now(bot, sim)
+
+    async def test_untouched_demo_is_finite_and_every_message_can_stop_it(self, ctx, ui, lang):
+        T = Translator(lang)
+        bot, sim = await self.start(ctx, ui)
+        await sim.wait()
+        await asyncio.sleep(self.SETTLE)
+        sent = sent_messages(bot)
+        assert sim.state == "finished" and sim.step == sim.steps
+        assert sim.escalation.pending_for(ALICE) == [] and (sim._escalation_task is None or sim._escalation_task.done())
+        *during, (last, last_markup) = sent
+        assert last.startswith(T("sim.finished").split("\n")[0]) and last_markup is None
+        assert during and all(m is not None and button_for(ui, m, "dx") for _, m in during)
+        count = bot.send_message.await_count
+        await asyncio.sleep(self.SETTLE)
+        assert bot.send_message.await_count == count
+
+    async def test_every_demo_message_and_its_keyboard_share_the_owners_language(self, ctx, ui, lang):
+        bot, sim = await self.start(ctx, ui, "cross_longs")
+        await sim.wait()
+        sent = sent_messages(bot)
+        kinds = {t.split("\n")[0] for t, _ in sent}
+        assert len(sent) > 5 and len(kinds) > 3
+        for text, markup in sent:
+            assert in_language(lang, text, markup), (lang, text[:120], labels(markup))
+        await sim.stop()
+
+    async def test_language_switch_mid_demo_changes_body_and_buttons_together(self, ctx, ui):
+        bot, sim = await self.start(ctx, ui)
+        await self.first_message_with(ui, bot, "aa")
+        await click(ui, ALICE, ui.signer(ALICE)("ls", "zh"))
+        before = bot.send_message.await_count
+        await sim.wait()
+        for text, markup in sent_messages(bot)[before:]:
+            assert in_language(ZH, text, markup), (text[:120], labels(markup))

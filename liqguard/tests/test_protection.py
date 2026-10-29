@@ -464,6 +464,25 @@ class TestEscalationTracker:
         tr.resolve(1, "binance", "X")
         assert tr.pending_for(1) == []
 
+    def test_ack_silences_the_position_until_it_materially_worsens(self):
+        tr = EscalationTracker()
+        crit = tr.open(1, "binance", "BTCUSDT", "critical", "", 0, 120, 5, distance_pct=8.0)
+        assert tr.acknowledge(1, crit.id, 10) is crit
+        assert tr.is_silenced(1, "binance", "BTCUSDT")
+        assert tr.open(1, "binance", "BTCUSDT", "critical", "", 20, 120, 5, distance_pct=6.0) is None
+        assert tr.open(1, "binance", "BTCUSDT", "emergency", "", 30, 120, 5, distance_pct=4.5) is None
+        assert tr.due(10_000) == [] and tr.pending_for(1) == []
+        assert not tr.is_silenced(2, "binance", "BTCUSDT") and tr.open(2, "binance", "BTCUSDT", "critical", "", 0, 120, 5)
+        worse = tr.open(1, "binance", "BTCUSDT", "emergency", "", 40, 120, 5, distance_pct=3.9)
+        assert worse is not None and worse.id != crit.id and not tr.is_silenced(1, "binance", "BTCUSDT")
+
+    def test_recovery_lifts_the_silence(self):
+        tr = EscalationTracker()
+        ack = tr.open(1, "binance", "X", "critical", "", 0, 120, 5, distance_pct=8.0)
+        tr.acknowledge(1, ack.id, 1)
+        tr.resolve(1, "binance", "X")
+        assert tr.open(1, "binance", "X", "critical", "", 2, 120, 5, distance_pct=8.0) is not None
+
     def test_urgency_grows(self):
         assert [urgency(n, 5) for n in (1, 2, 4, 5)] == ["reminder", "urgent", "urgent", "final"]
 
@@ -543,3 +562,23 @@ class TestMonitor:
         alert_call = next(c for c in notifier.notify.call_args_list if "ack:" in str(c))
         actions = alert_call.kwargs.get("actions") or alert_call.args[2]
         assert actions[0][1] == f"ack:{pending[0].id}"
+
+    async def test_acknowledged_position_is_not_re_alerted_until_it_materially_worsens(self):
+        tracker = EscalationTracker()
+        svc = EscalationService(AsyncMock(), tracker)
+        threshold = UserThreshold(adaptive_thresholds=False, stop_loss_checks=False)
+        book = BookSnapshot([pos(mark=100.0, liq=92.0)], "live", RiskContext())
+        notifier, monitor = await self._run(book, threshold, escalation=svc)
+        (ack,) = tracker.pending_for(1)
+        assert ack.severity == "critical" and svc.acknowledge(1, ack.id) is ack
+
+        notifier.reset_mock()
+        book.positions[:] = [pos(mark=100.0, liq=95.5)]
+        await monitor.check_all_users()
+        assert notifier.notify.call_count == 0 and tracker.pending_for(1) == []
+
+        book.positions[:] = [pos(mark=100.0, liq=98.0)]
+        await monitor.check_all_users()
+        assert notifier.notify.call_count == 1
+        (fresh,) = tracker.pending_for(1)
+        assert fresh.severity == "emergency" and fresh.id != ack.id

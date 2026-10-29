@@ -13,6 +13,7 @@ from liqguard.alerts import AlertManager, PositionMonitor
 from liqguard.core.binding import BindingService
 from liqguard.core.position_tools import TOOLS
 from liqguard.exchanges.base import KeyCheck
+from liqguard.i18n import EN, t
 from liqguard.models import Position, Side, User, UserThreshold, Venue
 from liqguard.web import create_app
 from liqguard.web.auth import SESSION_COOKIE
@@ -67,7 +68,8 @@ class TestQuickActions:
         r = dashboard.get(f"/api/demo/position-tool?symbol=BTCUSDT&tool={tool}")
         assert r.status_code == 200
         body = r.json()
-        assert body["title"].startswith(TOOLS[tool]) and "BTCUSDT" in body["title"] and "模擬資料" in body["title"]
+        assert body["title"].startswith(t(EN, f"tools.name.{tool}")) and "BTCUSDT" in body["title"]
+        assert t(EN, "common.demo_data").strip() in body["title"] and body["lang"] == EN
         assert body["lines"] and all(isinstance(line, str) for line in body["lines"])
 
     def test_unknown_tool_or_symbol(self, dashboard):
@@ -106,7 +108,7 @@ class TestSettingsPanel:
     async def test_read_and_update(self, ctx, dashboard):
         sign_in(dashboard, ctx, ALICE)
         current = dashboard.get("/api/me/settings").json()
-        assert current["quiet_label"] == "關閉" and current["presets"]["quiet"][0] == "off"
+        assert current["quiet_label"] == t(EN, "settings.quiet_off") and current["presets"]["quiet"][0] == "off"
         r = dashboard.post("/api/me/settings", json={"key": "quiet", "value": "23-7"}, headers=CSRF)
         assert r.status_code == 200 and r.json()["quiet_label"] == "23:00–07:00"
         r = dashboard.post("/api/me/settings", json={"key": "interval", "value": "5"}, headers=CSRF)
@@ -118,7 +120,7 @@ class TestSettingsPanel:
     async def test_rejects_out_of_order_tiers(self, ctx, dashboard):
         sign_in(dashboard, ctx, ALICE)
         r = dashboard.post("/api/me/settings", json={"key": "warning", "value": "8"}, headers=CSRF)
-        assert r.status_code == 400 and "緊急 < 嚴重 < 警告" in r.json()["detail"]
+        assert r.status_code == 400 and r.json()["detail"] == t(EN, "settings.invalid")
 
     def test_requires_csrf_and_session(self, ctx, dashboard):
         assert dashboard.post("/api/me/settings", json={"key": "max", "value": "3"}, headers=CSRF).status_code == 401
@@ -131,7 +133,7 @@ class TestSettingsPanel:
         sign_in(dashboard, ctx, ALICE)
         dashboard.post("/api/me/settings", json={"key": "stops", "value": "off"}, headers=CSRF)
         screen = await TelegramUI(ctx).router.run(ALICE, "se")
-        assert "止損檢查：關" in screen.text
+        assert "Stop-loss checks: OFF" in screen.text
 
 
 class TestBindingPanel:
@@ -142,7 +144,7 @@ class TestBindingPanel:
         assert API_KEY not in r.text and API_SECRET not in r.text
         listing = dashboard.get("/api/me/bindings")
         assert API_KEY not in listing.text and listing.json()["bindings"][0]["api_key"] == "…AB12"
-        assert "唯讀" in listing.json()["security_note"]
+        assert listing.json()["security_note"] == t(EN, "binding.security_note")
         assert API_SECRET.encode() not in Path(ctx.settings.db_path).read_bytes()
 
     def test_trade_permission_rejected(self, ctx, dashboard):

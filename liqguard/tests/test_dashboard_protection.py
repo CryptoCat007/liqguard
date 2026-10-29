@@ -12,6 +12,8 @@ from liqguard.simulation import MarketSimulation
 from liqguard.web import create_app
 from liqguard.web.auth import SESSION_COOKIE
 
+from .conftest import first_pending_ack, until
+
 CSRF = {"X-LiqGuard-CSRF": "1"}
 ALICE, BOB = 1001, 2002
 
@@ -58,13 +60,20 @@ class TestDemoSnapshot:
 
 class TestDemoAck:
     def test_ack_stops_reminders_once(self, client, sim):
-        run_to_end(client, sim)
-        ack_id = next(a["ack_id"] for a in sim.alerts if a.get("ack_id"))
+        sim.tick_interval = 0.02
+        assert client.post("/api/demo/simulate", headers=CSRF).json()["status"] == "started"
+        assert client.portal.call(until, lambda: first_pending_ack(sim))
+        ack_id = first_pending_ack(sim)
         assert client.post("/api/demo/ack", json={"ack_id": ack_id}).status_code == 403
         r = client.post("/api/demo/ack", json={"ack_id": ack_id}, headers=CSRF)
         assert r.status_code == 200 and r.json()["status"] == "acknowledged"
         assert client.post("/api/demo/ack", json={"ack_id": ack_id}, headers=CSRF).status_code == 404
         assert any(e["event"] == "alert_acknowledged" for e in client.get("/api/demo/audit").json())
+        assert sim.muted and client.get("/api/demo/snapshot").json()["escalation"]["pending"] == []
+
+    def test_reminders_end_with_the_run(self, client, sim):
+        run_to_end(client, sim)
+        assert sim.state == "finished" and sim.escalation.pending_for(None) == []
 
     @pytest.mark.parametrize("bad", ["", "x" * 65, "../etc", "a b"])
     def test_ack_rejects_malformed_ids(self, client, bad):
@@ -119,14 +128,12 @@ class TestPrivateDashboard:
     async def test_sim_ack_cannot_cross_users(self, ctx, dashboard):
         for uid in (ALICE, BOB):
             await ctx.storage.save_user(User(telegram_id=uid))
+        sim = ctx.simulations.get_or_create(ALICE)
+        sim.tick_interval = 0.05
         sign_in(dashboard, ctx, ALICE)
         assert dashboard.post("/api/me/simulate", headers=CSRF).status_code == 200
-        sim = ctx.simulations.get(ALICE)
-        for _ in range(400):
-            if sim.state == "finished":
-                break
-            await asyncio.sleep(0.05)
-        ack_id = next(a["ack_id"] for a in sim.alerts if a.get("ack_id"))
+        assert dashboard.portal.call(until, lambda: first_pending_ack(sim))
+        ack_id = first_pending_ack(sim)
 
         sign_in(dashboard, ctx, BOB)
         assert dashboard.post("/api/me/ack", json={"ack_id": ack_id}, headers=CSRF).status_code == 404

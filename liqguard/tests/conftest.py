@@ -50,3 +50,22 @@ def fake_callback(user_id: int, data: str):
     callback.data = data
     callback.message = AsyncMock()
     return callback
+
+
+async def until(predicate, timeout: float = 10.0, step: float = 0.01) -> bool:
+    """Poll `predicate()` on the running loop until it is true (False on timeout)."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            return False
+        await asyncio.sleep(step)
+    return True
+
+
+def first_pending_ack(sim):
+    """The ack id of the demo's first open wake-up reminder, if any."""
+    pending = sim.escalation.pending_for(sim.owner_id)
+    return pending[0].id if pending else None

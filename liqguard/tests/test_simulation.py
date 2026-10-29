@@ -1,19 +1,19 @@
 """Tests for the demo market simulation, its owner-only Telegram bridge and handler integration."""
 
-import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from liqguard.ai import MetaLLMClient
+from liqguard.i18n import EN, t
 from liqguard.models import Side
 from liqguard.protect import ActionStatus, AuditLogEntry, ProtectiveActionsManager
 from liqguard.risk import ActionType
 from liqguard.simulation import TIERS, MarketSimulation, price_at_distance
 from liqguard.telegram.sim_bridge import TelegramSimulationBridge, format_advice_message
 
-from .conftest import fake_message
+from .conftest import fake_message, until
 
 
 @pytest.fixture
@@ -213,20 +213,19 @@ class TestTelegramBridge:
         assert buttons[0].startswith("ack:")
 
     async def test_escalation_reminders_and_web_ack_reach_telegram(self):
-        sim = MarketSimulation(MetaLLMClient(use_mock=True), owner_id=42, tick_interval=0, escalation_seconds_per_minute=0.01)
+        sim = MarketSimulation(MetaLLMClient(use_mock=True), owner_id=42, tick_interval=0.03, escalation_seconds_per_minute=0.002)
         bot = AsyncMock()
         TelegramSimulationBridge(bot, sim)
         await sim.start()
-        await sim.wait()
-        for _ in range(100):
-            if sim.escalation_log:
-                break
-            await asyncio.sleep(0.02)
+        assert await until(lambda: sim.escalation_log)
         reminder = sim.escalation_log[0]
         await sim.acknowledge(reminder["ack_id"], source="dashboard")
+        sent_at_ack = bot.send_message.call_count
+        await sim.wait()
         texts = [c.args[1] for c in bot.send_message.call_args_list]
         assert reminder["text"] in texts
-        assert any("acknowledged on the dashboard" in t for t in texts)
+        assert texts[sent_at_ack - 1] == t(EN, "sim.acked_elsewhere", symbol=reminder["symbol"], source=t(EN, "sim.source.dashboard"))
+        assert bot.send_message.call_count == sent_at_ack
 
     def test_public_simulation_cannot_be_bridged(self, sim):
         with pytest.raises(ValueError):
