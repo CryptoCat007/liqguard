@@ -626,7 +626,13 @@ same. Pressing **✅ I'm awake**, **😴 Mute this demo** or **Dismiss** on any 
 until you start a new demo. (Previously each tick could open a fresh alert, so one ack only silenced
 one of them.) For live positions, acknowledging an alert silences that position until it gets
 materially worse (a higher tier *and* at most half the acknowledged distance) or recovers.
-It runs a cross-margined book:
+
+The fixed demo books (Normal / Volatile / Near liquidation / Safe) are monitored only for
+**10 minutes after you pick one**, so a restart never wakes up a forgotten demo. **✅**, **😴**,
+**Dismiss**, **⏹ Stop demo** and `/stopdemo` each end that window and acknowledge every open demo
+reminder at once. Demo wake-up reminders (reminder → URGENT → FINAL) carry **⏹ Stop demo** too.
+
+The Liquidation Simulation runs a cross-margined book:
 - BTC and SOL share one Binance cross wallet, so SOL is dragged toward liquidation by BTC's losses.
 - ETH sits in a Hyperliquid cross account.
 - Demo funding settles on a simulated clock (12 min per step, 8 h per run): BTC 8 h, SOL 4 h, ETH hourly.
@@ -851,7 +857,40 @@ python3 -m pytest liqguard/tests/ -q
 | `test_polling.py` | Short Telegram request timeout and fast backoff |
 | `test_dashboard_account_tools.py` | Web quick actions (same text as Telegram), settings panel, binding panel (no echo, CSRF, confirm), live snooze, quiet hours in the monitor |
 
-754 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
+| `test_prerelease.py` | Every pre-release scenario below in both languages, plus a mutation check (a demo that ignores ✅ / 😴 / ⏹ must fail) and callback logging without payloads |
+
+787 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
+
+### Pre-release check (required for every release)
+
+```bash
+python3 scripts/prerelease_check.py            # all scenarios, English and 繁體中文
+python3 scripts/prerelease_check.py --list     # what each scenario checks
+python3 scripts/prerelease_check.py book-awake --lang en -v
+```
+
+It drives the **production aiogram `Dispatcher`** (the same `wire_bot()` used by `main.py`) with
+real `Update` objects over a fake Bot API session, so no Telegram token or network is needed. Each
+scenario starts from a fresh temporary database and covers `/start`, every main-menu button and
+command in both languages, the bind flow, a full simulation run, and ✅ I'm awake / 😴 Snooze /
+⏹ Stop demo / `/stopdemo` on both the simulation and the fixed demo books, asserting **zero** demo
+messages afterwards (reminders included, with the clock moved hours ahead). It exits non-zero on
+any failed check, unhandled update, unanswered button, error toast or language mismatch. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Callback logging
+
+Every button press logs two INFO lines on `liqguard.telegram.callbacks`:
+
+```
+Callback received: user=617971023 lang=en action=ui:aa
+Callback done: user=617971023 action=ui:aa outcome=handled 12 ms
+```
+
+`outcome` is `handled`, `rejected (<reason>)` (expired, tampered, wrong user), or, at WARNING,
+`UNHANDLED` / `error <Type>`. Raw `callback_data` and its signature are never logged. If a user
+reports a button that "did nothing" and these lines are missing, the update never reached this
+process: look for a second bot instance polling the same token.
 
 ## Environment Variables
 
