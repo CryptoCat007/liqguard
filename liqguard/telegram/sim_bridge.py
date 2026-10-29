@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -97,21 +97,39 @@ def advice_keyboard(card: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+AlertMarkup = Callable[[int, list[tuple[str, str]]], Any]
+
+
 class TelegramSimulationBridge:
     """
     Subscribes to a user-owned MarketSimulation and sends its alerts to the
     owner's chat. The recipient is fixed to `simulation.owner_id`; there is
     no list of chats to broadcast to, and the public demo simulation (owner
     None) cannot be bridged.
+
+    With `alert_markup` (the inline UI), alert keyboards lead with
+    🚑 先處理這個 / ✅ 我醒了 / 😴 暫停提醒 30 分鐘 signed for the owner.
     """
 
-    def __init__(self, bot: Bot, simulation: MarketSimulation):
+    def __init__(self, bot: Bot, simulation: MarketSimulation, alert_markup: Optional[AlertMarkup] = None):
         if simulation.owner_id is None:
             raise ValueError("Public simulations are never forwarded to Telegram")
         self.bot = bot
         self.simulation = simulation
         self.chat_id: int = simulation.owner_id
+        self.alert_markup = alert_markup
         self.unsubscribe: Callable[[], None] = simulation.subscribe("telegram", self.on_event)
+
+    def _with_ui(self, keyboard: Optional[InlineKeyboardMarkup], symbol: str, ack_id: Optional[str] = None) -> Optional[InlineKeyboardMarkup]:
+        if self.alert_markup is None:
+            return keyboard
+        legacy = {f"rescue:sim:{symbol}"} | ({f"{ACK_PREFIX}{ack_id}"} if ack_id else set())
+        top = self.alert_markup(self.chat_id, [("", data) for data in sorted(legacy)])
+        if top is None:
+            return keyboard
+        rest = [row for row in (keyboard.inline_keyboard if keyboard else [])
+                if not any(b.callback_data in legacy for b in row)]
+        return InlineKeyboardMarkup(inline_keyboard=list(top.inline_keyboard) + rest)
 
     async def _send(self, text: str, keyboard: Optional[InlineKeyboardMarkup] = None) -> None:
         try:
@@ -123,25 +141,25 @@ class TelegramSimulationBridge:
         kind, data = event["type"], event["data"]
 
         if kind == "advice":
-            await self._send(format_advice_message(data), advice_keyboard(data))
+            await self._send(format_advice_message(data), self._with_ui(advice_keyboard(data), data["symbol"], data.get("ack_id")))
 
         elif kind == "alert" and data["level"] == "funding":
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}"),
             ]])
-            await self._send(format_prefunding_message(data["funding"], demo=True), keyboard)
+            await self._send(format_prefunding_message(data["funding"], demo=True), self._with_ui(keyboard, data["symbol"]))
 
         elif kind == "alert" and data["level"] == "stop":
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}"),
             ]])
-            await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True), keyboard)
+            await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True), self._with_ui(keyboard, data["symbol"]))
 
         elif kind == "alert" and data["level"] == "triage":
             rows = [ack_row(data["ack_id"])] if data.get("ack_id") else []
             rows.append([InlineKeyboardButton(text=f"🛟 Rescue {data['symbol']} first", callback_data=f"rescue:sim:{data['symbol']}")])
             await self._send(format_triage_message(data["items"], data.get("severity"), demo=True, focus=data.get("focus")),
-                             InlineKeyboardMarkup(inline_keyboard=rows))
+                             self._with_ui(InlineKeyboardMarkup(inline_keyboard=rows), data["symbol"], data.get("ack_id")))
 
         elif kind == "alert" and data["level"] == "sizing":
             await self._send(format_sizing_message(data["sizing"], demo=True))
@@ -159,7 +177,7 @@ class TelegramSimulationBridge:
                 ack_row(data["ack_id"]),
                 [InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}")],
             ])
-            await self._send(data["text"], keyboard)
+            await self._send(data["text"], self._with_ui(keyboard, data["symbol"], data["ack_id"]))
 
         elif kind == "ack" and data.get("source") != "telegram":
             await self._send(f"✅ {data['symbol']} alert acknowledged on the {data['source']} — reminders stopped.")
@@ -195,22 +213,25 @@ class TelegramSimulationBridge:
             await self._send(text + "\n\nUse /risk for the portfolio overview.")
 
 
-def attach_bridges(bot: Bot) -> Callable[[MarketSimulation], Callable[[], None]]:
+def attach_bridges(bot: Bot, alert_markup: Optional[AlertMarkup] = None) -> Callable[[MarketSimulation], Callable[[], None]]:
     """Registry hook: give every user simulation a bridge to its owner's chat."""
     def hook(simulation: MarketSimulation) -> Callable[[], None]:
-        return TelegramSimulationBridge(bot, simulation).unsubscribe
+        return TelegramSimulationBridge(bot, simulation, alert_markup).unsubscribe
     return hook
 
 
 class TelegramNotifier:
     """`alerts.Notifier` implementation: one message to one user."""
 
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, alert_markup: Optional[AlertMarkup] = None):
         self.bot = bot
+        self.alert_markup = alert_markup
 
     async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None) -> None:
         keyboard = None
-        if actions:
+        if actions and self.alert_markup is not None:
+            keyboard = self.alert_markup(user_id, actions)
+        if actions and keyboard is None:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=label, callback_data=data) for label, data in actions]
             ])

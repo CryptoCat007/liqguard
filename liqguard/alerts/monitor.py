@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional, Protocol, Union
 
 from liqguard.models import Position, User
@@ -133,6 +133,7 @@ class PositionMonitor:
         poll_interval: int = 30,
         prefunding_lead_minutes: float = 30.0,
         escalation: Optional[EscalationService] = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         self._users = users
         self._positions = positions
@@ -149,6 +150,7 @@ class PositionMonitor:
         self._oversized: dict[int, set[tuple[str, str]]] = {}
         self._stress_band: dict[int, Optional[str]] = {}
         self._concentrated: dict[int, bool] = {}
+        self.clock = clock
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -184,8 +186,12 @@ class PositionMonitor:
         Check one user's positions; returns the number of alerts delivered.
 
         When two or more positions are due a tier alert in the same check they
-        go out as one consolidated message, most urgent first.
+        go out as one consolidated message, most urgent first. During the
+        user's quiet hours only critical and emergency alerts go out; warnings
+        and informational messages wait (their state is left untouched so they
+        fire once quiet hours end).
         """
+        quiet = user.threshold.in_quiet_hours(self.clock())
         result = await self._positions(user)
         if isinstance(result, list):
             positions, context = result, None
@@ -208,13 +214,15 @@ class PositionMonitor:
                                                    assessment.distance_to_liquidation_pct)
                 else:
                     self.escalation.tracker.resolve(user.telegram_id, position.venue.value, position.symbol)
-            if protection.stop is not None:
+            if protection.stop is not None and not quiet:
                 sent += await self._check_stop(user, position, protection.stop)
-            if protection.adl.warn:
+            if quiet:
+                pass
+            elif protection.adl.warn:
                 sent += await self._check_adl(user, position, info["adl"])
             else:
                 self._adl_state.pop((user.telegram_id, position.venue.value, position.symbol), None)
-            if assessment.severity is None:
+            if assessment.severity is None or (quiet and severity not in ESCALATING):
                 continue
             alert = engine.create_alert(assessment)
             if alert and self.alert_manager.process_alert(user.telegram_id, alert, user.threshold.cooldown_seconds):
@@ -223,6 +231,8 @@ class PositionMonitor:
             sent += await self._send_triage(user, due, insights)
         elif due:
             sent += await self._send_tier_alert(user, *due[0], insights)
+        if quiet:
+            return sent
         sent += await self._check_portfolio(user, insights)
         if context is not None:
             sent += await self._check_prefunding(user, positions, context)

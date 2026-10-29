@@ -21,6 +21,7 @@ from liqguard.core import AppContext
 from liqguard.logsafe import install_log_redaction
 from liqguard.storage import EncryptedStorage, EncryptionKeyError
 from liqguard.telegram import BotHandlers, TelegramNotifier, attach_bridges
+from liqguard.telegram.ui import build_ui
 
 logger = logging.getLogger("liqguard")
 
@@ -86,12 +87,15 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
         except Exception as e:
             logger.warning("Could not read bot username (Telegram Login Widget disabled): %s", type(e).__name__)
 
-    ctx.simulations.on_create(attach_bridges(bot))
+    ui = build_ui(ctx)
+    ctx.simulations.on_create(attach_bridges(bot, ui.alert_markup))
 
     dp = Dispatcher(storage=MemoryStorage())
+    ui.register(dp)
     BotHandlers(ctx).register(dp, bot)
+    await ui.set_commands(bot)
 
-    notifier = TelegramNotifier(bot)
+    notifier = TelegramNotifier(bot, ui.alert_markup)
     escalation = EscalationService(notifier, ctx.escalations)
     monitor = PositionMonitor(
         users=ctx.storage.get_all_users_with_bindings,
