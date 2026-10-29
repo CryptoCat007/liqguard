@@ -21,6 +21,7 @@ from liqguard.core import AppContext
 from liqguard.logsafe import install_log_redaction
 from liqguard.storage import EncryptedStorage, EncryptionKeyError
 from liqguard.telegram import BotHandlers, TelegramNotifier, attach_bridges
+from liqguard.telegram.polling import make_session, polling_kwargs
 from liqguard.telegram.ui import build_ui
 
 logger = logging.getLogger("liqguard")
@@ -79,7 +80,11 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
     level, message = describe_key_source(ctx.storage)
     logger.log(level, message)
 
-    bot = Bot(token=settings.telegram_token, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    bot = Bot(
+        token=settings.telegram_token,
+        session=make_session(),
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+    )
     if not settings.bot_username:
         try:
             me = await bot.get_me()
@@ -134,7 +139,7 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
         ctx.market.start()
         await monitor.start()
         escalation.start()
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, **polling_kwargs())
     finally:
         await escalation.stop()
         await monitor.stop()
