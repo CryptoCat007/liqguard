@@ -108,17 +108,40 @@ liqguard
 | `/threshold` | Configure alert thresholds (base tiers; adaptive tiers widen from these) |
 | `/settings` | Wake-up escalation (interval 1/2/5/10 min or `/settings interval 3`, max reminders, on/off), adaptive tiers on/off, stop-loss checks on/off, sizing limits (`/settings risk 2`, `/settings maxmargin 25`) |
 | `/demo` | Demo mode with price simulation: the mixed book or **🎬 5 longs, one wallet** |
+| `/stopdemo` | Stop the running demo at once; no further demo alerts or reminders are sent |
 | `/ask <question>` | Ask AI about your positions |
 | `/actions` | View pending protective actions |
 | `/killswitch` | Emergency stop for all actions |
-| `/language` | Change language (English/繁體中文) |
+| `/lang` · `/language` | 🌐 Language / 語言: English or 繁體中文, saved per user |
 | `/status` | View account status |
-| `/menu` | 🏠 主選單 (inline keyboard) |
+| `/menu` | 🏠 Main menu (inline keyboard) |
 
-## Telegram menu (主選單)
+## Languages (English · 繁體中文)
 
-`/start`, `/menu` and every ⬅️ 返回主選單 button show an inline-keyboard menu (all text in
-zh-Hant-TW). The bot's command list is registered with `setMyCommands` on startup.
+Everything the bot and the dashboard say comes from two locale files,
+`liqguard/i18n/locales/en.toml` and `zh-Hant.toml`, through `liqguard.i18n.t(lang, key, **params)`.
+Handlers, keyboards, alerts and the dashboard contain no hard-coded user-facing text.
+
+- **Default English.** A new user gets 繁體中文 when their Telegram app language is `zh*`, English
+  otherwise. 🌐 Language / 語言 in the main menu or `/lang` switches and saves the choice per user;
+  an explicit choice wins over the Telegram app language.
+- **One language per message.** An alert's body and its inline buttons are always rendered in the
+  same per-user language (tested for every alert type and both languages).
+- **Muse** is asked to answer in the user's language.
+- **`setMyCommands`** is registered for the default (English) and for `language_code=zh`.
+- **Dashboard.** The EN / 中文 button in the top bar switches the page (English by default;
+  `?lang=zh-Hant` also works). Signed in, the choice is saved to your account and shared with
+  Telegram. Numbers-heavy card bodies are rendered in English.
+- `test_i18n.py` checks that every key exists in both locales with the same placeholders, that no
+  string is left untranslated, and that every dashboard key exists.
+
+## Telegram menu
+
+`/start`, `/menu` and every ⬅️ Main menu button show an inline-keyboard menu in the user's language.
+The bot's command list is registered with `setMyCommands` on startup.
+
+**Polling.** Requests time out after 15 s with a 0.5–3 s backoff (`telegram/polling.py`), so updates
+resume within about 25 s after a network stall instead of the default ~70 s.
 
 | Button | Screen |
 |--------|--------|
@@ -595,6 +618,14 @@ Experience all features without real money:
 ```
 
 The **Liquidation Simulation** gradually moves prices toward liquidation, firing alerts at each threshold (20%, 10%, 5%) with action buttons.
+
+**A demo is short and finite, and you can silence it.** A run is a fixed 40-step script that ends on
+its own; reminders end with it. Every demo message carries **⏹ Stop demo**, and `/stopdemo` does the
+same. Pressing **✅ I'm awake**, **😴 Mute this demo** or **Dismiss** on any demo alert mutes the
+*whole* run: prices keep moving on the dashboard, but no further alert, advice or reminder is sent
+until you start a new demo. (Previously each tick could open a fresh alert, so one ack only silenced
+one of them.) For live positions, acknowledging an alert silences that position until it gets
+materially worse (a higher tier *and* at most half the acknowledged distance) or recovers.
 It runs a cross-margined book:
 - BTC and SOL share one Binance cross wallet, so SOL is dragged toward liquidation by BTC's losses.
 - ETH sits in a Hyperliquid cross account.
@@ -772,6 +803,8 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 | `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, per-position protection (wicks, tiers, stop, ADL), portfolio insights (triage, stress, liq comparison, concentration, sizing), pending live reminders, audit log |
 | `/api/me/live/ack` · `/api/me/live/snooze` | POST | Acknowledge or snooze (30 min) one of *your* live monitor's reminders (CSRF header required) |
 | `…/position-tool?symbol=&tool=` · `/api/me/position-tool/live?symbol=&venue=&tool=` | GET | `tool` = `rescue` \| `wick` \| `stop` \| `funding`: the per-position report for a simulated or live position |
+| `/api/me/language` | GET · POST | Read / save your language (`{"language": "en"}` or `"zh-Hant"`, CSRF header required); shared with Telegram |
+| `/api/i18n/{lang}` | GET | Dashboard UI strings for the EN / 中文 toggle (public) |
 | `/api/me/settings` | GET · POST | Read / change one notification setting (`{"key", "value"}`, CSRF header required) |
 | `/api/me/bindings` | GET | Masked bindings and the security note |
 | `/api/me/bindings/binance` · `/api/me/bindings/hyperliquid` · `/api/me/bindings/unbind` | POST | Self-serve bind (read-only key policy enforced) and unbind (`"confirm": true` required); CSRF header required, credentials are never echoed, even in validation errors |
@@ -814,9 +847,11 @@ python3 -m pytest liqguard/tests/ -q
 | `test_dashboard_protection.py` | Snapshot protection data, stop/ADL/escalation events, `…/ack` (CSRF, id validation, once only), live ack and cross-user isolation, account protection payload |
 | `test_portfolio_risk.py` | Correlation factors, account surplus and liquidation move, ±5/10/20 % shocks, platform vs correlated liquidation gap, concentration and effective bets, sizing (equity, stop vs liquidation exit, both limits), triage ordering and labels, consolidated monitor alert and dedupe, the 5-long scenario, Telegram `/risk` / `/positions` / `/settings` / `/demo`, dashboard insights and scenario endpoints, per-user isolation, env defaults |
 | `test_telegram_ui.py` | Inline-keyboard UI: codec roundtrip and malformed / tampered / oversized / future rejection; every keyboard button routes to a registered handler; features don't import each other; user B can't use user A's buttons; `answerCallbackQuery` always called (incl. handler errors); stale and expired buttons; a crawl of every menu path in demo mode, including alert buttons during a simulation; the guided binding flow (message deletion, secret-material refusal, permission rejection, encryption, masked status, confirmed unbind) |
+| `test_i18n.py` | Locale key and placeholder parity, no untranslated strings, every dashboard key in both languages, `/api/i18n` and the per-user `/api/me/language` toggle |
+| `test_polling.py` | Short Telegram request timeout and fast backoff |
 | `test_dashboard_account_tools.py` | Web quick actions (same text as Telegram), settings panel, binding panel (no echo, CSRF, confirm), live snooze, quiet hours in the monitor |
 
-692 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
+754 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
 
 ## Environment Variables
 
