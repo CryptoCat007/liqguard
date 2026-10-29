@@ -24,11 +24,12 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import Position, Side, UserThreshold, WickProfile
 
 from .sessions import is_stock_perp, underlying
 
-HANDLE_FIRST = "Handle this first"
+HANDLE_FIRST = Msg("risk.triage.handle_first")
 Z_TYPICAL = 1.645
 DEFAULT_SIGMA_5M = {"BTC": 0.22, "ETH": 0.28}
 DEFAULT_CRYPTO_SIGMA_5M = 0.40
@@ -86,11 +87,12 @@ class TriageItem:
 
     def reason(self) -> str:
         if math.isinf(self.minutes_to_liq):
-            return "no liquidation price"
+            return Msg("risk.triage.no_liq_price")
         t = self.minutes_to_liq
-        when = f"~{t:.0f} min" if t < 120 else f"~{t / 60:.1f} h" if t < 72 * 60 else f"~{t / 1440:.0f} d"
-        return (f"{self.distance_pct:.1f}% from liq ≈ {self.distance_pct / self.sigma_5m_pct:.1f} typical 5m moves "
-                f"({when} at typical volatility), ${self.notional:,.0f} notional")
+        when = (Msg("common.duration.min", n=t) if t < 120 else Msg("common.duration.h", n=t / 60) if t < 72 * 60
+                else Msg("common.duration.d", n=t / 1440))
+        return Msg("risk.triage.reason", dist=self.distance_pct, moves=self.distance_pct / self.sigma_5m_pct, when=when,
+                   notional=self.notional)
 
     def to_dict(self) -> dict:
         inf = math.isinf(self.minutes_to_liq)
@@ -159,30 +161,31 @@ def focus(items: list[TriageItem]) -> Optional[dict]:
     same = (nearest.venue, nearest.symbol) == (top.venue, top.symbol)
     fewest_moves = min(items, key=lambda i: i.typical_moves)
     if len(items) == 1:
-        basis = "only position"
+        code = "only_position"
     elif same:
-        basis = "closest to liquidation"
+        code = "closest"
     elif (fewest_moves.venue, fewest_moves.symbol) == (top.venue, top.symbol):
-        basis = "closest in volatility-adjusted terms"
+        code = "volatility"
     elif top.at_risk and not nearest.at_risk:
-        basis = "inside an alert tier"
+        code = "inside_tier"
     else:
-        basis = "highest combined urgency"
+        code = "combined"
+    basis = Msg(f"risk.triage.basis.{code}")
 
-    def moves(i: TriageItem) -> str:
-        return "no liq" if math.isinf(i.typical_moves) else f"{round(i.typical_moves, 1):.1f} typical 5m moves"
+    def moves(i: TriageItem) -> Msg:
+        return Msg("risk.triage.no_liq") if math.isinf(i.typical_moves) else Msg("risk.triage.moves", n=round(i.typical_moves, 1))
 
     def dist(i: TriageItem) -> str:
         return "n/a" if math.isinf(i.distance_pct) else f"{round(i.distance_pct, 2):.1f}%"
 
     if same or len(items) == 1:
-        why = f"{top.symbol}: {basis} ({dist(top)}, {moves(top)})"
-    elif basis == "closest in volatility-adjusted terms":
-        why = (f"{top.symbol}: {basis} — {dist(top)} is only {moves(top)}; {nearest.symbol} is nearer in % "
-               f"({dist(nearest)}) but calmer, {moves(nearest)}")
+        why = Msg("risk.triage.why_same", symbol=top.symbol, basis=basis, dist=dist(top), moves=moves(top))
+    elif code == "volatility":
+        why = Msg("risk.triage.why_volatility", symbol=top.symbol, basis=basis, dist=dist(top), moves=moves(top),
+                  nearest=nearest.symbol, nearest_dist=dist(nearest), nearest_moves=moves(nearest))
     else:
-        why = (f"{top.symbol}: {basis} (time to liq, distance vs tiers and size); {nearest.symbol} is nearer in % "
-               f"({dist(nearest)}, {moves(nearest)}) vs {dist(top)}, {moves(top)}")
+        why = Msg("risk.triage.why_combined", symbol=top.symbol, basis=basis, dist=dist(top), moves=moves(top),
+                  nearest=nearest.symbol, nearest_dist=dist(nearest), nearest_moves=moves(nearest))
     return {
         "symbol": top.symbol,
         "venue": top.venue,
@@ -195,6 +198,7 @@ def focus(items: list[TriageItem]) -> Optional[dict]:
         "distance_pct": None if math.isinf(top.distance_pct) else round(top.distance_pct, 2),
         "typical_moves": None if math.isinf(top.typical_moves) else round(top.typical_moves, 1),
         "basis": basis,
+        "basis_code": code,
         "why": why,
         "nearest_symbol": nearest.symbol,
         "nearest_distance_pct": None if math.isinf(nearest.distance_pct) else round(nearest.distance_pct, 2),

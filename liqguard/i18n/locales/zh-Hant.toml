@@ -1,0 +1,595 @@
+# LiqGuard — 繁體中文（台灣）。每個 key 都必須和 en.toml 一致，{佔位符} 名稱也要相同；
+# liqguard/tests/test_i18n.py 會檢查。
+
+[common]
+list_sep = "、"
+on = "開"
+off = "關"
+yes = "是"
+no = "否"
+none = "無"
+na = "—"
+demo_suffix = " · 模擬"
+demo_data = "（模擬資料）"
+testnet = " 測試網"
+truncated = "\n\n…（內容過長，已截斷）"
+use_private = "請改用私訊"
+
+[common.side]
+long = "多"
+short = "空"
+None = "—"
+
+[common.side_upper]
+long = "多單"
+short = "空單"
+
+[common.tier]
+warning = "警告"
+critical = "嚴重"
+emergency = "緊急"
+
+[common.severity]
+warning = "警告"
+critical = "嚴重"
+emergency = "緊急"
+safe = "安全"
+
+[common.severity_upper]
+warning = "警告"
+critical = "嚴重"
+emergency = "緊急"
+safe = "安全"
+funding = "資金費"
+
+[common.duration]
+min = "約 {n:.0f} 分鐘"
+h = "約 {n:.1f} 小時"
+d = "約 {n:.0f} 天"
+
+[common.venue]
+binance = "Binance"
+hyperliquid = "Hyperliquid"
+demo = "Demo"
+
+[lang]
+picker_title = "🌐 Language / 語言\n\n選擇選單、警報和 Muse 說明使用的語言，設定會保存。"
+current = "目前：{name}"
+set = "✅ 已切換為繁體中文。"
+set_toast = "語言：繁體中文"
+auto_note = "（依你的 Telegram 語言自動選擇；點按鈕可切換）"
+
+[risk.rescue]
+where_cross = "全倉錢包"
+where_isolated = "逐倉保證金"
+title_add = "追加 ${amount:,.2f} 到{where}"
+title_close = "全部平倉 {symbol}（100%）"
+title_reduce = "減倉 {pct:.1f}%（{size:.4f} {coin}）"
+title_hedge_same = "對沖：開 {size:.4f} {side}單 {symbol}（雙向持倉，同一錢包）"
+title_hedge_other = "對沖：在 {venue} 開 {size:.4f} {side}單 {symbol}"
+note_add = "沒有手續費；但價格若繼續不利移動，追加的保證金仍有風險。"
+note_isolated_reduce = "逐倉保證金按比例釋放，部分平倉幾乎不會移動強平價。"
+note_hedge_mode = "需要開啟 Binance 雙向持倉模式；手續費含開倉與日後平掉對沖單。"
+note_hedge_lock = "對沖部分的目前虧損會被鎖定，直到兩邊都平倉。"
+note_hl_nets = "Hyperliquid 同一資產的倉位會互相抵銷，對沖單必須開在其他交易所。"
+note_isolated_hedge = "逐倉倉位無法和對沖單共用保證金。"
+
+[risk.stop]
+note_beyond = "交易所會在止損觸發前先強平這個倉位。"
+note_slip = "插針時，市價止損的成交價可能滑過強平價。"
+note_partial = "止損只覆蓋倉位的 {covered:.0f}%，其餘部分沒有止損。"
+
+[risk.session]
+weekend = "週末 ×{factor:g}"
+low_liquidity = "流動性清淡時段 {start:02d}:00–{end:02d}:00 UTC ×{factor:g}"
+stock_closed = "美股休市（{underlying} 開盤可能跳空）×{factor:g}"
+capped = "上限 ×{factor:g}"
+
+[risk.adaptive]
+off = "自適應門檻已關閉（/settings）"
+floor = "{tier} ≥ {floor:.1f}%（{interval} 最大插針）"
+floor_x2 = "{tier} ≥ {floor:.1f}%（{interval} 最大插針 × 2）"
+
+[risk.exit]
+stop = "止損"
+liquidation_price = "強平價"
+correlated_liquidation = "相關性強平價"
+none = "出場價"
+
+[risk.sizing]
+loses = "在{exit}出場會虧掉權益的 {risk:.1f}%（上限 {limit:g}%）"
+margin = "占用權益的 {margin:.0f}% 作為保證金（上限 {limit:g}%）"
+
+[risk]
+concentration = "{share:.0f}% 的曝險都是{side}，分布在 {count} 個會一起漲跌的幣（平均相關係數 {corr:.2f}）：你的 {positions} 個倉位實際上只相當於 {bets:.1f} 個獨立部位。"
+
+[risk.triage]
+handle_first = "先處理這個"
+no_liq = "無強平"
+no_liq_price = "沒有強平價"
+moves = "{n:.1f} 次典型 5 分鐘波動"
+reason = "距強平 {dist:.1f}% ≈ {moves:.1f} 次典型 5 分鐘波動（以典型波動計 {when}），名目價值 ${notional:,.0f}"
+why_same = "{symbol}：{basis}（{dist}，{moves}）"
+why_volatility = "{symbol}：{basis} — {dist} 只有 {moves}；{nearest} 以 % 計較近（{nearest_dist}），但波動較小，{nearest_moves}"
+why_combined = "{symbol}：{basis}（強平時間、相對門檻的距離與倉位大小）；{nearest} 以 % 計較近（{nearest_dist}，{nearest_moves}），對比 {dist}，{moves}"
+
+[risk.triage.basis]
+only_position = "唯一的倉位"
+closest = "離強平最近"
+volatility = "以波動度換算後離強平最近"
+inside_tier = "已進入警示門檻"
+combined = "綜合緊急度最高"
+
+[muse]
+reply_language = "Traditional Chinese as used in Taiwan (zh-Hant-TW, 繁體中文)"
+
+[tools]
+title = "{tool} · {symbol} {side}{demo}"
+
+[tools.name]
+rescue = "🛟 救倉試算"
+wick = "🕯 插針壓測"
+stop = "🛑 止損檢查"
+funding = "💸 資金費影響"
+
+[tools.option]
+add_margin = "💰 追加保證金"
+reduce = "✂️ 減倉"
+hedge = "🛡 對沖"
+
+[tools.rescue]
+recommended = " ⭐ 建議"
+what_add = "追加 {amount}"
+what_reduce = "減倉 {pct:g}%"
+what_hedge = "在 {venue} 開 {size:g} 反向對沖"
+no_liq = "不會再被強平"
+after = "距強平 → {dist}"
+unprotected = "（無法避免強平）"
+cost = "成本 {total}（手續費 {fees}、已實現虧損 {realized}）· 需資金 {capital}"
+missing = "找不到這個倉位的救倉試算。"
+current = "目前距強平 {dist}，強平價 {price}"
+target = "目標：回到距強平 {target:g}%"
+already_safe = "✅ 已經在安全距離內，不需要動作。"
+footer = "（成本含手續費與 24 小時資金費估算；LiqGuard 只試算，不會替你下單）"
+
+[tools.wick]
+current = "目前距強平 {dist}"
+no_data = "暫無這個標的的 K 線插針資料。"
+inside = "已在範圍內"
+away = "還差 {n:.1f} 根最大插針"
+line = "• {interval}：典型插針 {typical:.2f}% · 最大 {max:.2f}%（{days:g} 天）→ {away}"
+one_wick = "⚠️ 只要一根近期最大插針就會觸發強平！建議追加保證金或減倉。"
+safe = "✅ 近期最大插針不會直接打到強平價。"
+adaptive = "📈 自適應門檻：警告 {warning:.1f}% · 嚴重 {critical:.1f}% · 緊急 {emergency:.1f}%"
+
+[tools.stop]
+unavailable = "無法讀取這個倉位的委託單，暫時無法檢查止損。"
+price = "止損價：{price}"
+gap = "止損與強平間距：{gap}（至少需要 {required}）"
+liq = "強平價：{price}"
+loss = "若被強平損失約：{loss}"
+suggest_move = "💡 建議把止損設在 {price} 或更保守"
+suggest_set = "💡 建議設定一張觸發價在強平價之前的止損單"
+
+[tools.stop.status]
+ok = "✅ 止損有效，會在強平前觸發"
+partial = "⚠️ 止損只覆蓋部分倉位"
+no_stop = "🛑 沒有設定止損"
+beyond_liquidation = "🛑 止損價在強平價之外，永遠不會觸發"
+too_close = "⚠️ 止損離強平太近，插針時可能來不及"
+
+[tools.funding]
+pay = "支付"
+receive = "收取"
+rate = "費率：{rate:+.4f}% / {hours:g} 小時"
+next = "下次結算：{minutes:.0f} 分鐘後，你將{verb} {amount}"
+drift_item = "{hours:g}h → {dist}"
+drift_none = "{hours:g}h → 無強平"
+drift = "按目前費率，距強平變化：{drift}"
+close_fee = "平倉手續費（taker {rate:.3f}%）：約 {fee}"
+no_data = "這個倉位暫無資金費率資料。"
+
+[commands]
+stopdemo = "⏹ 停止進行中的 Demo"
+start = "開始／主選單"
+menu = "🏠 主選單"
+positions = "📊 我的倉位"
+risk = "🚨 風險總覽"
+demo = "🎬 Demo 模式"
+settings = "🔔 通知設定"
+bind = "🔑 綁定帳號"
+dashboard = "🖥️ 網頁看板"
+lang = "🌐 Language / 語言"
+help = "❓ 幫助"
+
+[book]
+simulation = "🎬 Demo 模式 · 市場模擬"
+demo = "🎮 Demo 模式"
+live = "📡 即時倉位"
+
+[menu]
+text = "🏠 主選單\n\nLiqGuard 幫你盯住永續合約的強平風險：先告訴你該處理哪一個，再算出最便宜的救法。\n\n{status}\n\n請選擇功能："
+status_demo = "🎮 目前為 Demo 模式（模擬資料）"
+status_bound = "🔗 已綁定：{names}"
+status_unbound = "🔌 尚未綁定帳號，可先試試 🎬 Demo"
+help = """❓ 幫助
+
+LiqGuard 盯住你的永續合約倉位，在被強平之前提醒你，並算出最便宜的救倉方式。
+
+📊 我的倉位：每個倉位下方有 救倉試算 / 插針壓測 / 止損檢查 / 資金費影響
+🚨 先處理哪個：多個倉位同時告急時，依緊急程度排序並說明原因
+🧪 壓力測試：同一錢包所有倉位一起下跌時，帳戶在跌多少 % 時被強平
+💸 資金費率/手續費：下一次結算要付多少、平倉手續費
+🔔 通知設定：警示門檻、喚醒提醒間隔、勿擾時段
+🔑 綁定帳號：Binance 唯讀 API 金鑰或 Hyperliquid 錢包地址
+🖥️ 網頁看板：一次性登入連結
+🎬 Demo：用模擬倉位體驗所有功能（短暫、會自行結束；⏹ 停止 Demo 可隨時結束）
+🌐 Language / 語言：English 或 繁體中文
+
+收到警報時：🚑 先處理這個 直接開啟救倉試算，✅ 我醒了 停止喚醒提醒，😴 暫停提醒 30 分鐘。
+
+指令：/menu · /positions · /risk · /demo · /settings · /dashboard · /lang"""
+
+[kb]
+back_menu = "⬅️ 返回主選單"
+positions = "📊 我的倉位"
+triage = "🚨 先處理哪個"
+stress = "🧪 壓力測試"
+funding = "💸 資金費率/手續費"
+settings = "🔔 通知設定"
+binding = "🔑 綁定帳號"
+dashboard = "🖥️ 網頁看板"
+demo = "🎬 Demo"
+language = "🌐 Language / 語言"
+help = "❓ 幫助"
+lang_en = "🇬🇧 {name}"
+lang_zh = "🇹🇼 {name}"
+refresh = "🔄 重新整理"
+back_positions = "📊 返回倉位列表"
+wick_for = "🕯 {symbol} 插針壓測"
+minutes = "{n:g} 分"
+times = "{n} 次"
+back_settings = "⬅️ 返回通知設定"
+bind_binance = "🟡 綁定 Binance"
+bind_hyperliquid = "🟢 綁定 Hyperliquid"
+bound = "📋 查看已綁定"
+unbind = "🗑 解除綁定"
+bind_cancel = "❌ 取消綁定"
+back_binding = "⬅️ 返回綁定帳號"
+unbind_confirm = "✅ 確認解除"
+cancel = "❌ 取消"
+open_dashboard = "🖥️ 開啟我的看板"
+sim_stop = "⏹ 停止 Demo"
+demo_off = "❌ 關閉 Demo 模式"
+demo_menu = "🎬 Demo 選單"
+alert_rescue = "🚑 先處理這個"
+alert_awake = "✅ 我醒了"
+alert_snooze = "😴 暫停提醒 30 分鐘"
+alert_snooze_demo = "😴 靜音這個 Demo"
+
+[positions]
+no_account = "🔌 尚未綁定任何交易所帳號。\n\n• 點「🔑 綁定帳號」連接 Binance（唯讀 API 金鑰）或 Hyperliquid（只需錢包地址）\n• 或點「🎬 Demo」先用模擬倉位體驗"
+none = "📭 目前沒有持倉。"
+not_found = "這個倉位已不存在（可能已平倉或模擬已結束），已為你更新倉位列表。"
+not_found_toast = "倉位已不存在"
+row = "{emoji} {symbol} {side} {leverage:g}x · 距強平 {dist} · 未實現 {pnl}"
+title = "📊 我的倉位 · {book}\n（由最危險排起）"
+more = "…另有 {n} 個倉位，請到網頁看板查看"
+hint = "點倉位名稱看詳情，或直接點下方工具。"
+size = "倉位大小：{size:g}"
+entry = "開倉價：{price}"
+mark = "標記價：{price}"
+liq_exchange = "強平價（交易所）：{price}"
+liq_true = "強平價（LiqGuard 實算）：{price}"
+distance = "距強平：{dist}（{severity}）"
+pnl = "未實現損益：{pnl}"
+priority = "處理順序：第 {rank}/{of} 名"
+add_margin = "💡 追加 {amount} 保證金可回到距強平 {target:g}%"
+
+[triage]
+title = "🚨 先處理哪個"
+title_ordered = "🚨 先處理哪個（依處理順序）"
+none_at_risk = "✅ 目前沒有倉位進入警示區。"
+nearest = "最接近的是 {symbol}，距強平 {dist}。"
+moves = " · 約 {n:.1f} 次典型 5 分鐘波動"
+row = "{rank}. {symbol} {side} · {severity} · 距強平 {dist}{moves}"
+focus = "🎯 先處理 {symbol}：{basis}。"
+nearest_later = "（離強平最近的是 {symbol} {dist}，但考慮波動與倉位大小後排在後面）"
+button = "救 {symbol}（第 {rank} 名）"
+
+[triage.basis]
+only_position = "唯一一個進入警示區的倉位"
+closest = "離強平最近"
+volatility = "以波動度換算後離強平最近（波動大的幣，同樣距離更危險）"
+inside_tier = "唯一進入警示門檻的倉位"
+combined = "綜合緊急度最高（時間、門檻、倉位大小）"
+
+[stress]
+title = "🧪 壓力測試"
+account = "📉 {venue} 全倉錢包（{n} 個倉位：{symbols}）"
+equity = "權益 {equity} · 維持保證金 {maintenance}"
+first_liq = "⚠️ 所有倉位一起不利移動 {move}，整個帳戶就會被強平"
+liquidated = "💥 強平"
+left = "剩 {amount}"
+shock = "  • 市場 {move:+g}% → {result}"
+isolated = "你的倉位都是逐倉（或只有一個全倉倉位），彼此不共用保證金："
+single = "• {symbol}：價格不利移動 {dist} 即強平"
+earlier = "🧲 一起下跌時，帳戶在 {account} 就爆，比單看最危險倉位的 {single} 更早。"
+
+[funding]
+title = "💸 資金費率/手續費"
+no_data = "暫無資金費率資料"
+close_fee = "平倉手續費約 {fee}（taker {rate:.3f}%）"
+total = "全部平倉手續費合計約 {fee}"
+sign_note = "正費率：多單付給空單；負費率：空單付給多單。"
+
+[settings]
+quiet_off = "關閉"
+text = "🔔 通知設定\n\n警示門檻：⚠️ {warning:g}% · 🚨 {critical:g}% · 🆘 {emergency:g}%\n喚醒提醒：{escalation}，每 {interval:g} 分鐘，最多 {max} 次\n勿擾時段：{quiet}（UTC{offset:+g}，嚴重/緊急警報仍會送達）\n自適應門檻：{adaptive}（週末、清淡時段、插針大的幣自動放寬）\n止損檢查：{stops}"
+tap = "點按鈕修改。"
+updated = "已更新"
+choose = "請選擇："
+invalid = "❌ 無法套用：門檻必須維持 緊急 < 嚴重 < 警告，且數值在允許範圍內。"
+invalid_toast = "無法套用這個設定"
+saved_note = "✅ 已儲存"
+saved = "已儲存"
+
+[settings.label]
+warning = "⚠️ 警告"
+critical = "🚨 嚴重"
+emergency = "🆘 緊急"
+interval = "⏰ 提醒間隔"
+max = "🔁 最多提醒"
+quiet = "🌙 勿擾時段"
+
+[settings.toggle]
+escalation = "喚醒提醒"
+adaptive = "自適應門檻"
+stops = "止損檢查"
+
+[settings.hint]
+warning = "距強平小於這個 % 時發出 ⚠️ 警告"
+critical = "距強平小於這個 % 時發出 🚨 嚴重警報（會啟動喚醒提醒）"
+emergency = "距強平小於這個 % 時發出 🆘 緊急警報"
+interval = "嚴重/緊急警報在你按「✅ 我醒了」前，每隔幾分鐘再提醒一次"
+max = "最多重複提醒幾次"
+quiet = "勿擾時段（台北時間）內只發送嚴重與緊急警報，其他通知延後"
+
+[binding]
+read_only = "唯讀"
+security_note = """🔒 安全須知
+• 只接受「唯讀」API 金鑰：有交易、提幣或轉帳權限的金鑰一律拒絕
+• 絕對不要傳送私鑰、助記詞（seed phrase）或交易所登入密碼
+• Hyperliquid 只需要錢包地址（0x 開頭 40 碼），不需要任何金鑰
+• 金鑰以你專屬的資料金鑰加密保存，畫面上只顯示末四碼"""
+none_bullet = "• 尚未綁定"
+menu = "🔑 綁定帳號\n\n目前綁定：\n{bound}"
+private_only = "🔒 為了安全，請在與 LiqGuard 的私訊中綁定帳號（群組裡的訊息別人看得到）。"
+cannot_start = "⚠️ 目前無法開始綁定，請輸入 /menu 後再試。"
+guide_binance = """🟡 綁定 Binance（唯讀 API 金鑰）
+
+1️⃣ 登入 Binance → 右上角頭像 →「API 管理」
+2️⃣ 建立 API →「系統生成」，取個名字（例如 LiqGuard）
+3️⃣ 權限只勾 ✅「允許讀取 Enable Reading」
+    ❌ 不要勾：合約交易、現貨與槓桿交易、允許提現、萬向劃轉
+4️⃣ （建議）設定 IP 存取限制
+5️⃣ 把 API Key 和 Secret Key 用空白或換行隔開，一次傳給我
+    （也可以先傳 Key，再傳 Secret）
+
+🧹 我讀取後會立刻刪除你的訊息；有交易或提現權限的金鑰會被拒絕。
+⛔ 絕對不要傳私鑰、助記詞或登入密碼。"""
+guide_hyperliquid = """🟢 綁定 Hyperliquid（只需要錢包地址）
+
+請傳送你的錢包地址：0x 開頭、共 42 個字元。
+LiqGuard 只讀取公開的倉位資料，不需要也不接受任何金鑰。
+
+⛔ 絕對不要傳私鑰或助記詞（12/24 個英文單字）。"""
+bound_empty = "📋 查看已綁定\n\n尚未綁定任何帳號。"
+bound_item = "• {label}\n  權限：{permissions}"
+bound_title = "📋 查看已綁定（金鑰只顯示末四碼）"
+unbind_empty = "🗑 解除綁定\n\n目前沒有可解除的綁定。"
+unbind_pick = "🗑 解除綁定\n\n請選擇要解除的帳號："
+gone = "這個綁定已不存在。"
+gone_toast = "綁定已不存在"
+unbind_confirm = "⚠️ 確定要解除 {label}？\n\n解除後會刪除加密保存的金鑰／地址，並停止監控這個帳號。\n（確認按鈕 2 分鐘內有效）"
+unbound = "✅ 已解除 {venue} 的綁定，金鑰已刪除。"
+unbound_toast = "已解除綁定"
+cancelled_toast = "已取消綁定"
+cancelled = "已取消綁定。"
+deleted = "🧹 你的訊息已刪除。"
+retry_wallet = "請重新傳送錢包地址，或按「取消綁定」。"
+secret_material = "⛔ 這看起來像私鑰或助記詞！請勿外流。LiqGuard 只需要 Binance 唯讀 API 金鑰。"
+key_secret_only = "❌ 請只傳 API Key 和 Secret（用空白或換行隔開）。"
+key_received = "✅ 已收到 API Key。\n\n現在請傳送 Secret Key："
+expired = "⌛ 流程已逾時，請重新傳送 API Key 和 Secret。"
+ended = "已結束綁定流程。"
+see_positions = "可以到 📊 我的倉位 查看了。"
+retry_binance = "請重新傳送 API Key 和 Secret，或按「取消綁定」。"
+
+[binding.result]
+secret_material_key = "⛔ 這看起來像私鑰或助記詞。請立刻妥善保管，絕對不要傳給任何人。LiqGuard 只需要唯讀 API 金鑰。"
+key_format = "❌ 格式不正確：API Key 與 Secret 應各為 20–128 個英數字元。"
+key_equals_secret = "❌ API Key 與 Secret 不能相同，請確認兩者都複製正確。"
+bad_network = "❌ 不支援的網路。"
+binance_unreachable = "⚠️ 暫時無法連線到 Binance 驗證金鑰，請稍後再試。"
+rejected_permissions = "🚫 已拒絕：這把金鑰有 {permissions} 權限。請建立只勾選「Enable Reading（允許讀取）」的新金鑰。"
+invalid_key = "❌ API Key 或 Secret 錯誤，請重新複製後再試。"
+rejected = "🚫 未通過驗證：{reason}"
+binance_ok = "✅ 已綁定 {label}（金鑰 {hint}），權限：{permissions}"
+secret_material_wallet = "⛔ 這看起來像私鑰或助記詞，不是錢包地址！請勿外流。Hyperliquid 只需要 0x 開頭、40 碼的公開地址。"
+wallet_format = "❌ 錢包地址格式不正確：應為 0x 開頭加 40 個十六進位字元。"
+hyperliquid_unreachable = "⚠️ 暫時無法連線到 Hyperliquid，請稍後再試。"
+wallet_rejected = "❌ 無法使用這個地址：{reason}"
+hyperliquid_ok = "✅ 已綁定 Hyperliquid 錢包 {hint}（只讀取公開資料）"
+
+[dashboard]
+private_only = "🔒 看板連結是個人專屬的，請在與 LiqGuard 的私訊中點「🖥️ 網頁看板」。"
+disabled = "🖥️ 這個 LiqGuard 沒有啟用網頁看板，所有功能都可以在這裡使用。"
+link = "🖥️ 你的專屬 LiqGuard 看板\n\n{url}\n\n• 只能使用一次，{minutes} 分鐘內有效\n• 只會顯示你自己的倉位、警報與紀錄\n• 請勿分享：連結被使用前，任何人都能用它登入成你\n• 輸入 /dashboard revoke 可登出所有裝置"
+
+[demo]
+not_running = "⏹ 目前沒有進行中的 Demo，不會再傳送任何訊息。"
+intro = "🎬 Demo 模式\n\n用模擬倉位體驗 LiqGuard，不需要綁定帳號：\n• 一般行情／劇烈波動／瀕臨強平／安全組合：固定的示範倉位\n• 🎬 強平模擬：價格一步步走向強平，警報、喚醒提醒都會發到這裡\n• 🎬 5 個多單同錢包：五個相關的全倉多單一起下跌，看哪個該先救、帳戶在跌多少時爆倉\n\n每次模擬都是短暫、有限的流程（約 30 秒），會自行結束；按 ⏹ 停止 Demo 會立即結束模擬和所有提醒。模擬只屬於你，不會影響任何真實帳戶。"
+running = "▶️ 模擬進行中，可以隨時查看倉位或停止。"
+choose = "請選擇情境："
+static_on = "🎮 已啟用 Demo：{name}\n\n下方按鈕都會使用這組模擬倉位。"
+static_on_toast = "Demo 已啟用"
+sim_title = "🎬 市場模擬 · {name}"
+sim_started = "已開始。"
+sim_already = "模擬已在進行中。"
+sim_body = "價格會逐步走向強平，警報會傳到這裡（也會出現在你的網頁看板）。模擬有固定長度，會自行結束。\n收到警報時可以點 🚑 先處理這個、✅ 我醒了、😴 靜音這個 Demo 或 ⏹ 停止 Demo。"
+sim_started_toast = "模擬開始"
+sim_already_toast = "模擬進行中"
+stopped = "⏹ Demo 已停止，不會再傳送任何 Demo 警報或提醒。"
+stopped_toast = "已停止"
+disabled = "📊 已關閉 Demo 模式，之後會顯示你綁定帳號的真實倉位。"
+disabled_toast = "Demo 已關閉"
+
+[demo.scenario]
+normal = "😊 一般行情"
+volatile = "📈 劇烈波動"
+critical = "🚨 瀕臨強平"
+safe = "✅ 安全組合"
+mixed = "🎬 強平模擬"
+cross_longs = "🎬 5 個多單同錢包"
+
+[alerts]
+demo_acked = "✅ 收到，你醒了。這次 Demo 已靜音：不會再有任何 Demo 警報或提醒（你確認的是 {symbol} 的警報）。隨時可從 🎬 Demo 重新開始。"
+demo_acked_toast = "Demo 已靜音"
+dismissed_toast = "已忽略"
+gone = "這則警報已確認或已失效。"
+acked = "✅ 已確認，{symbol} 的喚醒提醒已停止。注意安全！"
+acked_toast = "已停止提醒"
+snoozed = "😴 {symbol} 的提醒暫停 {minutes} 分鐘；之後若仍危險會再叫醒你。"
+snoozed_toast = "已暫停 {minutes} 分鐘"
+demo_quiet = "😴 已停止 {symbol} 的 Demo 提醒，這個 Demo 不會再發送喚醒提醒。"
+demo_quiet_toast = "Demo 提醒已停止"
+
+[router]
+invalid = "⚠️ 這個按鈕無效或不屬於你。"
+expired = "⌛ 按鈕已過期，已為你開啟最新的主選單。"
+expired_toast = "按鈕已過期"
+error = "❌ 發生錯誤，請稍後再試。"
+
+[alert]
+demo_tag = " · 示範"
+muse = "Muse"
+muse_mock = "Muse（模擬）"
+position_on = "**{symbol}** {side}（{venue}）"
+read_only = "_LiqGuard 只讀取資料：不會下單或修改任何委託。_"
+rescue_button = "🛟 救援方案"
+adaptive = "自適應門檻 {effective}%（你的設定 {base}%）：{reasons}"
+
+[alert.reminder]
+distance = " · 目前距離強平 **{dist}%**"
+head_reminder = "⏰ **提醒** {n}/{max}"
+head_urgent = "🚨🚨 **緊急：仍未確認** {n}/{max}"
+head_final = "🆘🆘🆘 **最後一次喚醒** {n}/{max}"
+sent = "**{symbol}** {severity} 警報已於 {minutes} 分鐘前送出{dist}。"
+final = "這是最後一次提醒。請按 **我醒了** 或立即處理倉位。"
+tap = "按 **我醒了** 停止提醒（下一次在 {next} 分鐘後）。"
+
+[alert.tier]
+head = "{emoji} **{level} 警報**"
+distance = "距離強平：**{dist}%**"
+add_margin = "💰 追加 **${amount}** 保證金即可回到安全距離"
+
+[alert.funding]
+head = "⏳ **資金費率預警**"
+pays = "**{symbol}** {side}（{venue}）將在 **{minutes} 分鐘**後支付 **${amount}** 資金費（目前費率每 {hours} 小時 {rate}%）。"
+distance = "結算後距離強平：**{before}% → {after}%**"
+liq = "強平價：{before} → {after}"
+buffer = "相當於你剩餘保證金緩衝的 {share}%。"
+buffer_tier = "相當於你剩餘保證金緩衝的 {share}%，並會讓你落入更嚴重的警報等級。"
+
+[alert.stop]
+head = "🛑 **止損檢查**"
+head_no_stop = "🛑 **沒有止損單**"
+head_beyond_liquidation = "🛑 **止損永遠不會觸發**"
+head_too_close = "⚠️ **止損離強平價太近**"
+no_stop = "沒有止損單。強平價 **{liq}**（標記價 {mark}）。"
+beyond = "之後"
+in_front = "之前"
+vs = "止損 **{stop}** 對比強平價 **{liq}**：在強平價{where} {gap}%（至少需要提前 {required}%）。"
+loss = "若被強平，至少虧損 {loss}。"
+fix_move = "• 把止損移到 **{stop}** → 觸發時盈虧 {pnl}（含手續費）"
+fix_reduce = "• 保留止損，減倉 **{pct}%**（新倉位 {size}）→ 強平價 {liq}"
+fix_margin = "• 保留止損，追加 **{amount}** 保證金 → 強平價 {liq}"
+
+[alert.adl]
+head = "⚡ **自動減倉（ADL）警告**"
+body = "**{symbol}** {side}（{venue}）：ADL {lights} **{n}/5**，未實現盈虧 **+{pnl}**。"
+explain = "當強平虧損超過保險基金時，交易所會先自動減倉對手方中獲利最多、槓桿最高的倉位。4–5 格燈號代表這個倉位排在隊伍前段。"
+options = "做法：部分停利或降低槓桿，就能往隊伍後面移動。"
+
+[alert.wick]
+part = "{interval}：最大 {max}×（{max_pct}%）、一般 {typical}×（{typical_pct}%）"
+one_liquidates = " ⚠️ 一根最大插針就會強平"
+line = "距離強平還有幾根插針：{parts}"
+
+[alert.duration]
+min = "約 {n} 分鐘"
+h = "約 {n} 小時"
+d = "約 {n} 天"
+
+[alert.priority]
+first = "{icon} **{label}**（依緊急程度第 {rank} / {of} 個倉位）"
+later = "優先順序第 {rank} / {of}：{icon} 先處理 **{symbol}**"
+
+[alert.triage]
+head = "{icon} **{n} 個倉位有風險：請依此順序處理**"
+row = "{rank}. {icon} **{symbol}** {side} · 距離強平 {dist} · 一般波動下{time} · 名目價值 ${notional}"
+why = "為什麼先處理 {symbol}：{why}。"
+order = "_順序依據：一般波動下到強平的時間、相對你門檻的距離、倉位大小。_"
+
+[alert.sizing]
+head = "📏 **倉位相對帳戶過大**"
+line = "📏 倉位過大：{reasons}。建議倉位 ≤ **{size}**（約 {notional}，減少 {cut}%）"
+limits = "帳戶權益 {equity} · 你的上限：每筆在出場點虧損 ≤ {risk}%，每個倉位保證金 ≤ 權益的 {margin}%。"
+row = "• **{symbol}** {side} {size}（{notional}，權益的 {x}×）：在{exit}虧損 {loss} = **{risk}**，保證金 {margin}% → 建議 **{suggested}**（約 {suggested_notional}）"
+change = "用 `/settings risk 2` 和 `/settings maxmargin 25` 調整上限。"
+
+[alert.stress]
+head = "{icon} **投資組合壓力測試**"
+account_head = "{venue} 全倉帳戶（{n} 個倉位，同一個錢包）："
+liquidated = "💀 強平"
+left = "✅ 剩 {amount}"
+together = "如果全部一起變動：{cells}"
+account = "市場下跌 **{down}%** 時整個帳戶被強平（各幣依 beta 變動）"
+uniform = "，若全部等幅變動則為 {uni}%"
+
+[alert.compare]
+line = "{symbol}：平台強平價 {platform}（距離 {platform_dist}%）· LiqGuard 連動強平價 **{correlated}**（距離 {correlated_dist}%）"
+closer = " ⚠️ **近了 {gap} 個百分點**"
+head = "平台顯示的強平價 vs 實際（連動）強平價："
+note = "_平台的強平價假設其他倉位都不動；行情急跌時它們會一起下跌。_"
+
+[sim]
+alert_head = "{emoji} **{level} 警報**"
+distance = "距離強平：**{dist}%**"
+tier = "（門檻 {tier}%）"
+mark_liq = "標記價：${mark} · 強平價：${liq}"
+widened = "門檻已放寬：{reasons}"
+where_cross = "到全倉錢包"
+where_margin = "保證金"
+add = "💰 追加 **${amount}** {where} → 距離強平 {target}%"
+reduce = "✂️ 或減倉 **{pct}%**"
+cheapest = "🛟 最便宜的救援：**{title}**（${cost}，含手續費與 24 小時資金費）"
+compare_rescue = "🛟 比較救援方案"
+propose = "✅ 提議追加 ${amount}"
+dismiss = "❌ 忽略"
+rescue_first = "🛟 先救 {symbol}"
+acked_elsewhere = "✅ 已在{source}確認 {symbol} 警報：這次 Demo 已靜音，不會再有 Demo 警報或提醒。"
+finished = "⏹ **Demo 已結束。** 不會再傳送任何 Demo 警報或提醒。"
+finished_hint = "用 /risk 查看投資組合總覽，或從 🎬 Demo 再跑一次。"
+esc_on = "⏰ 嚴重/緊急警報每 {interval} 個示範分鐘（×{seconds} 秒）重複一次，直到你按 ✅ 我醒了，最多 {max} 次。"
+esc_off = "⏰ 喚醒提醒已關閉（/settings）。"
+widened_session = "，並依各幣 30 天插針與交易時段放寬（示範時鐘 {weekday}：{reasons}）"
+started = "🎬 **市場模擬開始**（示範資料）· **{name}**\n有限的一輪：{steps} 步，約 {seconds} 秒，之後自動結束。"
+started_tiers = "價格會一路走向強平。你的門檻：⚠️ {warning}% · 🚨 {critical}% · 🆘 {emergency}%{widened}。"
+started_body = "強平價以全倉保證金計算；示範資金費依模擬時鐘結算，大額支付前會 ⏳ 預警。🎯 多個倉位同時有風險時會合併成一份依處理順序排列的清單；🛑 會檢查止損是否早於強平，⚡ 也會監看 ADL 燈號。"
+started_stop = "在任何警報上按 ✅ 我醒了、😴 靜音這個 Demo 或 ❌ 忽略，這次 Demo 之後都不會再傳訊息。⏹ 停止 Demo（或 /stopdemo）會立即結束。"
+
+[sim.source]
+dashboard = "儀表板"
+web = "網頁儀表板"

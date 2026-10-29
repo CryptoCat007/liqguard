@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from liqguard.i18n import EN, t
+
 logger = logging.getLogger(__name__)
 
 ESCALATING = ("critical", "emergency")
@@ -76,35 +78,67 @@ def urgency(reminder: int, max_reminders: int) -> str:
     return "urgent" if reminder >= 2 else "reminder"
 
 
-def reminder_text(ack: PendingAck, reminder: int, elapsed_minutes: float, demo: bool = False) -> str:
+def reminder_text(ack: PendingAck, reminder: int, elapsed_minutes: float, demo: bool = False, lang: str = EN) -> str:
     """Reminder `reminder` of `ack.max_reminders`; louder each time."""
     level = urgency(reminder, ack.max_reminders)
-    head = {
-        "reminder": "⏰ **REMINDER**",
-        "urgent": "🚨🚨 **URGENT — STILL UNACKNOWLEDGED**",
-        "final": "🆘🆘🆘 **FINAL WAKE-UP CALL**",
-    }[level]
-    dist = f" · now **{ack.distance_pct:.1f}%** from liquidation" if ack.distance_pct is not None else ""
+    dist = t(lang, "alert.reminder.distance", dist=f"{ack.distance_pct:.1f}") if ack.distance_pct is not None else ""
     lines = [
-        f"{head} {reminder}/{ack.max_reminders}{' · demo' if demo else ''}",
-        f"**{ack.symbol}** {ack.severity.upper()} alert sent {elapsed_minutes:.0f} min ago{dist}.",
+        t(lang, f"alert.reminder.head_{level}", n=reminder, max=ack.max_reminders) + (t(lang, "alert.demo_tag") if demo else ""),
+        t(lang, "alert.reminder.sent", symbol=ack.symbol, severity=t(lang, f"common.severity_upper.{ack.severity}"),
+          minutes=f"{elapsed_minutes:.0f}", dist=dist),
     ]
     if level == "final":
-        lines.append("This is the last reminder. Tap **I'm awake** or act on the position now.")
+        lines.append(t(lang, "alert.reminder.final"))
     else:
-        lines.append(f"Tap **I'm awake** to stop reminders (next in {ack.interval_seconds / 60:g} min).")
+        lines.append(t(lang, "alert.reminder.tap", next=f"{ack.interval_seconds / 60:g}"))
     return "\n".join(lines)
 
 
-def ack_action(ack: PendingAck) -> tuple[str, str]:
-    return ("✅ I'm awake", f"{ACK_PREFIX}{ack.id}")
+def ack_action(ack: PendingAck, lang: str = EN) -> tuple[str, str]:
+    return (t(lang, "kb.alert_awake"), f"{ACK_PREFIX}{ack.id}")
+
+
+def rescue_action_for(ack: PendingAck, lang: str = EN) -> tuple[str, str]:
+    return (t(lang, "alert.rescue_button"), f"rescue:{ack.venue}:{ack.symbol}")
+
+
+MATERIAL_DISTANCE_FACTOR = 0.5
+
+
+@dataclass(frozen=True)
+class Silenced:
+    severity: str
+    distance_pct: Optional[float]
+
+    def lifted_by(self, severity: str, distance_pct: Optional[float]) -> bool:
+        """A material change: a worse tier than the one acknowledged AND at most half the distance left."""
+        if severity not in ESCALATING or ESCALATING.index(severity) <= ESCALATING.index(self.severity):
+            return False
+        if self.distance_pct is None or distance_pct is None:
+            return True
+        return distance_pct <= self.distance_pct * MATERIAL_DISTANCE_FACTOR
 
 
 class EscalationTracker:
+    """
+    Pending acknowledgements per (owner, venue, symbol). Acknowledging (or
+    snoozing past) a position silences it: no new reminders open for it until
+    conditions materially change (`Silenced.lifted_by`) or it recovers
+    (`resolve`).
+    """
+
     def __init__(self, id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(9)):
         self._pending: dict[tuple[Optional[int], str, str], PendingAck] = {}
         self._superseded: dict[str, tuple[Optional[int], str, str]] = {}
+        self._silenced: dict[tuple[Optional[int], str, str], Silenced] = {}
         self._ids = id_factory
+
+    def is_silenced(self, user_id: Optional[int], venue: str, symbol: str, severity: Optional[str] = None,
+                    distance_pct: Optional[float] = None) -> bool:
+        s = self._silenced.get((user_id, venue, symbol))
+        if s is None:
+            return False
+        return severity is None or not s.lifted_by(severity, distance_pct)
 
     def open(
         self,
@@ -123,6 +157,11 @@ class EscalationTracker:
         if severity not in ESCALATING or max_reminders <= 0 or interval_seconds <= 0:
             return None
         key = (user_id, venue, symbol)
+        silenced = self._silenced.get(key)
+        if silenced is not None:
+            if not silenced.lifted_by(severity, distance_pct):
+                return None
+            del self._silenced[key]
         current = self._pending.get(key)
         if current is not None and current.acknowledged_at is None and ESCALATING.index(severity) <= ESCALATING.index(current.severity):
             current.distance_pct = distance_pct
@@ -160,6 +199,7 @@ class EscalationTracker:
         ack.acknowledged_at = now
         del self._pending[key]
         self._forget(key)
+        self._silenced[key] = Silenced(ack.severity, ack.distance_pct)
         return ack
 
     def snooze(self, user_id: Optional[int], ack_id: str, until: float) -> Optional[PendingAck]:
@@ -183,8 +223,9 @@ class EscalationTracker:
             ack.distance_pct = distance_pct
 
     def resolve(self, user_id: Optional[int], venue: str, symbol: str) -> Optional[PendingAck]:
-        """The position recovered (or closed): stop reminding."""
+        """The position recovered (or closed): stop reminding, and let a later relapse alert afresh."""
         self._forget((user_id, venue, symbol))
+        self._silenced.pop((user_id, venue, symbol), None)
         return self._pending.pop((user_id, venue, symbol), None)
 
     def pending_for(self, user_id: Optional[int]) -> list[PendingAck]:
@@ -197,6 +238,7 @@ class EscalationTracker:
     def clear(self) -> None:
         self._pending.clear()
         self._superseded.clear()
+        self._silenced.clear()
 
 
 class EscalationService:
@@ -205,15 +247,17 @@ class EscalationService:
     def __init__(self, notifier, tracker: Optional[EscalationTracker] = None, check_seconds: float = 5.0,
                  clock: Callable[[], float] = time.time):
         self.notifier = notifier
+        self.languages: dict[int, str] = {}
         self.tracker = tracker or EscalationTracker()
         self.check_seconds = check_seconds
         self.clock = clock
         self._task: Optional[asyncio.Task] = None
 
     def open(self, user_id: int, venue: str, symbol: str, severity: str, text: str, threshold,
-             distance_pct: Optional[float] = None) -> Optional[PendingAck]:
+             distance_pct: Optional[float] = None, lang: str = EN) -> Optional[PendingAck]:
         if not threshold.escalation_enabled:
             return None
+        self.languages[user_id] = lang
         return self.tracker.open(
             user_id, venue, symbol, severity, text, self.clock(),
             interval_seconds=threshold.escalation_interval_minutes * 60,
@@ -231,9 +275,10 @@ class EscalationService:
         sent = 0
         for ack in self.tracker.due(now):
             n = ack.reminders_sent + 1
-            text = reminder_text(ack, n, (now - ack.opened_at) / 60)
+            lang = self.languages.get(ack.user_id, EN)
+            text = reminder_text(ack, n, (now - ack.opened_at) / 60, lang=lang)
             try:
-                await self.notifier.notify(ack.user_id, text, actions=[ack_action(ack), ("🛟 Rescue options", f"rescue:{ack.venue}:{ack.symbol}")])
+                await self.notifier.notify(ack.user_id, text, actions=[ack_action(ack, lang), rescue_action_for(ack, lang)], lang=lang)
             except Exception as e:
                 logger.error("Escalation reminder for user %s failed: %s", ack.user_id, type(e).__name__)
                 continue

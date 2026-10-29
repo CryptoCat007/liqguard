@@ -1,7 +1,8 @@
 """
 Callback router: decode → validate (signature, owner, version, size, action,
 arguments, age) → dispatch to the feature handler → render. The callback is
-always answered exactly once, whatever happens.
+always answered exactly once, whatever happens. Every screen is rendered in
+the tapping user's language.
 """
 
 from __future__ import annotations
@@ -10,15 +11,23 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
+from liqguard.i18n import Translator
+
 from .actions import ACTIONS
 from .codec import CallbackCodec, CallbackError
 from .screen import Request, Screen, Signer
 
 logger = logging.getLogger(__name__)
 
-INVALID = "⚠️ 這個按鈕無效或不屬於你。"
-EXPIRED = "⌛ 按鈕已過期，已為你開啟最新的主選單。"
-ERROR = "❌ 發生錯誤，請稍後再試。"
+INVALID = "router.invalid"
+EXPIRED = "router.expired"
+EXPIRED_TOAST = "router.expired_toast"
+ERROR = "router.error"
+
+
+def _language_code(obj: Any) -> Optional[str]:
+    code = getattr(getattr(obj, "from_user", None), "language_code", None)
+    return code if isinstance(code, str) else None
 
 
 class CallbackRouter:
@@ -35,46 +44,60 @@ class CallbackRouter:
     def signer(self, user_id: int) -> Signer:
         return Signer(self.codec, user_id, self.clock())
 
+    async def translator(self, user_id: int, language_code: Optional[str] = None) -> Translator:
+        try:
+            return Translator(await self.services.language(user_id, language_code))
+        except Exception as e:
+            logger.warning("Language lookup failed for %s: %s", user_id, type(e).__name__)
+            return Translator()
+
     async def run(self, user_id: int, action: str, args: tuple[str, ...] = (), chat_type: str = "private",
-                  state: Any = None, message: Any = None) -> Screen:
+                  state: Any = None, message: Any = None, T: Optional[Translator] = None) -> Screen:
+        T = T or await self.translator(user_id)
         req = Request(user_id=user_id, action=action, args=args, services=self.services, sign=self.signer(user_id),
-                      chat_type=chat_type, state=state, message=message)
+                      chat_type=chat_type, state=state, message=message, T=T)
         return await self.handlers[action](req)
 
     async def resolve(self, user_id: int, data: Optional[str], chat_type: str = "private", state: Any = None,
-                      message: Any = None) -> tuple[Screen, Optional[str]]:
+                      message: Any = None, T: Optional[Translator] = None) -> tuple[Screen, Optional[str]]:
         """(screen, action that handled it) for one tap; `action` is None for a rejected button."""
         now = self.clock()
         try:
             decoded = self.codec.decode(user_id, data, now=now)
         except CallbackError as e:
             logger.info("Rejected callback from %s: %s", user_id, e.reason)
-            return Screen(INVALID, toast=INVALID, alert=True, edit=False), None
+            T = T or Translator()
+            return Screen(T(INVALID), toast=T(INVALID), alert=True, edit=False), None
         spec = ACTIONS.get(decoded.action)
         if spec is None or not spec.valid_args(decoded.args):
             logger.info("Rejected callback from %s: unknown action or bad arguments", user_id)
-            return Screen(INVALID, toast=INVALID, alert=True, edit=False), None
+            T = T or Translator()
+            return Screen(T(INVALID), toast=T(INVALID), alert=True, edit=False), None
+        T = T or await self.translator(user_id)
         if now - decoded.issued_at > spec.ttl:
-            screen = await self.run(user_id, "m", chat_type=chat_type, state=state, message=message)
-            screen.text = f"{EXPIRED}\n\n{screen.text}"
-            screen.toast = "按鈕已過期"
+            screen = await self.run(user_id, "m", chat_type=chat_type, state=state, message=message, T=T)
+            screen.text = f"{T(EXPIRED)}\n\n{screen.text}"
+            screen.toast = T(EXPIRED_TOAST)
             return screen, "m"
-        screen = await self.run(user_id, decoded.action, decoded.args, chat_type, state, message)
+        screen = await self.run(user_id, decoded.action, decoded.args, chat_type, state, message, T=T)
         return screen, decoded.action
 
     async def handle(self, callback: Any, state: Any = None) -> Optional[str]:
         toast: Optional[str] = None
         alert = False
         handled = None
+        T = Translator()
         try:
+            uid = callback.from_user.id
+            T = await self.translator(uid, _language_code(callback))
             chat = getattr(getattr(callback, "message", None), "chat", None)
             chat_type = str(getattr(chat, "type", "private") or "private")
-            screen, handled = await self.resolve(callback.from_user.id, callback.data, chat_type, state, callback.message)
+            screen, handled = await self.resolve(uid, callback.data, chat_type, state, callback.message, T=T)
             toast, alert = screen.toast, screen.alert
             await render(callback, screen)
         except Exception as e:
             logger.error("UI callback failed for %s: %s", getattr(callback.from_user, "id", "?"), type(e).__name__, exc_info=True)
-            toast, alert = ERROR, True
+            toast, alert = T(ERROR), True
         finally:
             try:
                 await callback.answer(toast, show_alert=alert)

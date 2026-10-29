@@ -27,8 +27,14 @@ the profitable TSLA position, and wake-up escalation of critical/emergency
 alerts (demo time: one escalation minute lasts `escalation_seconds_per_minute`
 seconds of wall time).
 
+The run is finite (`steps` ticks) and every reminder ends with it. The owner
+acknowledging, muting or dismissing any alert, or stopping the demo, mutes the
+whole run: no further alert, advice or reminder event is produced for the rest
+of it (the price path keeps ticking for the dashboard chart). Only a new start
+clears the mute.
+
 Event shapes (all dicts with "type" and "data"):
-    status   {state, step, total_steps}
+    status   {state, step, total_steps, muted}
     tick     {step, timestamp, sim_time, prices: {symbol: {...}}, overview, wallets}
     alert    {id, level, symbol, venue, side, distance, mark_price, ...}
              levels: warning/critical/emergency (with "priority"), "funding" (pre-funding),
@@ -56,6 +62,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from liqguard.alerts.escalation import ESCALATING, EscalationTracker, reminder_text, urgency
+from liqguard.i18n import normalize
 from liqguard.models import (
     CROSS,
     ISOLATED,
@@ -98,6 +105,8 @@ if TYPE_CHECKING:
     from liqguard.protect import AuditLogEntry
 
 logger = logging.getLogger(__name__)
+
+MUTED_EVENTS = frozenset({"alert", "advice", "escalation"})
 
 EventCallback = Callable[[dict], Awaitable[None]]
 
@@ -288,7 +297,7 @@ class MarketSimulation:
         self.steps = steps
         self.tick_interval = tick_interval
         self.seed = seed
-        self.language = language
+        self.language = normalize(language)
 
         self._subscribers: dict[str, EventCallback] = {}
         self._task: Optional[asyncio.Task] = None
@@ -307,6 +316,7 @@ class MarketSimulation:
 
         self.step = 0
         self.state = "idle"
+        self.muted: Optional[str] = None
         self.clock_start = self._clock_start or demo_clock_start(datetime.now(timezone.utc))
         self.history: dict[str, list[dict]] = {s.symbol: [] for s in self.specs}
         self.alerts: list[dict] = []
@@ -347,9 +357,13 @@ class MarketSimulation:
         if threshold is not None:
             self.threshold = threshold
         if language:
-            self.language = language
+            self.language = normalize(language)
         self.reset()
         return True
+
+    def set_language(self, language: str) -> None:
+        """Language for the owner's alerts and Muse text from now on; safe while running (nothing is recomputed)."""
+        self.language = normalize(language)
 
     def _apply_scenario(self, scenario: Scenario) -> None:
         self.scenario = scenario.key
@@ -654,6 +668,8 @@ class MarketSimulation:
         return lambda: self._subscribers.pop(name, None)
 
     async def _emit(self, event_type: str, data: Any) -> None:
+        if self.muted and event_type in MUTED_EVENTS:
+            return
         event = {"type": event_type, "data": data}
         for name, callback in list(self._subscribers.items()):
             try:
@@ -718,6 +734,8 @@ class MarketSimulation:
 
     async def _stop_escalation(self) -> None:
         task, self._escalation_task = self._escalation_task, None
+        if task is asyncio.current_task():
+            return
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -725,15 +743,54 @@ class MarketSimulation:
             except asyncio.CancelledError:
                 pass
 
+    async def silence(self, source: str = "web") -> int:
+        """End every pending wake-up reminder of this demo now (✅ / 😴 / Dismiss / ⏹ Stop demo, or the run ending)."""
+        await self._stop_escalation()
+        pending = self.escalation.pending_for(self.owner_id)
+        now = time.monotonic()
+        for ack in pending:
+            self.escalation.acknowledge(self.owner_id, ack.id, now)
+        if pending:
+            await self._add_audit("reminders_silenced", None, f"{len(pending)} demo reminder(s) ended from {source}", source)
+        return len(pending)
+
+    async def mute(self, source: str = "web") -> bool:
+        """
+        The owner has seen this demo (✅ I'm awake / 😴 / Dismiss / ⏹): end every
+        reminder and send nothing more from this run. False if it was already muted.
+        """
+        if self.muted:
+            await self.silence(source)
+            return False
+        self.muted = source
+        await self.silence(source)
+        await self._add_audit("demo_muted", None, f"No more demo alerts or reminders this run (from {source})", source)
+        return True
+
+    def pending_symbol(self, ack_id: str) -> Optional[str]:
+        ack = next((a for a in self.escalation.pending_for(self.owner_id) if a.id == ack_id), None)
+        return ack.symbol if ack else None
+
+    async def _cancel_side_tasks(self) -> None:
+        tasks = [t for t in self._side_tasks if not t.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def stop(self, source: str = "web") -> None:
+        self.muted = self.muted or source
         await self._stop_escalation()
         if not self.is_running:
+            await self.silence(source)
             return
         self._task.cancel()
         try:
             await self._task
         except asyncio.CancelledError:
             pass
+        await self._cancel_side_tasks()
+        await self.silence(source)
         self.state = "stopped"
         await self._add_audit("simulation_stopped", None, f"Stopped from {source}", source)
         await self._emit("status", self._status())
@@ -766,7 +823,7 @@ class MarketSimulation:
             await asyncio.gather(*list(self._side_tasks), return_exceptions=True)
 
     def _status(self) -> dict:
-        return {"state": self.state, "step": self.step, "total_steps": self.steps}
+        return {"state": self.state, "step": self.step, "total_steps": self.steps, "muted": bool(self.muted)}
 
     def _tick_summary(self, insights: PortfolioInsights) -> Optional[dict]:
         """Rule-based summary from this step's overview and triage focus (goes out inside the tick)."""
@@ -803,6 +860,7 @@ class MarketSimulation:
         if self._side_tasks:
             await asyncio.gather(*list(self._side_tasks), return_exceptions=True)
         await self.refresh_summary()
+        await self.silence("finish")
         self.state = "finished"
         await self._add_audit("simulation_finished", None, "Price path complete; no execution performed")
         await self._emit("status", self._status())
@@ -815,6 +873,8 @@ class MarketSimulation:
         self.overview = self._analyze()
         self.summary = self._tick_summary(self.insights())
         await self._emit("tick", self._record_tick())
+        if self.muted:
+            return
         await self._check_prefunding()
         await self._check_alerts()
         await self._check_protection()
@@ -1093,7 +1153,7 @@ class MarketSimulation:
 
     def _open_escalation(self, level: str, pos: Position, alert: dict) -> None:
         t = self.threshold
-        if level not in ESCALATING or not t.escalation_enabled:
+        if self.muted or level not in ESCALATING or not t.escalation_enabled:
             return
         text = f"{level.upper()} alert: {pos.symbol} {pos.distance_to_liquidation_pct:.1f}% from liquidation"
         ack = self.escalation.open(
@@ -1114,6 +1174,8 @@ class MarketSimulation:
             await asyncio.sleep(tick)
             now = time.monotonic()
             for ack in self.escalation.due(now):
+                if self.muted:
+                    break
                 n = ack.reminders_sent + 1
                 minutes = (now - ack.opened_at) / self.escalation_seconds_per_minute
                 event = {
@@ -1130,7 +1192,7 @@ class MarketSimulation:
                     "urgency": urgency(n, ack.max_reminders),
                     "minutes_since_alert": round(minutes, 1),
                     "distance_pct": None if ack.distance_pct is None else round(ack.distance_pct, 2),
-                    "text": reminder_text(ack, n, minutes, demo=True),
+                    "text": reminder_text(ack, n, minutes, demo=True, lang=self.language),
                     "channels": sorted(self._subscribers),
                 }
                 self.escalation.mark_sent(ack, now)
@@ -1140,7 +1202,7 @@ class MarketSimulation:
                     "escalation_reminder", ack.symbol,
                     f"{event['urgency']} {n}/{ack.max_reminders}: {ack.severity} alert unacknowledged for {minutes:.0f} demo min",
                 )
-            if not self.escalation.active_for(self.owner_id) and not self.is_running:
+            if self.muted or (not self.escalation.active_for(self.owner_id) and not self.is_running):
                 return
 
     async def snooze(self, ack_id: str, minutes: float = 30, source: str = "web") -> Optional[dict]:
@@ -1149,10 +1211,11 @@ class MarketSimulation:
         if ack is None:
             return None
         await self._add_audit("alert_snoozed", ack.symbol, f"reminders paused for {minutes:g} demo min from {source}", source)
+        await self.mute(source)
         return {"ack_id": ack.id, "symbol": ack.symbol, "minutes": minutes, "source": source}
 
     async def acknowledge(self, ack_id: str, source: str = "web") -> Optional[dict]:
-        """The owner tapped "I'm awake": stop reminders for that alert."""
+        """The owner tapped "I'm awake": stop reminders for that alert and mute the rest of this demo."""
         ack = self.escalation.acknowledge(self.owner_id, ack_id, time.monotonic())
         if ack is None:
             return None
@@ -1165,6 +1228,7 @@ class MarketSimulation:
             "source": source,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        await self.mute(source)
         await self._emit("ack", event)
         await self._add_audit("alert_acknowledged", ack.symbol,
                               f"{ack.severity} alert acknowledged from {source} after {ack.reminders_sent} reminder(s)", source)

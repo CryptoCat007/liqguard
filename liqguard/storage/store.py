@@ -94,6 +94,10 @@ class EncryptedStorage:
                 tables.add("bindings_legacy")
             if "users" in tables and "session_epoch" not in await self.db.columns(conn, "users"):
                 await conn.execute("ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0")
+            if "users" in tables and "language_explicit" not in await self.db.columns(conn, "users"):
+                await conn.execute("ALTER TABLE users ADD COLUMN language_explicit INTEGER NOT NULL DEFAULT 0")
+                # Before v3 the only way to get a non-English language was choosing it with /language.
+                await conn.execute("UPDATE users SET language_explicit = 1, language = 'zh-Hant' WHERE language LIKE 'zh%'")
             await conn.executescript(SCHEMA)
             if "bindings_legacy" in tables:
                 await self._migrate_legacy_bindings(conn)
@@ -162,6 +166,10 @@ class EncryptedStorage:
     async def update_threshold(self, telegram_id: int, threshold: UserThreshold) -> None:
         await self.initialize()
         await self.users.update_threshold(telegram_id, threshold)
+
+    async def set_language(self, telegram_id: int, language: str, explicit: bool) -> None:
+        await self.initialize()
+        await self.users.set_language(telegram_id, language, explicit)
 
     async def set_demo_mode(self, telegram_id: int, enabled: bool) -> None:
         await self.initialize()

@@ -1,6 +1,6 @@
 """
-Self-serve exchange binding shared by the Telegram 🔑 綁定帳號 flow and the
-web dashboard. Credentials only travel inward: they are checked against the
+Self-serve exchange binding shared by the Telegram 🔑 bind-account flow and the
+web dashboard (messages in the caller's language). Credentials only travel inward: they are checked against the
 exchange, encrypted with the owner's own data key by the storage layer and
 never returned, logged or echoed (only masked hints like `…ABCD`).
 """
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from liqguard.exchanges import BinanceAdapter, HyperliquidAdapter
+from liqguard.i18n import EN, t
 from liqguard.models import MAINNET, TESTNET, ExchangeBinding, User
 
 logger = logging.getLogger(__name__)
@@ -22,13 +23,10 @@ WALLET = re.compile(r"^0x[a-fA-F0-9]{40}$")
 PRIVATE_KEY = re.compile(r"^(0x)?[a-fA-F0-9]{64}$")
 TRADE_OR_WITHDRAW = ("TRADE", "WITHDRAW", "TRANSFER", "MARGIN", "UNIVERSAL")
 
-SECURITY_NOTE = (
-    "🔒 安全須知\n"
-    "• 只接受「唯讀」API 金鑰：有交易、提幣或轉帳權限的金鑰一律拒絕\n"
-    "• 絕對不要傳送私鑰、助記詞（seed phrase）或交易所登入密碼\n"
-    "• Hyperliquid 只需要錢包地址（0x 開頭 40 碼），不需要任何金鑰\n"
-    "• 金鑰以你專屬的資料金鑰加密保存，畫面上只顯示末四碼"
-)
+
+
+def security_note(lang: str = EN) -> str:
+    return t(lang, "binding.security_note")
 
 
 @dataclass(frozen=True)
@@ -88,59 +86,62 @@ class BindingService:
             await self.storage.save_user(user)
         return user
 
-    async def bind_binance(self, user_id: int, api_key: str, api_secret: str, network: str = MAINNET) -> BindResult:
+    async def bind_binance(self, user_id: int, api_key: str, api_secret: str, network: str = MAINNET,
+                           lang: str = EN) -> BindResult:
         api_key, api_secret = (api_key or "").strip(), (api_secret or "").strip()
         if looks_like_secret_material(api_key, bare_hex=False) or looks_like_secret_material(api_secret, bare_hex=False):
-            return BindResult(False, "secret_material", "⛔ 這看起來像私鑰或助記詞。請立刻妥善保管，絕對不要傳給任何人。LiqGuard 只需要唯讀 API 金鑰。")
+            return BindResult(False, "secret_material", t(lang, "binding.result.secret_material_key"))
         if not API_TOKEN.match(api_key) or not API_TOKEN.match(api_secret):
-            return BindResult(False, "invalid_format", "❌ 格式不正確：API Key 與 Secret 應各為 20–128 個英數字元。")
+            return BindResult(False, "invalid_format", t(lang, "binding.result.key_format"))
         if api_key == api_secret:
-            return BindResult(False, "invalid_format", "❌ API Key 與 Secret 不能相同，請確認兩者都複製正確。")
+            return BindResult(False, "invalid_format", t(lang, "binding.result.key_equals_secret"))
         if network not in (MAINNET, TESTNET):
-            return BindResult(False, "invalid_format", "❌ 不支援的網路。")
+            return BindResult(False, "invalid_format", t(lang, "binding.result.bad_network"))
         try:
             async with self.binance_factory(api_key, api_secret, network=network) as adapter:
                 check = await adapter.check_key()
         except Exception as e:
             logger.error("Binance key check failed for user %s: %s", user_id, type(e).__name__)
-            return BindResult(False, "error", "⚠️ 暫時無法連線到 Binance 驗證金鑰，請稍後再試。")
+            return BindResult(False, "error", t(lang, "binding.result.binance_unreachable"))
         if not check.accepted:
-            risky = [p for p in check.permissions if any(t in p.upper() for t in TRADE_OR_WITHDRAW)]
+            risky = [p for p in check.permissions if any(w in p.upper() for w in TRADE_OR_WITHDRAW)]
             if risky and check.verified:
                 return BindResult(False, "rejected_permissions",
-                                  f"🚫 已拒絕：這把金鑰有 {', '.join(risky)} 權限。請建立只勾選「Enable Reading（允許讀取）」的新金鑰。",
+                                  t(lang, "binding.result.rejected_permissions", permissions=", ".join(risky)),
                                   permissions=check.permissions)
             if "Invalid" in check.message:
-                return BindResult(False, "invalid_key", "❌ API Key 或 Secret 錯誤，請重新複製後再試。")
-            return BindResult(False, "rejected", f"🚫 未通過驗證：{check.message}", permissions=check.permissions)
+                return BindResult(False, "invalid_key", t(lang, "binding.result.invalid_key"))
+            return BindResult(False, "rejected", t(lang, "binding.result.rejected", reason=check.message),
+                              permissions=check.permissions)
         await self._ensure_user(user_id)
         binding = ExchangeBinding(venue="binance", binding_type="api_key", network=network, api_key=api_key,
                                   api_secret=api_secret, permissions=check.permissions)
         await self.storage.save_binding(user_id, binding)
-        label = "Binance 測試網" if network == TESTNET else "Binance"
-        return BindResult(True, "ok", f"✅ 已綁定 {label}（金鑰 {binding.api_key_hint}），權限：{', '.join(check.permissions) or '唯讀'}",
+        label = "Binance" + (t(lang, "common.testnet") if network == TESTNET else "")
+        perms = ", ".join(check.permissions) or t(lang, "binding.read_only")
+        return BindResult(True, "ok", t(lang, "binding.result.binance_ok", label=label, hint=binding.api_key_hint, permissions=perms),
                           hint=binding.api_key_hint, permissions=check.permissions)
 
-    async def bind_hyperliquid(self, user_id: int, address: str) -> BindResult:
+    async def bind_hyperliquid(self, user_id: int, address: str, lang: str = EN) -> BindResult:
         address = (address or "").strip()
         if looks_like_secret_material(address):
-            return BindResult(False, "secret_material", "⛔ 這看起來像私鑰或助記詞，不是錢包地址！請勿外流。Hyperliquid 只需要 0x 開頭、40 碼的公開地址。")
+            return BindResult(False, "secret_material", t(lang, "binding.result.secret_material_wallet"))
         if not WALLET.match(address):
-            return BindResult(False, "invalid_format", "❌ 錢包地址格式不正確：應為 0x 開頭加 40 個十六進位字元。")
+            return BindResult(False, "invalid_format", t(lang, "binding.result.wallet_format"))
         address = address.lower()
         try:
             async with self.hyperliquid_factory(address) as adapter:
                 check = await adapter.check_key()
         except Exception as e:
             logger.error("Hyperliquid check failed for user %s: %s", user_id, type(e).__name__)
-            return BindResult(False, "error", "⚠️ 暫時無法連線到 Hyperliquid，請稍後再試。")
+            return BindResult(False, "error", t(lang, "binding.result.hyperliquid_unreachable"))
         if not check.accepted:
-            return BindResult(False, "rejected", f"❌ 無法使用這個地址：{check.message}")
+            return BindResult(False, "rejected", t(lang, "binding.result.wallet_rejected", reason=check.message))
         await self._ensure_user(user_id)
         binding = ExchangeBinding(venue="hyperliquid", binding_type="wallet", wallet_address=address, permissions=check.permissions)
         await self.storage.save_binding(user_id, binding)
         hint = binding.to_dict()["wallet_address"]
-        return BindResult(True, "ok", f"✅ 已綁定 Hyperliquid 錢包 {hint}（只讀取公開資料）", hint=hint)
+        return BindResult(True, "ok", t(lang, "binding.result.hyperliquid_ok", hint=hint), hint=hint)
 
     async def list(self, user_id: int) -> list[dict]:
         return masked_bindings(await self.storage.get_user(user_id))

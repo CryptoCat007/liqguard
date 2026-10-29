@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
+from liqguard.i18n import Msg
+
 NEW_YORK = ZoneInfo("America/New_York")
 US_OPEN, US_CLOSE = time(9, 30), time(16, 0)
 
@@ -84,17 +86,17 @@ def market_session(now: datetime, symbol: str, low_liquidity_hours: tuple[int, i
     factor, reasons = 1.0, []
     if weekend:
         factor *= WEEKEND_FACTOR
-        reasons.append(f"weekend ×{WEEKEND_FACTOR:g}")
+        reasons.append(Msg("risk.session.weekend", factor=WEEKEND_FACTOR))
     if thin:
         factor *= LOW_LIQUIDITY_FACTOR
         start, end = low_liquidity_hours
-        reasons.append(f"low-liquidity hours {start:02d}:00–{end:02d}:00 UTC ×{LOW_LIQUIDITY_FACTOR:g}")
+        reasons.append(Msg("risk.session.low_liquidity", start=start, end=end, factor=LOW_LIQUIDITY_FACTOR))
     if closed:
         factor *= STOCK_CLOSED_FACTOR
-        reasons.append(f"US stock market closed ({underlying(symbol)} can gap at the open) ×{STOCK_CLOSED_FACTOR:g}")
+        reasons.append(Msg("risk.session.stock_closed", underlying=underlying(symbol), factor=STOCK_CLOSED_FACTOR))
     if factor > MAX_FACTOR:
         factor = MAX_FACTOR
-        reasons.append(f"capped at ×{MAX_FACTOR:g}")
+        reasons.append(Msg("risk.session.capped", factor=MAX_FACTOR))
     return SessionInfo(weekend, thin, stock, closed, factor, reasons)
 
 

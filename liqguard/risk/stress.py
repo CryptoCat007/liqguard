@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import CROSS, MarginAccount, Position, Side
 
 from .correlation import CORRELATED, correlation, factor
@@ -265,11 +266,8 @@ class Concentration:
     def message(self) -> Optional[str]:
         if not self.flagged:
             return None
-        return (
-            f"{self.dominant_share_pct:.0f}% of exposure is {self.dominant_side} across {self.dominant_count} coins "
-            f"that move together (avg correlation {self.avg_correlation:.2f}): your {self.positions} positions behave "
-            f"like {self.effective_bets:.1f} independent bets."
-        )
+        return Msg("risk.concentration", share=self.dominant_share_pct, side=Msg(f"common.side.{self.dominant_side}"),
+                   count=self.dominant_count, corr=self.avg_correlation, positions=self.positions, bets=self.effective_bets)
 
     def to_dict(self) -> dict:
         return {

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from liqguard.i18n import is_zh
 from liqguard.models import AlertSeverity, Position, UserThreshold
 from liqguard.risk.advice import ActionableAdvice, ActionType, AdviceCalculator
 from liqguard.risk.context import RiskContext
@@ -372,7 +373,7 @@ def format_portfolio_overview_text(
 
     Args:
         overview: Portfolio risk overview
-        language: Output language ('en' or 'zh-TW')
+        language: Output language ('en' or 'zh-Hant'; any zh* tag counts as zh-Hant)
 
     Returns:
         Formatted text string
@@ -385,7 +386,7 @@ def format_portfolio_overview_text(
         RiskLevel.CRITICAL: "🔴",
     }
 
-    if language == "zh-TW":
+    if is_zh(language):
         text = f"""📊 **投資組合風險總覽**
 
 {risk_emoji.get(overview.overall_risk_level, '❓')} 整體風險: **{overview.overall_risk_level.value.upper()}**
@@ -436,7 +437,7 @@ Risk Score: {overview.overall_risk_score:.0f}/100
 
     if overview.riskiest_position:
         rp = overview.riskiest_position
-        if language == "zh-TW":
+        if is_zh(language):
             text += f"""
 **最高風險持倉**
 {rp.symbol} {rp.side.upper()} @ {rp.leverage}x

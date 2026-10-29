@@ -34,9 +34,10 @@ from pydantic import BaseModel, Field
 from liqguard.ai import MetaLLMClient
 from liqguard.auth import SessionClaims
 from liqguard.core import AppContext
-from liqguard.core.binding import SECURITY_NOTE, BindingService
+from liqguard.core.binding import BindingService, security_note
 from liqguard.core.position_tools import TOOLS, report
 from liqguard.core.user_settings import apply_setting, settings_dict
+from liqguard.i18n import t
 from liqguard.models import User
 from liqguard.risk import (
     PortfolioAnalyzer,
@@ -261,7 +262,7 @@ def create_app(
             context = sim.risk_context()
             plan = sim.build_rescue_plan(symbol) if tool == "rescue" else None
             return JSONResponse(report(tool, position, context, sim.protection(position, context).to_dict(),
-                                       plan.to_dict() if plan else None, demo=True))
+                                       plan.to_dict() if plan else None, demo=True, lang=sim.language))
 
         @app.post(f"{prefix}/simulate", dependencies=[Depends(require_csrf)])
         async def simulate(sim: MarketSimulation = Depends(guard)):
@@ -328,23 +329,25 @@ def create_app(
         @app.get("/api/me/settings")
         async def my_settings(claims: SessionClaims = Depends(auth.required)):
             """Same settings as Telegram 🔔 通知設定."""
-            return settings_dict((await own_user(claims)).threshold)
+            user = await own_user(claims)
+            return settings_dict(user.threshold, user.language)
 
         @app.post("/api/me/settings", dependencies=[Depends(require_csrf)])
         async def update_my_settings(body: SettingRequest, claims: SessionClaims = Depends(auth.required)):
             user = await own_user(claims)
             updated = apply_setting(user.threshold, body.key, body.value)
             if updated is None:
-                raise HTTPException(400, "無法套用：門檻必須維持 緊急 < 嚴重 < 警告，且數值在允許範圍內")
+                raise HTTPException(400, t(user.language, "settings.invalid"))
             await ctx.storage.update_threshold(claims.user_id, updated)
             sim = ctx.simulations.get(claims.user_id)
             if sim is not None and not sim.is_running:
                 sim.configure(updated, user.language)
-            return settings_dict(updated)
+            return settings_dict(updated, user.language)
 
         @app.get("/api/me/bindings")
         async def my_bindings(claims: SessionClaims = Depends(auth.required)):
-            return {"bindings": await app.state.binding.list(claims.user_id), "security_note": SECURITY_NOTE}
+            user = await own_user(claims)
+            return {"bindings": await app.state.binding.list(claims.user_id), "security_note": security_note(user.language)}
 
         @app.post("/api/me/bindings/binance", dependencies=[Depends(require_csrf)])
         async def bind_binance(request: Request, claims: SessionClaims = Depends(auth.required)):
@@ -396,7 +399,7 @@ def create_app(
             if tool == "rescue":
                 plan = RescueSimulator(c.fees, user.threshold.safety_target_pct).simulate(
                     position, c.account_for(position), c.funding_for(position), c.now).to_dict()
-            return JSONResponse(report(tool, position, c, protection, plan, demo=venue == "demo"))
+            return JSONResponse(report(tool, position, c, protection, plan, demo=venue == "demo", lang=user.language))
 
         @app.get("/api/me/session")
         async def my_session(claims: SessionClaims = Depends(auth.required)):

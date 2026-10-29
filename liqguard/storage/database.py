@@ -9,13 +9,14 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
     username TEXT,
     language TEXT DEFAULT 'en',
+    language_explicit INTEGER NOT NULL DEFAULT 0,
     is_demo_mode INTEGER DEFAULT 0,
     threshold_json TEXT,
     session_epoch INTEGER NOT NULL DEFAULT 0,

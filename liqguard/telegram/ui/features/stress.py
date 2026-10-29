@@ -1,47 +1,47 @@
-"""🧪 壓力測試: account-level correlated stress (cross wallets) plus links to per-position wick stress."""
+"""🧪 Stress test: account-level correlated stress (cross wallets) plus links to per-position wick stress."""
 
 from __future__ import annotations
 
 from .. import keyboards as kb
 from ..screen import Request, Screen
-from ..texts import NO_ACCOUNT, NO_POSITIONS, label_zh, money, pct
+from ..texts import book_label, money, pct
 
 
 async def stress(req: Request) -> Screen:
-    s = req.services
+    s, T = req.services, req.T
     user = await s.user(req.user_id)
     snapshot = await s.snapshot(user)
     if not snapshot.label:
-        return Screen(NO_ACCOUNT, kb.no_account(req.sign))
+        return Screen(T("positions.no_account"), kb.no_account(T, req.sign))
     if not snapshot.positions:
-        return Screen(f"{label_zh(snapshot.label)}\n\n{NO_POSITIONS}", kb.refresh_back(req.sign, "st"))
+        return Screen(f"{book_label(T, snapshot.label)}\n\n{T('positions.none')}", kb.refresh_back(T, req.sign, "st"))
     insights = s.insights(user, snapshot)
-    lines = ["🧪 壓力測試", ""]
+    lines = [T("stress.title"), ""]
     shown = False
     for st in insights.stress:
         d = st.to_dict()
         first = d.get("first_liquidation_move_pct")
-        lines.append(f"📉 {d['venue'].title()} 全倉錢包（{len(d['symbols'])} 個倉位：{'、'.join(d['symbols'])}）")
-        lines.append(f"權益 {money(d['equity'])} · 維持保證金 {money(d['maintenance'])}")
+        lines.append(T("stress.account", venue=d["venue"].title(), n=len(d["symbols"]), symbols=T.join(d["symbols"])))
+        lines.append(T("stress.equity", equity=money(d["equity"]), maintenance=money(d["maintenance"])))
         if first is not None:
-            lines.append(f"⚠️ 所有倉位一起不利移動 {pct(abs(first))}，整個帳戶就會被強平")
+            lines.append(T("stress.first_liq", move=pct(abs(first))))
         for shock in d["shocks"]:
-            mark = "💥 強平" if shock["liquidated"] else f"剩 {money(shock['margin_left'])}"
-            lines.append(f"  • 市場 {shock['market_move_pct']:+g}% → {mark}")
+            mark = T("stress.liquidated") if shock["liquidated"] else T("stress.left", amount=money(shock["margin_left"]))
+            lines.append(T("stress.shock", move=shock["market_move_pct"], result=mark))
         lines.append("")
         shown = True
     if not shown:
-        lines.append("你的倉位都是逐倉（或只有一個全倉倉位），彼此不共用保證金：")
+        lines.append(T("stress.isolated"))
     assessed = s.assessed(user, snapshot)
     for p, a, _ in assessed[:5]:
-        lines.append(f"• {p.symbol}：價格不利移動 {pct(a.distance_to_liquidation_pct)} 即強平")
+        lines.append(T("stress.single", symbol=p.symbol, dist=pct(a.distance_to_liquidation_pct)))
     worst = insights.worst_stress()
     if worst is not None and worst.first_liquidation is not None and assessed:
         single = assessed[0][1].distance_to_liquidation_pct
         if abs(worst.first_liquidation) < single:
-            lines.append(f"\n🧲 一起下跌時，帳戶在 {pct(abs(worst.first_liquidation))} 就爆，比單看最危險倉位的 {pct(single)} 更早。")
+            lines.append("\n" + T("stress.earlier", account=pct(abs(worst.first_liquidation)), single=pct(single)))
     targets = [(s.source_of(snapshot, p), p.symbol) for p, _, _ in assessed]
-    return Screen("\n".join(lines).strip(), kb.stress(req.sign, targets))
+    return Screen("\n".join(lines).strip(), kb.stress(T, req.sign, targets))
 
 
 HANDLERS = {"st": stress}

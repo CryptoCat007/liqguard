@@ -1,4 +1,9 @@
-"""Forwards one user's simulation events to that user's Telegram chat, and nowhere else."""
+"""
+Forwards one user's simulation events to that user's Telegram chat, and nowhere
+else. Every message is written in the owner's language (`simulation.language`)
+and its keyboard is built for that same language, so text and buttons always
+match; every message carries ⏹ Stop demo.
+"""
 
 from __future__ import annotations
 
@@ -20,84 +25,83 @@ from liqguard.alerts import (
     priority_line,
     wick_line,
 )
+from liqguard.alerts.messages import muse_tag, side_upper, venue_name
+from liqguard.i18n import EN, join, t, tr
 from liqguard.simulation import SCENARIOS, MarketSimulation
 
 logger = logging.getLogger(__name__)
 
 LEVEL_EMOJI = {"warning": "⚠️", "critical": "🚨", "emergency": "🆘"}
+STOP_DEMO = "democtl:stop"
 
 
-def format_advice_message(card: dict) -> str:
+def format_advice_message(card: dict, lang: str = EN) -> str:
     """Telegram text for one simulated alert + its Muse advice card."""
     level = card["level"]
-    muse = "Muse (mock)" if card.get("mock") else "Muse"
     lines = [
-        f"{LEVEL_EMOJI.get(level, '❓')} **{level.upper()} ALERT** · demo",
+        t(lang, "sim.alert_head", emoji=LEVEL_EMOJI.get(level, "❓"), level=t(lang, f"common.severity_upper.{level}"))
+        + t(lang, "alert.demo_tag"),
         "",
-        f"**{card['symbol']}** {card['side'].upper()} on {card['venue'].title()}",
-        f"Distance to liq: **{card['distance_pct']:.1f}%**"
-        + (f" (tier {card['threshold_pct']:.1f}%)" if card.get("threshold_pct") else ""),
-        f"Mark: ${card['mark_price']:,.2f} · Liq: ${card['liquidation_price']:,.2f}",
+        t(lang, "alert.position_on", symbol=card["symbol"], side=side_upper(lang, card["side"]), venue=venue_name(lang, card["venue"])),
+        t(lang, "sim.distance", dist=f"{card['distance_pct']:.1f}")
+        + (t(lang, "sim.tier", tier=f"{card['threshold_pct']:.1f}") if card.get("threshold_pct") else ""),
+        t(lang, "sim.mark_liq", mark=f"{card['mark_price']:,.2f}", liq=f"{card['liquidation_price']:,.2f}"),
     ]
-    for line in (priority_line(card.get("priority"), card.get("handle_first")),
-                 comparison_line(card["liq_comparison"]) if card.get("liq_comparison") else None):
+    for line in (priority_line(card.get("priority"), card.get("handle_first"), lang),
+                 comparison_line(card["liq_comparison"], lang) if card.get("liq_comparison") else None,
+                 wick_line(card.get("wicks"), lang)):
         if line:
             lines.append(line)
-    stress = wick_line(card.get("wicks"))
-    if stress:
-        lines.append(stress)
     if card.get("adaptive_reasons"):
-        lines.append(f"Tiers widened: {'; '.join(card['adaptive_reasons'])}")
-    lines += [
-        "",
-        f"🧠 _{muse}:_ {card['explanation']}",
-    ]
+        lines.append(t(lang, "sim.widened", reasons=join(lang, card["adaptive_reasons"], "; ")))
+    lines += ["", f"🧠 _{muse_tag(lang, card.get('mock'))}:_ {tr(lang, card['explanation'])}"]
     if card.get("margin_to_add_usd"):
-        where = "to the cross wallet" if card.get("margin_mode") == "cross" else "margin"
+        where = t(lang, "sim.where_cross" if card.get("margin_mode") == "cross" else "sim.where_margin")
         lines += [
             "",
-            f"💰 Add **${card['margin_to_add_usd']:,.2f}** {where} → {card['target_distance_pct']:.0f}% from liq",
-            f"✂️ Or reduce size by **{card['reduce_size_pct']:.1f}%**",
+            t(lang, "sim.add", amount=f"{card['margin_to_add_usd']:,.2f}", where=where, target=f"{card['target_distance_pct']:.0f}"),
+            t(lang, "sim.reduce", pct=f"{card['reduce_size_pct']:.1f}"),
         ]
     rescue, explanation = card.get("rescue"), card.get("rescue_explanation")
     if rescue:
         best = next((o for o in rescue["options"] if o["kind"] == rescue["recommended"]), None)
         if best:
-            lines += ["", f"🛟 Cheapest rescue: **{best['title']}** (${best['costs']['total_cost_usd']:,.2f} incl. fees + 24h funding)"]
+            lines += ["", t(lang, "sim.cheapest", title=tr(lang, best["title"]), cost=f"{best['costs']['total_cost_usd']:,.2f}")]
         if explanation and explanation.get("headline"):
-            lines.append(f"_{explanation['headline']}_")
+            lines.append(f"_{tr(lang, explanation['headline'])}_")
     return "\n".join(lines)
 
 
-def ack_row(ack_id: str) -> list[InlineKeyboardButton]:
-    return [InlineKeyboardButton(text="✅ I'm awake", callback_data=f"{ACK_PREFIX}{ack_id}")]
+def ack_row(ack_id: str, lang: str = EN) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text=t(lang, "kb.alert_awake"), callback_data=f"{ACK_PREFIX}{ack_id}")]
 
 
-def advice_keyboard(card: dict) -> InlineKeyboardMarkup:
-    rows = [ack_row(card["ack_id"])] if card.get("ack_id") else []
-    rows.append([InlineKeyboardButton(text="🛟 Compare rescue options", callback_data=f"rescue:sim:{card['symbol']}")])
+def stop_row(lang: str = EN) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text=t(lang, "kb.sim_stop"), callback_data=STOP_DEMO)]
+
+
+def advice_keyboard(card: dict, lang: str = EN) -> InlineKeyboardMarkup:
+    rows = [ack_row(card["ack_id"], lang)] if card.get("ack_id") else []
+    rows.append([InlineKeyboardButton(text=t(lang, "sim.compare_rescue"), callback_data=f"rescue:sim:{card['symbol']}")])
     rescue = card.get("rescue")
     if rescue:
-        labels = {"add_margin": "💰 Add margin", "reduce": "✂️ Reduce", "hedge": "🛡 Hedge"}
         rows.append([
             InlineKeyboardButton(
-                text=labels.get(o["kind"], o["kind"]) + (" ⭐" if o["kind"] == rescue["recommended"] else ""),
+                text=t(lang, f"tools.option.{o['kind']}") + (" ⭐" if o["kind"] == rescue["recommended"] else ""),
                 callback_data=f"rescue:sim:{card['symbol']}:{o['kind']}",
             )
             for o in rescue["options"]
         ])
     if card.get("margin_to_add_usd"):
         rows.append([
-            InlineKeyboardButton(
-                text=f"✅ Propose adding ${card['margin_to_add_usd']:,.0f}",
-                callback_data=f"action:propose:{card['symbol']}",
-            ),
-            InlineKeyboardButton(text="❌ Dismiss", callback_data="action:dismiss"),
+            InlineKeyboardButton(text=t(lang, "sim.propose", amount=f"{card['margin_to_add_usd']:,.0f}"),
+                                 callback_data=f"action:propose:{card['symbol']}"),
+            InlineKeyboardButton(text=t(lang, "sim.dismiss"), callback_data="action:dismiss"),
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-AlertMarkup = Callable[[int, list[tuple[str, str]]], Any]
+AlertMarkup = Callable[..., Any]
 
 
 class TelegramSimulationBridge:
@@ -107,8 +111,10 @@ class TelegramSimulationBridge:
     no list of chats to broadcast to, and the public demo simulation (owner
     None) cannot be bridged.
 
-    With `alert_markup` (the inline UI), alert keyboards lead with
-    🚑 先處理這個 / ✅ 我醒了 / 😴 暫停提醒 30 分鐘 signed for the owner.
+    With `alert_markup` (the inline UI), keyboards lead with
+    🚑 Handle this first / ✅ I'm awake / 😴 Mute this demo / ⏹ Stop demo,
+    signed for the owner and labelled in the owner's language.
+    Once the demo is muted (✅ / 😴 / Dismiss / ⏹) nothing more is sent.
     """
 
     def __init__(self, bot: Bot, simulation: MarketSimulation, alert_markup: Optional[AlertMarkup] = None):
@@ -120,97 +126,108 @@ class TelegramSimulationBridge:
         self.alert_markup = alert_markup
         self.unsubscribe: Callable[[], None] = simulation.subscribe("telegram", self.on_event)
 
-    def _with_ui(self, keyboard: Optional[InlineKeyboardMarkup], symbol: str, ack_id: Optional[str] = None) -> Optional[InlineKeyboardMarkup]:
-        if self.alert_markup is None:
-            return keyboard
-        legacy = {f"rescue:sim:{symbol}"} | ({f"{ACK_PREFIX}{ack_id}"} if ack_id else set())
-        top = self.alert_markup(self.chat_id, [("", data) for data in sorted(legacy)])
+    @property
+    def lang(self) -> str:
+        return self.simulation.language
+
+    def keyboard(self, rows: Optional[list[list[InlineKeyboardButton]]] = None, symbol: Optional[str] = None,
+                 ack_id: Optional[str] = None) -> InlineKeyboardMarkup:
+        """`rows` plus the demo's UI buttons (rescue / ack / mute / stop), all in the owner's language."""
+        lang, rows = self.lang, list(rows or [])
+        legacy = ({f"rescue:sim:{symbol}"} if symbol else set()) | ({f"{ACK_PREFIX}{ack_id}"} if ack_id else set())
+        top = None
+        if self.alert_markup is not None:
+            top = self.alert_markup(self.chat_id, [("", data) for data in sorted(legacy)], lang=lang, demo=True)
         if top is None:
-            return keyboard
-        rest = [row for row in (keyboard.inline_keyboard if keyboard else [])
-                if not any(b.callback_data in legacy for b in row)]
+            return InlineKeyboardMarkup(inline_keyboard=rows + [stop_row(lang)])
+        rest = [row for row in rows if not any(b.callback_data in legacy for b in row)]
         return InlineKeyboardMarkup(inline_keyboard=list(top.inline_keyboard) + rest)
 
-    async def _send(self, text: str, keyboard: Optional[InlineKeyboardMarkup] = None) -> None:
+    async def _send(self, text: str, keyboard: Optional[InlineKeyboardMarkup] = None, stop_button: bool = True) -> None:
+        if self.simulation.muted:
+            return
+        if keyboard is None and stop_button:
+            keyboard = self.keyboard()
         try:
             await self.bot.send_message(self.chat_id, text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             logger.error("Failed to send simulation event to %s: %s", self.chat_id, type(e).__name__)
 
+    def _rescue_rows(self, symbol: str) -> list[list[InlineKeyboardButton]]:
+        return [[InlineKeyboardButton(text=t(self.lang, "alert.rescue_button"), callback_data=f"rescue:sim:{symbol}")]]
+
     async def on_event(self, event: dict) -> None:
-        kind, data = event["type"], event["data"]
+        kind, data, lang = event["type"], event["data"], self.lang
 
         if kind == "advice":
-            await self._send(format_advice_message(data), self._with_ui(advice_keyboard(data), data["symbol"], data.get("ack_id")))
+            rows = advice_keyboard(data, lang).inline_keyboard
+            await self._send(format_advice_message(data, lang), self.keyboard(rows, data["symbol"], data.get("ack_id")))
 
         elif kind == "alert" and data["level"] == "funding":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}"),
-            ]])
-            await self._send(format_prefunding_message(data["funding"], demo=True), self._with_ui(keyboard, data["symbol"]))
+            await self._send(format_prefunding_message(data["funding"], demo=True, lang=lang),
+                             self.keyboard(self._rescue_rows(data["symbol"]), data["symbol"]))
 
         elif kind == "alert" and data["level"] == "stop":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}"),
-            ]])
-            await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True), self._with_ui(keyboard, data["symbol"]))
+            await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True, lang=lang),
+                             self.keyboard(self._rescue_rows(data["symbol"]), data["symbol"]))
 
         elif kind == "alert" and data["level"] == "triage":
-            rows = [ack_row(data["ack_id"])] if data.get("ack_id") else []
-            rows.append([InlineKeyboardButton(text=f"🛟 Rescue {data['symbol']} first", callback_data=f"rescue:sim:{data['symbol']}")])
-            await self._send(format_triage_message(data["items"], data.get("severity"), demo=True, focus=data.get("focus")),
-                             self._with_ui(InlineKeyboardMarkup(inline_keyboard=rows), data["symbol"], data.get("ack_id")))
+            rows = [ack_row(data["ack_id"], lang)] if data.get("ack_id") else []
+            rows.append([InlineKeyboardButton(text=t(lang, "sim.rescue_first", symbol=data["symbol"]),
+                                              callback_data=f"rescue:sim:{data['symbol']}")])
+            await self._send(format_triage_message(data["items"], data.get("severity"), demo=True, focus=data.get("focus"), lang=lang),
+                             self.keyboard(rows, data["symbol"], data.get("ack_id")))
 
         elif kind == "alert" and data["level"] == "sizing":
-            await self._send(format_sizing_message(data["sizing"], demo=True))
+            await self._send(format_sizing_message(data["sizing"], demo=True, lang=lang))
 
         elif kind == "alert" and data["level"] == "correlation":
             await self._send(format_correlation_message(data.get("stress"), data["concentration"], data["comparisons"],
-                                                        data.get("severity"), demo=True))
+                                                        data.get("severity"), demo=True, lang=lang))
 
         elif kind == "alert" and data["level"] == "adl":
             await self._send(format_adl_message(data["symbol"], data["venue"], data["side"], data["adl"],
-                                                data.get("unrealized_pnl", 0.0), demo=True))
+                                                data.get("unrealized_pnl", 0.0), demo=True, lang=lang))
 
         elif kind == "escalation":
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                ack_row(data["ack_id"]),
-                [InlineKeyboardButton(text="🛟 Rescue options", callback_data=f"rescue:sim:{data['symbol']}")],
-            ])
-            await self._send(data["text"], self._with_ui(keyboard, data["symbol"], data["ack_id"]))
+            rows = [ack_row(data["ack_id"], lang), *self._rescue_rows(data["symbol"])]
+            await self._send(data["text"], self.keyboard(rows, data["symbol"], data["ack_id"]))
 
-        elif kind == "ack" and data.get("source") != "telegram":
-            await self._send(f"✅ {data['symbol']} alert acknowledged on the {data['source']} — reminders stopped.")
+        elif kind == "ack" and data.get("source") not in ("telegram",):
+            await self.simulation_notice(t(lang, "sim.acked_elsewhere", symbol=data["symbol"],
+                                           source=t(lang, f"sim.source.{data['source']}") if data["source"] in ("dashboard", "web") else data["source"]))
 
         elif kind == "audit" and data["event"] == "simulation_started":
-            t = self.simulation.threshold
-            session = self.simulation._session_dict()
-            esc = (f"⏰ Critical/emergency alerts repeat every {t.escalation_interval_minutes:g} demo min "
-                   f"(×{self.simulation.escalation_seconds_per_minute:g}s) until you tap ✅ I'm awake, "
-                   f"up to {t.escalation_max_reminders}." if t.escalation_enabled else "⏰ Wake-up escalation is off (/settings).")
-            scenario = SCENARIOS.get(self.simulation.scenario)
-            await self._send(
-                "🎬 **Market simulation started** (demo data)"
-                + (f" · **{scenario.title}**\n_{scenario.description}_" if scenario else "") + "\n\n"
-                "Prices will walk toward liquidation. Your tiers: "
-                f"⚠️ {t.warning_distance_pct:.0f}% · 🚨 {t.critical_distance_pct:.0f}% · "
-                f"🆘 {t.emergency_distance_pct:.0f}%"
-                + (f", widened per symbol for 30-day wicks and the session (demo clock {session['weekday']}: {'; '.join(session['reasons'])})"
-                   if t.adaptive_thresholds and session["reasons"] else "")
-                + ".\n"
-                "Liquidation prices are computed for cross margin (positions on one venue share its wallet); "
-                "demo funding settles on a simulated clock (12 min per step) and ⏳ warns before large payments.\n"
-                "🎯 Several positions at risk at once arrive as one list in the order to handle them; 📏 oversized "
-                "positions and 🧲 correlated-move liquidation of the whole account are flagged.\n"
-                "🛑 Stop-losses are checked against liquidation, ⚡ ADL lights are watched, and " + esc
-            )
+            await self._send(self.started_text())
 
-        elif kind == "status" and data["state"] in ("finished", "stopped"):
+        elif kind == "status" and data["state"] == "finished":
             headline = (self.simulation.summary or {}).get("headline")
-            text = f"⏹ **Simulation {data['state']}.**"
+            text = t(lang, "sim.finished")
             if headline:
-                text += f"\n\n🧠 {headline}"
-            await self._send(text + "\n\nUse /risk for the portfolio overview.")
+                text += f"\n\n🧠 {tr(lang, headline)}"
+            await self._send(text + "\n\n" + t(lang, "sim.finished_hint"), stop_button=False)
+
+    async def simulation_notice(self, text: str) -> None:
+        """A one-line confirmation sent even though the demo has just been muted (the mute came from another channel)."""
+        try:
+            await self.bot.send_message(self.chat_id, text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error("Failed to send simulation notice to %s: %s", self.chat_id, type(e).__name__)
+
+    def started_text(self) -> str:
+        sim, lang = self.simulation, self.lang
+        th = sim.threshold
+        session = sim._session_dict()
+        esc = (t(lang, "sim.esc_on", interval=f"{th.escalation_interval_minutes:g}", seconds=f"{sim.escalation_seconds_per_minute:g}",
+                 max=th.escalation_max_reminders) if th.escalation_enabled else t(lang, "sim.esc_off"))
+        scenario = SCENARIOS.get(sim.scenario)
+        name = t(lang, f"demo.scenario.{sim.scenario}") if scenario else ""
+        widened = (t(lang, "sim.widened_session", weekday=session["weekday"], reasons=join(lang, session["reasons"], "; "))
+                   if th.adaptive_thresholds and session["reasons"] else "")
+        return (t(lang, "sim.started", name=name, steps=sim.steps, seconds=f"{sim.steps * sim.tick_interval:.0f}") + "\n\n"
+                + t(lang, "sim.started_tiers", warning=f"{th.warning_distance_pct:.0f}", critical=f"{th.critical_distance_pct:.0f}",
+                    emergency=f"{th.emergency_distance_pct:.0f}", widened=widened) + "\n"
+                + t(lang, "sim.started_body") + " " + esc + "\n\n" + t(lang, "sim.started_stop"))
 
 
 def attach_bridges(bot: Bot, alert_markup: Optional[AlertMarkup] = None) -> Callable[[MarketSimulation], Callable[[], None]]:
@@ -221,16 +238,16 @@ def attach_bridges(bot: Bot, alert_markup: Optional[AlertMarkup] = None) -> Call
 
 
 class TelegramNotifier:
-    """`alerts.Notifier` implementation: one message to one user."""
+    """`alerts.Notifier` implementation: one message to one user, buttons in the same language as the text."""
 
     def __init__(self, bot: Bot, alert_markup: Optional[AlertMarkup] = None):
         self.bot = bot
         self.alert_markup = alert_markup
 
-    async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None) -> None:
+    async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None, lang: str = EN) -> None:
         keyboard = None
         if actions and self.alert_markup is not None:
-            keyboard = self.alert_markup(user_id, actions)
+            keyboard = self.alert_markup(user_id, actions, lang=lang)
         if actions and keyboard is None:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=label, callback_data=data) for label, data in actions]

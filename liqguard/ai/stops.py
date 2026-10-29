@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from liqguard.i18n import is_zh
 from liqguard.risk.stops import BEYOND_LIQUIDATION, NO_STOP, TOO_CLOSE, StopCheck, StopFix
 
 FIX_KINDS = ("move_stop", "add_margin", "reduce")
@@ -43,7 +44,7 @@ def _preferred(check: StopCheck) -> Optional[StopFix]:
 
 
 def mock_stop_explanation(check: StopCheck, language: str = "en") -> dict:
-    zh = language == "zh-TW"
+    zh = is_zh(language)
     fix = _preferred(check)
     liq = _usd(check.liquidation_price)
     if check.status == NO_STOP:

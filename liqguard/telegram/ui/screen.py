@@ -7,6 +7,8 @@ from typing import Any, Callable, Optional
 
 from aiogram.types import InlineKeyboardMarkup
 
+from liqguard.i18n import Translator
+
 from .codec import CallbackCodec
 
 
@@ -46,6 +48,7 @@ class Request:
     state: Any = None
     message: Any = None
     extra: dict = field(default_factory=dict)
+    T: Translator = field(default_factory=Translator)
 
 
 Handler = Callable[[Request], "Screen"]

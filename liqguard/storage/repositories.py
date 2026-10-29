@@ -14,6 +14,7 @@ from typing import Optional
 import aiosqlite
 from cryptography.fernet import Fernet, InvalidToken
 
+from liqguard.i18n import normalize
 from liqguard.models import MAINNET, ExchangeBinding, User, UserThreshold
 
 from .crypto import KeyManager, decrypt_with, encrypt_with
@@ -91,7 +92,8 @@ class UserRepository:
         return User(
             telegram_id=row["telegram_id"],
             username=row["username"],
-            language=row["language"] or "en",
+            language=normalize(row["language"]),
+            language_explicit=bool(row["language_explicit"]),
             is_demo_mode=bool(row["is_demo_mode"]),
             threshold=threshold,
             session_epoch=row["session_epoch"] or 0,
@@ -109,17 +111,19 @@ class UserRepository:
         async with self.db.connect() as conn:
             await conn.execute(
                 """
-                INSERT INTO users (telegram_id, username, language, is_demo_mode, threshold_json, created_at, last_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (telegram_id, username, language, language_explicit, is_demo_mode, threshold_json,
+                                   created_at, last_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(telegram_id) DO UPDATE SET
                     username = excluded.username,
                     language = excluded.language,
+                    language_explicit = excluded.language_explicit,
                     is_demo_mode = excluded.is_demo_mode,
                     threshold_json = excluded.threshold_json,
                     last_active = excluded.last_active
                 """,
                 (
-                    user.telegram_id, user.username, user.language, int(user.is_demo_mode),
+                    user.telegram_id, user.username, normalize(user.language), int(user.language_explicit), int(user.is_demo_mode),
                     json.dumps(user.threshold.to_dict()), user.created_at.isoformat(), user.last_active.isoformat(),
                 ),
             )
@@ -128,6 +132,12 @@ class UserRepository:
     async def _update(self, telegram_id: int, column: str, value) -> None:
         async with self.db.connect() as conn:
             await conn.execute(f"UPDATE users SET {column} = ? WHERE telegram_id = ?", (value, telegram_id))
+            await conn.commit()
+
+    async def set_language(self, telegram_id: int, language: str, explicit: bool) -> None:
+        async with self.db.connect() as conn:
+            await conn.execute("UPDATE users SET language = ?, language_explicit = ? WHERE telegram_id = ?",
+                               (normalize(language), int(explicit), telegram_id))
             await conn.commit()
 
     async def update_threshold(self, telegram_id: int, threshold: UserThreshold) -> None:

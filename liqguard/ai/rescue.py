@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from liqguard.i18n import is_zh
 from liqguard.risk.rescue import ADD_MARGIN, HEDGE, OPTION_ORDER, REDUCE, RescueOption, RescuePlan
 
 RESCUE_EXPLANATION_SCHEMA = {
@@ -89,7 +90,7 @@ def _pros_cons(o: RescueOption, zh: bool) -> tuple[list[str], list[str]]:
 
 
 def mock_rescue_explanation(plan: RescuePlan, language: str = "en") -> dict:
-    zh = language == "zh-TW"
+    zh = is_zh(language)
     best = plan.option(plan.recommended)
     target = plan.target_distance_pct
     if plan.already_safe:

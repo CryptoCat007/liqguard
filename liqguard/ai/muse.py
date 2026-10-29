@@ -10,6 +10,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
+from liqguard.i18n import is_zh, muse_language
 from liqguard.models import Alert, AlertSeverity, Position
 from liqguard.risk.advice import ActionableAdvice, AdviceCalculator
 from liqguard.risk.portfolio import PortfolioRiskOverview
@@ -224,12 +225,12 @@ Explain this advice to the user. Use the exact numbers provided - do not calcula
 
     def _get_advice_system_prompt(self, language: str) -> str:
         """Get system prompt for advice explanation."""
-        if language == "zh-TW":
+        if is_zh(language):
             return """你是加密貨幣風險分析師。根據提供的精確計算結果解釋風險和建議行動。
 
 重要規則：
 1. 使用提供的精確數字 - 絕不自行計算
-2. 用繁體中文清晰解釋
+2. 用繁體中文（台灣用語，zh-Hant-TW）清晰解釋
 3. 保持簡潔（2-3句）
 4. 使用 JSON 格式回應
 
@@ -277,7 +278,7 @@ Response format:
         severity = known_severity
         urgency = {"emergency": "immediate", "critical": "high", "warning": "medium"}.get(severity, "none")
 
-        if language == "zh-TW":
+        if is_zh(language):
             if severity == "emergency":
                 summary = f"{position.symbol} 距離清算僅 {distance:.1f}%，需立即行動"
                 explanation = (
@@ -437,7 +438,7 @@ If you cannot determine a field, use null. Always include confidence score."""
         Uses tool calling to get pre-calculated metrics.
         """
         if not positions:
-            if language == "zh-TW":
+            if is_zh(language):
                 return "您目前沒有持倉。使用 /bind 連接交易所或 /demo 進入演示模式。"
             return "You have no positions. Use /bind to connect an exchange or /demo for demo mode."
 
@@ -460,9 +461,9 @@ If you cannot determine a field, use null. Always include confidence score."""
         if self._use_mock:
             return self._mock_answer_question(assessments, question, language, news_context)
 
-        if language == "zh-TW":
+        if is_zh(language):
             system_prompt = """你是加密貨幣交易助手。根據提供的倉位數據回答問題。
-使用提供的精確數字，不要自行計算。用繁體中文回答。"""
+使用提供的精確數字，不要自行計算。用繁體中文（台灣用語，zh-Hant-TW）回答。"""
         else:
             system_prompt = """You are a crypto trading assistant. Answer questions based on the provided position data.
 Use the exact numbers provided - do not calculate your own."""
@@ -504,7 +505,7 @@ Question: {question}"""
 
         question_lower = question.lower()
 
-        if language == "zh-TW":
+        if is_zh(language):
             if "風險" in question or "risk" in question_lower:
                 if riskiest:
                     return (
@@ -606,9 +607,9 @@ Question: {question}"""
         if self._use_mock or rp is None:
             return self.mock_portfolio_summary(overview, language, focus)
 
-        if language == "zh-TW":
+        if is_zh(language):
             system_prompt = (
-                "你是加密貨幣風險分析師。用一句繁體中文（最多 30 字）總結投資組合風險，"
+                "你是加密貨幣風險分析師。用一句繁體中文（台灣用語，最多 30 字）總結投資組合風險，"
                 "必須點名 riskiest_symbol 並使用提供的精確數字。回傳 JSON：{\"headline\": \"...\"}"
             )
         else:
@@ -665,12 +666,12 @@ Question: {question}"""
     @staticmethod
     def _mock_portfolio_headline(rp, language: str, basis: Optional[str] = None) -> str:
         if rp is None:
-            return "目前沒有持倉。" if language == "zh-TW" else "No open positions."
+            return "目前沒有持倉。" if is_zh(language) else "No open positions."
         dist = round(rp.distance_to_liquidation_pct, 2)
         add = rp.margin_advice.margin_to_add_usd if rp.margin_advice else 0
         target = rp.margin_advice.target_distance_pct if rp.margin_advice else None
         explained = basis and basis not in ("only position", "closest to liquidation")
-        if language == "zh-TW":
+        if is_zh(language):
             line = f"最高風險為 {rp.symbol} {rp.side.upper()}（{rp.venue}），距離清算 {dist:.1f}%"
             if explained:
                 line += "（以波動調整後最接近）" if basis == "closest in volatility-adjusted terms" else f"（{basis}）"
@@ -689,7 +690,7 @@ Question: {question}"""
         if self._use_mock:
             return mock_rescue_explanation(plan, language)
 
-        lang = "Traditional Chinese (zh-TW)" if language == "zh-TW" else "English"
+        lang = muse_language(language)
         system_prompt = (
             "You explain liquidation rescue options to a crypto trader. All numbers are already computed; "
             "quote only dollar amounts that appear in the input, never compute new ones. Compare add_margin, "
@@ -727,7 +728,7 @@ Question: {question}"""
         """
         if self._use_mock:
             return mock_stop_explanation(check, language)
-        lang = "Traditional Chinese (zh-TW)" if language == "zh-TW" else "English"
+        lang = muse_language(language)
         system_prompt = (
             "You review a crypto trader's stop-loss against the liquidation price. All numbers are computed; quote "
             "only dollar amounts from the input. Say plainly what is wrong (no stop, stop beyond liquidation so it "

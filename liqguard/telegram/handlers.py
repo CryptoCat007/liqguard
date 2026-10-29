@@ -20,6 +20,7 @@ from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.positions import LABEL_SIMULATION
 from liqguard.core.user_settings import apply_setting as apply_user_setting
 from liqguard.exchanges import SCENARIOS, BinanceAdapter, HyperliquidAdapter
+from liqguard.i18n import t
 from liqguard.models import MAINNET, TESTNET, ExchangeBinding, Position, Side, User
 from liqguard.risk import (
     AdviceCalculator,
@@ -553,21 +554,26 @@ class BotHandlers:
         """"I'm awake": stops reminders for the caller's own alert (live monitor or their simulation)."""
         ack_id = callback.data[len(ACK_PREFIX):]
         user_id = callback.from_user.id
+        lang = await self._lang(user_id)
         ack = self.ctx.escalations.acknowledge(user_id, ack_id, time.time())
-        symbol = ack.symbol if ack else None
+        symbol, demo = (ack.symbol, False) if ack else (None, False)
         if ack is None:
             sim = self.simulations.get(user_id)
             event = await sim.acknowledge(ack_id, source="telegram") if sim is not None else None
-            symbol = event["symbol"] if event else None
+            symbol, demo = (event["symbol"], True) if event else (None, False)
         if symbol is None:
-            await callback.answer("Already acknowledged or expired.")
+            await callback.answer(t(lang, "alerts.gone"))
             return
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await callback.message.answer(f"✅ Acknowledged — reminders for **{symbol}** stopped. Stay safe.", parse_mode="Markdown")
-        await callback.answer("Reminders stopped")
+        await callback.message.answer(t(lang, "alerts.demo_acked" if demo else "alerts.acked", symbol=symbol))
+        await callback.answer(t(lang, "alerts.demo_acked_toast" if demo else "alerts.acked_toast"))
+
+    async def _lang(self, user_id: int) -> str:
+        user = await self.storage.get_user(user_id)
+        return user.language if user else "en"
 
     @staticmethod
     def _settings_text(user: User) -> str:
@@ -818,9 +824,14 @@ class BotHandlers:
             sim = self.simulations.get(callback.from_user.id)
             if sim is not None:
                 await sim.stop(source="telegram")
-            await callback.message.edit_text(
-                "⏹ Simulation stopped.\n\nUse /demo to start again or /positions to view current state."
-            )
+            lang = await self._lang(callback.from_user.id)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await callback.message.answer(t(lang, "demo.stopped"))
+            await callback.answer(t(lang, "demo.stopped_toast"))
+            return
         await callback.answer()
 
     # ------------------------------------------------------------------ AI
@@ -978,8 +989,11 @@ class BotHandlers:
         user_id = callback.from_user.id
 
         if kind == "dismiss":
+            sim = self.simulations.get(user_id)
+            if sim is not None:
+                await sim.mute(source="telegram")
             await self._delete_quietly(callback.message)
-            await callback.answer("Dismissed")
+            await callback.answer(t(await self._lang(user_id), "alerts.dismissed_toast"))
             return
 
         if kind == "propose":

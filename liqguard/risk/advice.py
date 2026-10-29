@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+from liqguard.i18n import is_zh
 from liqguard.models import Position, Side
 
 
@@ -194,7 +195,7 @@ class AdviceCalculator:
     @staticmethod
     def format_advice_text(advice: ActionableAdvice, language: str = "en") -> str:
         """Format advice as human-readable text."""
-        if language == "zh-TW":
+        if is_zh(language):
             if advice.action_type == ActionType.ADD_MARGIN:
                 if advice.margin_to_add_usd == 0:
                     return f"✅ {advice.symbol} 倉位目前安全，距離清算 {advice.current_distance_pct:.1f}%"

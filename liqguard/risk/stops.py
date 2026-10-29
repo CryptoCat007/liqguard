@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import FundingInfo, MarginAccount, OpenOrder, Position, Side, WickProfile
 
 from .fees import FeeSchedule
@@ -253,11 +254,11 @@ def check_stop_loss(
         fixes.extend(placement_fix())
         fixes.extend(_keep_stop_fixes(position, stop, need, account, fees, funding, now))
         if status == BEYOND_LIQUIDATION:
-            notes.append("The exchange liquidates the position before this stop can trigger.")
+            notes.append(Msg("risk.stop.note_beyond"))
         else:
-            notes.append("A stop-market fill can slip past the liquidation price in a wick.")
+            notes.append(Msg("risk.stop.note_slip"))
     elif status == PARTIAL:
-        notes.append(f"Stops cover {covered:.0f}% of the position; the rest has no stop.")
+        notes.append(Msg("risk.stop.note_partial", covered=covered))
     return StopCheck(
         status=status, stop_price=stop, gap_pct=gap, covered_pct=covered,
         pnl_at_stop_usd=pnl_at(position, stop, fees), loss_if_liquidated_usd=loss_if_liquidated,

@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional, Protocol, Union
 
+from liqguard.i18n import EN, t
 from liqguard.models import Position, User
 from liqguard.risk import (
     BAND_ORDER,
@@ -25,15 +26,19 @@ from liqguard.risk import (
 from .escalation import ESCALATING, EscalationService, ack_action
 from .manager import AlertManager
 from .messages import (
+    _usd,
     comparison_line,
+    demo_tag,
     format_adl_message,
     format_correlation_message,
     format_sizing_message,
     format_stop_message,
     format_triage_message,
     priority_line,
+    side_upper,
     sizing_line,
     thresholds_line,
+    venue_name,
     wick_line,
 )
 
@@ -47,8 +52,8 @@ Action = tuple[str, str]
 
 
 class Notifier(Protocol):
-    async def notify(self, user_id: int, text: str, actions: Optional[list[Action]] = None) -> None:
-        """Deliver `text` (and optional action buttons) to exactly one user."""
+    async def notify(self, user_id: int, text: str, actions: Optional[list[Action]] = None, lang: str = EN) -> None:
+        """Deliver `text` (and optional action buttons) to exactly one user; `lang` is the language `text` is in."""
 
 
 class BookSnapshotLike(Protocol):
@@ -64,53 +69,54 @@ UsersProvider = Callable[[], Awaitable[list[User]]]
 PositionsProvider = Callable[[User], Awaitable[Union[list[Position], BookSnapshotLike]]]
 
 
-def rescue_action(position: Position) -> Action:
-    return ("🛟 Rescue options", f"rescue:{position.venue.value}:{position.symbol}")
+def rescue_action(position: Position, lang: str = EN) -> Action:
+    return (t(lang, "alert.rescue_button"), f"rescue:{position.venue.value}:{position.symbol}")
 
 
 def format_alert_message(position: Position, assessment: RiskAssessment, explanation: str,
-                         protection: Optional[dict] = None, insights: Optional[PortfolioInsights] = None) -> str:
+                         protection: Optional[dict] = None, insights: Optional[PortfolioInsights] = None,
+                         lang: str = EN) -> str:
     emoji = SEVERITY_EMOJI.get(assessment.risk_level_str, "❓")
+    level = assessment.risk_level_str.lower()
     message = (
-        f"{emoji} **{assessment.risk_level_str} ALERT**\n\n"
-        f"**{position.symbol}** {position.side.value.upper()}\n"
-        f"Distance to liquidation: **{assessment.distance_to_liquidation_pct:.1f}%**\n"
+        t(lang, "alert.tier.head", emoji=emoji, level=t(lang, f"common.severity_upper.{level}")) + "\n\n"
+        + f"**{position.symbol}** {side_upper(lang, position.side.value)}\n"
+        + t(lang, "alert.tier.distance", dist=f"{assessment.distance_to_liquidation_pct:.1f}") + "\n"
     )
     extra: list[Optional[str]] = []
     if insights is not None:
         priority, top = insights.priority(position), insights.top
         comparison, sizing = insights.comparison(position), insights.sizing_for(position)
         extra = [
-            priority_line(priority.to_dict() if priority else None, top.to_dict() if top else None),
-            comparison_line(comparison.to_dict()) if comparison and comparison.correlated_market_move_pct is not None else None,
-            sizing_line(sizing.to_dict()) if sizing else None,
+            priority_line(priority.to_dict() if priority else None, top.to_dict() if top else None, lang),
+            comparison_line(comparison.to_dict(), lang) if comparison and comparison.correlated_market_move_pct is not None else None,
+            sizing_line(sizing.to_dict(), lang) if sizing else None,
         ]
-    for line in (*extra, wick_line((protection or {}).get("wicks")), thresholds_line((protection or {}).get("thresholds"))):
+    for line in (*extra, wick_line((protection or {}).get("wicks"), lang), thresholds_line((protection or {}).get("thresholds"), lang)):
         if line:
             message += f"{line}\n"
     message += f"\n{explanation}\n\n"
     if assessment.margin_to_safety > 0:
-        message += f"💰 Add **${assessment.margin_to_safety:,.2f}** margin for safety"
+        message += t(lang, "alert.tier.add_margin", amount=f"{assessment.margin_to_safety:,.2f}")
     return message
 
 
-def format_prefunding_message(warning: dict, demo: bool = False) -> str:
+def format_prefunding_message(warning: dict, demo: bool = False, lang: str = EN) -> str:
     """Pre-funding warning text from `PreFundingWarning.to_dict()` (every number computed in `risk.funding`)."""
     liq_before, liq_after = warning.get("liquidation_before"), warning.get("liquidation_after")
     lines = [
-        f"⏳ **PRE-FUNDING ALERT**{' · demo' if demo else ''}",
+        t(lang, "alert.funding.head") + demo_tag(lang, demo),
         "",
-        f"**{warning['symbol']}** {warning['side'].upper()} on {warning['venue'].title()} pays "
-        f"**${warning['payment_usd']:,.2f}** funding in **{warning['minutes_to_settlement']:.0f} min** "
-        f"({warning['rate_pct']:+.4f}% per {warning['interval_hours']:g}h, current rate).",
-        f"Distance to liq: **{warning['distance_before_pct']:.1f}% → {warning['distance_after_pct']:.1f}%** after settlement",
+        t(lang, "alert.funding.pays", symbol=warning["symbol"], side=side_upper(lang, warning["side"]),
+          venue=venue_name(lang, warning["venue"]), amount=f"{warning['payment_usd']:,.2f}",
+          minutes=f"{warning['minutes_to_settlement']:.0f}", rate=f"{warning['rate_pct']:+.4f}",
+          hours=f"{warning['interval_hours']:g}"),
+        t(lang, "alert.funding.distance", before=f"{warning['distance_before_pct']:.1f}", after=f"{warning['distance_after_pct']:.1f}"),
     ]
     if liq_before and liq_after:
-        lines.append(f"Liq: ${liq_before:,.2f} → ${liq_after:,.2f}")
-    lines.append(
-        f"That is {warning['buffer_share_pct']:.1f}% of your remaining margin buffer"
-        + (" and moves you into a worse alert tier." if warning.get("crosses_tier") else ".")
-    )
+        lines.append(t(lang, "alert.funding.liq", before=_usd(liq_before, lang), after=_usd(liq_after, lang)))
+    lines.append(t(lang, "alert.funding.buffer_tier" if warning.get("crosses_tier") else "alert.funding.buffer",
+                   share=f"{warning['buffer_share_pct']:.1f}"))
     return "\n".join(lines)
 
 
@@ -224,6 +230,9 @@ class PositionMonitor:
                 self._adl_state.pop((user.telegram_id, position.venue.value, position.symbol), None)
             if assessment.severity is None or (quiet and severity not in ESCALATING):
                 continue
+            if self.escalation is not None and self.escalation.tracker.is_silenced(
+                    user.telegram_id, position.venue.value, position.symbol, severity, assessment.distance_to_liquidation_pct):
+                continue
             alert = engine.create_alert(assessment)
             if alert and self.alert_manager.process_alert(user.telegram_id, alert, user.threshold.cooldown_seconds):
                 due.append((position, assessment, info))
@@ -242,9 +251,9 @@ class PositionMonitor:
                          actions: list[Action]) -> None:
         if self.escalation is not None and severity in ESCALATING:
             ack = self.escalation.open(user.telegram_id, position.venue.value, position.symbol, severity, text,
-                                       user.threshold, distance)
+                                       user.threshold, distance, lang=user.language)
             if ack is not None:
-                actions.insert(0, ack_action(ack))
+                actions.insert(0, ack_action(ack, user.language))
 
     async def _send_tier_alert(self, user: User, position: Position, assessment: RiskAssessment, info: dict,
                                insights: PortfolioInsights) -> int:
@@ -255,11 +264,12 @@ class PositionMonitor:
             assessment.severity,
             user.language,
         )
-        text = format_alert_message(position, assessment, explanation, info, insights)
-        actions = [rescue_action(position)]
+        lang = user.language
+        text = format_alert_message(position, assessment, explanation, info, insights, lang)
+        actions = [rescue_action(position, lang)]
         severity = assessment.severity.value if assessment.severity else None
         self._open_escalation(user, position, severity, text, assessment.distance_to_liquidation_pct, actions)
-        await self.notifier.notify(user.telegram_id, text, actions=actions)
+        await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language)
         return 1
 
     async def _send_triage(self, user: User, due: list, insights: PortfolioInsights) -> int:
@@ -267,26 +277,26 @@ class PositionMonitor:
         items = [t.to_dict() for t in insights.at_risk]
         severities = [a.severity.value for _, a, _ in due if a.severity]
         worst = max(severities, key=BAND_ORDER.index) if severities else None
-        text = format_triage_message(items, worst, focus=insights.focus)
+        text = format_triage_message(items, worst, focus=insights.focus, lang=user.language)
         top = insights.top
         lead = next(((p, a) for p, a, _ in due if top and p.symbol == top.symbol and p.venue.value == top.venue), None)
         lead = lead or (due[0][0], due[0][1])
         position, assessment = lead
-        actions = [rescue_action(position)]
+        actions = [rescue_action(position, user.language)]
         self._open_escalation(user, position, assessment.severity.value if assessment.severity else None, text,
                               assessment.distance_to_liquidation_pct, actions)
-        await self.notifier.notify(user.telegram_id, text, actions=actions)
+        await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language)
         return 1
 
     async def _check_portfolio(self, user: User, insights: PortfolioInsights) -> int:
         """Sizing and correlated-stress warnings, each only when it gets worse (new oversized position, worse band)."""
-        uid, sent = user.telegram_id, 0
+        uid, sent, lang = user.telegram_id, 0, user.language
         oversized = {(s.venue, s.symbol) for s in insights.oversized}
         new = oversized - self._oversized.get(uid, set())
         self._oversized[uid] = oversized
         if new:
             checks = [s.to_dict() for s in insights.oversized if (s.venue, s.symbol) in new]
-            await self.notifier.notify(uid, format_sizing_message(checks))
+            await self.notifier.notify(uid, format_sizing_message(checks, lang=lang), lang=lang)
             sent += 1
         worst = insights.worst_stress()
         band = stress_band(worst.first_liquidation if worst else None)
@@ -297,7 +307,7 @@ class PositionMonitor:
             data = insights.to_dict()
             comps = [c for c in data["comparisons"] if worst is None or c["symbol"] in worst.symbols]
             await self.notifier.notify(uid, format_correlation_message(
-                worst.to_dict() if worst else None, data["concentration"], comps, band))
+                worst.to_dict() if worst else None, data["concentration"], comps, band, lang=lang), lang=lang)
             sent += 1
         if worse or band is None:
             self._stress_band[uid] = band
@@ -321,8 +331,9 @@ class PositionMonitor:
                 explanation = await explain(check, user.language)
             except Exception as e:
                 logger.error("Stop-loss explanation failed: %s", type(e).__name__)
-        await self.notifier.notify(user.telegram_id, format_stop_message(check.to_dict(), explanation),
-                                   actions=[rescue_action(position)])
+        lang = user.language
+        await self.notifier.notify(user.telegram_id, format_stop_message(check.to_dict(), explanation, lang=lang),
+                                   actions=[rescue_action(position, lang)], lang=lang)
         return 1
 
     async def _check_adl(self, user: User, position: Position, adl: dict) -> int:
@@ -331,7 +342,8 @@ class PositionMonitor:
             return 0
         self._adl_state[key] = adl["lights"]
         await self.notifier.notify(user.telegram_id, format_adl_message(
-            position.symbol, position.venue.value, position.side.value, adl, position.unrealized_pnl))
+            position.symbol, position.venue.value, position.side.value, adl, position.unrealized_pnl, lang=user.language),
+            lang=user.language)
         return 1
 
     async def _check_prefunding(self, user: User, positions: list[Position], context: RiskContext) -> int:
@@ -353,8 +365,10 @@ class PositionMonitor:
             if key in self._prefunding_sent:
                 continue
             self._prefunding_sent[key] = warning.settlement_time
+            lang = user.language
             await self.notifier.notify(
-                user.telegram_id, format_prefunding_message(warning.to_dict()), actions=[rescue_action(position)]
+                user.telegram_id, format_prefunding_message(warning.to_dict(), lang=lang),
+                actions=[rescue_action(position, lang)], lang=lang,
             )
             sent += 1
         return sent

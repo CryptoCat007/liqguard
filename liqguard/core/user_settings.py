@@ -1,6 +1,6 @@
 """
 Validated edits to a user's alert settings: the one place Telegram (/settings,
-the 🔔 通知設定 menu) and the web dashboard settings panel change thresholds,
+the 🔔 Alerts menu) and the web dashboard settings panel change thresholds,
 wake-up escalation and quiet hours.
 """
 
@@ -10,6 +10,7 @@ import dataclasses
 import re
 from typing import Optional
 
+from liqguard.i18n import EN, t
 from liqguard.models import UserThreshold
 
 TOGGLES = {"escalation": "escalation_enabled", "adaptive": "adaptive_thresholds", "stops": "stop_loss_checks"}
@@ -82,13 +83,21 @@ def apply_setting(threshold: UserThreshold, key: str, value: str) -> Optional[Us
     return None
 
 
-def quiet_label(threshold: UserThreshold) -> str:
+def quiet_window(value: str, lang: str = EN) -> str:
+    """`"23-7"` → `23:00–07:00`; `"off"` → Off / 關閉."""
+    if str(value) in ("off", "none", ""):
+        return t(lang, "settings.quiet_off")
+    start, end = (int(x) for x in str(value).split("-", 1))
+    return f"{start:02d}:00–{end:02d}:00"
+
+
+def quiet_label(threshold: UserThreshold, lang: str = EN) -> str:
     if threshold.quiet_hours_start is None or threshold.quiet_hours_end is None:
-        return "關閉"
-    return f"{threshold.quiet_hours_start:02d}:00–{threshold.quiet_hours_end:02d}:00"
+        return t(lang, "settings.quiet_off")
+    return quiet_window(f"{threshold.quiet_hours_start}-{threshold.quiet_hours_end}", lang)
 
 
-def settings_dict(threshold: UserThreshold) -> dict:
+def settings_dict(threshold: UserThreshold, lang: str = EN) -> dict:
     """What the dashboard settings panel shows (no secrets here, only numbers and toggles)."""
     return {
         "warning": threshold.warning_distance_pct,
@@ -103,7 +112,7 @@ def settings_dict(threshold: UserThreshold) -> dict:
         "risk": threshold.risk_per_trade_pct,
         "maxmargin": threshold.max_margin_pct,
         "quiet": None if threshold.quiet_hours_start is None else f"{threshold.quiet_hours_start}-{threshold.quiet_hours_end}",
-        "quiet_label": quiet_label(threshold),
+        "quiet_label": quiet_label(threshold, lang),
         "quiet_utc_offset_hours": threshold.quiet_utc_offset_hours,
         "presets": {k: list(v) for k, v in PRESETS.items()},
     }

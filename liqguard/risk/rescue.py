@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import CROSS, FundingInfo, MarginAccount, Position, Side, Venue
 
 from .advice import ActionableAdvice, ActionType
@@ -204,14 +205,14 @@ class RescueSimulator:
 
         if self._is_cross(position, account):
             after = true_liquidation(position, _replace_in(account, position, position, account.wallet_balance + amount))
-            where = "cross wallet"
+            where = Msg("risk.rescue.where_cross")
         else:
             wallet = (position.isolated_wallet if position.isolated_wallet is not None else position.margin) + amount
             after = true_liquidation(dataclasses.replace(position, isolated_wallet=wallet), None)
-            where = "isolated margin"
+            where = Msg("risk.rescue.where_isolated")
         return RescueOption(
             kind=ADD_MARGIN,
-            title=f"Add ${amount:,.2f} to {where}",
+            title=Msg("risk.rescue.title_add", amount=amount, where=where),
             new_liquidation_price=after.price,
             new_distance_pct=after.distance_pct,
             reaches_target=after.distance_pct >= self.target - 1e-6,
@@ -221,7 +222,7 @@ class RescueSimulator:
             realized_loss_usd=0.0,
             capital_required_usd=amount,
             params={"amount_usd": amount},
-            notes=("No fees; the margin stays at risk if the price keeps moving.",),
+            notes=(Msg("risk.rescue.note_add"),),
         )
 
     def _reduce_result(self, position: Position, account: Optional[MarginAccount], fraction: float):
@@ -248,11 +249,12 @@ class RescueSimulator:
         q = abs(position.size)
         notes = []
         if not self._is_cross(position, account):
-            notes.append("Isolated margin is released pro rata, so a partial close barely moves the liquidation price.")
+            notes.append(Msg("risk.rescue.note_isolated_reduce"))
         if fraction >= 1.0 - 1e-9:
-            title = f"Close {position.symbol} (100%)"
+            title = Msg("risk.rescue.title_close", symbol=position.symbol)
         else:
-            title = f"Reduce {fraction * 100:.1f}% ({fraction * q:.4f} {position.base_symbol.removesuffix('USDT')})"
+            title = Msg("risk.rescue.title_reduce", pct=fraction * 100, size=fraction * q,
+                        coin=position.base_symbol.removesuffix("USDT"))
         return RescueOption(
             kind=REDUCE,
             title=title,
@@ -300,7 +302,7 @@ class RescueSimulator:
             open_fee = h * mark * rate
             return RescueOption(
                 kind=HEDGE,
-                title=f"Hedge: open {h:.4f} {opposite} {position.symbol} (Hedge Mode, same wallet)",
+                title=Msg("risk.rescue.title_hedge_same", size=h, side=Msg(f"common.side.{opposite}"), symbol=position.symbol),
                 new_liquidation_price=liq,
                 new_distance_pct=dist,
                 reaches_target=dist >= self.target - 1e-6,
@@ -310,22 +312,17 @@ class RescueSimulator:
                 realized_loss_usd=0.0,
                 capital_required_usd=h * mark / max(position.leverage, 1),
                 params={"hedge_size": h, "hedge_pct": fraction * 100, "hedge_venue": position.venue.value},
-                notes=(
-                    "Requires Binance Hedge Mode; fees include opening and later closing the hedge.",
-                    "Locks in the current loss on the hedged part until both legs are closed.",
-                ),
+                notes=(Msg("risk.rescue.note_hedge_mode"), Msg("risk.rescue.note_hedge_lock")),
             )
 
         other = Venue.BINANCE if position.venue == Venue.HYPERLIQUID else Venue.HYPERLIQUID
         current = true_liquidation(position, account)
         open_fee = self.fees.taker_fee(other, q * mark)
-        reason = (
-            "Hyperliquid nets positions per asset, so the hedge has to sit on another venue."
-            if position.venue == Venue.HYPERLIQUID else "An isolated position cannot share margin with a hedge."
-        )
+        reason = Msg("risk.rescue.note_hl_nets" if position.venue == Venue.HYPERLIQUID else "risk.rescue.note_isolated_hedge")
         return RescueOption(
             kind=HEDGE,
-            title=f"Hedge: open {q:.4f} {opposite} {position.base_symbol} on {other.value.title()}",
+            title=Msg("risk.rescue.title_hedge_other", size=q, side=Msg(f"common.side.{opposite}"), symbol=position.base_symbol,
+                      venue=other.value.title()),
             new_liquidation_price=current.price,
             new_distance_pct=current.distance_pct,
             reaches_target=False,

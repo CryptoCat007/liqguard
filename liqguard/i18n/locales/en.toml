@@ -1,0 +1,595 @@
+# LiqGuard — English (default). Every key here must also exist in zh-Hant.toml
+# with the same {placeholders}; liqguard/tests/test_i18n.py enforces it.
+
+[common]
+list_sep = ", "
+on = "ON"
+off = "OFF"
+yes = "yes"
+no = "no"
+none = "none"
+na = "n/a"
+demo_suffix = " · demo"
+demo_data = " (demo data)"
+testnet = " testnet"
+truncated = "\n\n... (truncated)"
+use_private = "Please use a private chat"
+
+[common.side]
+long = "long"
+short = "short"
+None = "—"
+
+[common.side_upper]
+long = "LONG"
+short = "SHORT"
+
+[common.tier]
+warning = "warning"
+critical = "critical"
+emergency = "emergency"
+
+[common.severity]
+warning = "Warning"
+critical = "Critical"
+emergency = "Emergency"
+safe = "Safe"
+
+[common.severity_upper]
+warning = "WARNING"
+critical = "CRITICAL"
+emergency = "EMERGENCY"
+safe = "SAFE"
+funding = "FUNDING"
+
+[common.duration]
+min = "~{n:.0f} min"
+h = "~{n:.1f} h"
+d = "~{n:.0f} d"
+
+[common.venue]
+binance = "Binance"
+hyperliquid = "Hyperliquid"
+demo = "Demo"
+
+[lang]
+picker_title = "🌐 Language / 語言\n\nChoose the language for menus, alerts and Muse explanations. Your choice is saved."
+current = "Current: {name}"
+set = "✅ Language set to English."
+set_toast = "Language: English"
+auto_note = "(picked automatically from your Telegram language; tap to change)"
+
+[risk.rescue]
+where_cross = "cross wallet"
+where_isolated = "isolated margin"
+title_add = "Add ${amount:,.2f} to {where}"
+title_close = "Close {symbol} (100%)"
+title_reduce = "Reduce {pct:.1f}% ({size:.4f} {coin})"
+title_hedge_same = "Hedge: open {size:.4f} {side} {symbol} (Hedge Mode, same wallet)"
+title_hedge_other = "Hedge: open {size:.4f} {side} {symbol} on {venue}"
+note_add = "No fees; the margin stays at risk if the price keeps moving."
+note_isolated_reduce = "Isolated margin is released pro rata, so a partial close barely moves the liquidation price."
+note_hedge_mode = "Requires Binance Hedge Mode; fees include opening and later closing the hedge."
+note_hedge_lock = "Locks in the current loss on the hedged part until both legs are closed."
+note_hl_nets = "Hyperliquid nets positions per asset, so the hedge has to sit on another venue."
+note_isolated_hedge = "An isolated position cannot share margin with a hedge."
+
+[risk.stop]
+note_beyond = "The exchange liquidates the position before this stop can trigger."
+note_slip = "A stop-market fill can slip past the liquidation price in a wick."
+note_partial = "Stops cover {covered:.0f}% of the position; the rest has no stop."
+
+[risk.session]
+weekend = "weekend ×{factor:g}"
+low_liquidity = "low-liquidity hours {start:02d}:00–{end:02d}:00 UTC ×{factor:g}"
+stock_closed = "US stock market closed ({underlying} can gap at the open) ×{factor:g}"
+capped = "capped at ×{factor:g}"
+
+[risk.adaptive]
+off = "adaptive tiers off (/settings)"
+floor = "{tier} ≥ {floor:.1f}% ({interval} max wick)"
+floor_x2 = "{tier} ≥ {floor:.1f}% ({interval} max wick × 2)"
+
+[risk.exit]
+stop = "stop"
+liquidation_price = "liquidation price"
+correlated_liquidation = "correlated liquidation"
+none = "exit"
+
+[risk.sizing]
+loses = "loses {risk:.1f}% of equity at its {exit} (limit {limit:g}%)"
+margin = "ties up {margin:.0f}% of equity as margin (limit {limit:g}%)"
+
+[risk]
+concentration = "{share:.0f}% of exposure is {side} across {count} coins that move together (avg correlation {corr:.2f}): your {positions} positions behave like {bets:.1f} independent bets."
+
+[risk.triage]
+handle_first = "Handle this first"
+no_liq = "no liq"
+no_liq_price = "no liquidation price"
+moves = "{n:.1f} typical 5m moves"
+reason = "{dist:.1f}% from liq ≈ {moves:.1f} typical 5m moves ({when} at typical volatility), ${notional:,.0f} notional"
+why_same = "{symbol}: {basis} ({dist}, {moves})"
+why_volatility = "{symbol}: {basis} — {dist} is only {moves}; {nearest} is nearer in % ({nearest_dist}) but calmer, {nearest_moves}"
+why_combined = "{symbol}: {basis} (time to liq, distance vs tiers and size); {nearest} is nearer in % ({nearest_dist}, {nearest_moves}) vs {dist}, {moves}"
+
+[risk.triage.basis]
+only_position = "only position"
+closest = "closest to liquidation"
+volatility = "closest in volatility-adjusted terms"
+inside_tier = "inside an alert tier"
+combined = "highest combined urgency"
+
+[muse]
+reply_language = "English"
+
+[tools]
+title = "{tool} · {symbol} {side}{demo}"
+
+[tools.name]
+rescue = "🛟 Rescue sim"
+wick = "🕯 Wick stress"
+stop = "🛑 Stop check"
+funding = "💸 Funding impact"
+
+[tools.option]
+add_margin = "💰 Add margin"
+reduce = "✂️ Reduce"
+hedge = "🛡 Hedge"
+
+[tools.rescue]
+recommended = " ⭐ recommended"
+what_add = "add {amount}"
+what_reduce = "reduce {pct:g}%"
+what_hedge = "open a {size:g} opposite hedge on {venue}"
+no_liq = "no liquidation any more"
+after = "distance to liq → {dist}"
+unprotected = " (does not prevent liquidation)"
+cost = "cost {total} (fees {fees}, realized loss {realized}) · capital needed {capital}"
+missing = "No rescue simulation is available for this position."
+current = "Now {dist} from liquidation, liq price {price}"
+target = "Target: back to {target:g}% from liquidation"
+already_safe = "✅ Already at a safe distance; nothing to do."
+footer = "(Costs include fees and an estimate of 24 h funding. LiqGuard only simulates; it never places orders for you.)"
+
+[tools.wick]
+current = "Now {dist} from liquidation"
+no_data = "No candle wick data for this symbol yet."
+inside = "already within range"
+away = "{n:.1f} max wicks away"
+line = "• {interval}: typical wick {typical:.2f}% · max {max:.2f}% ({days:g} days) → {away}"
+one_wick = "⚠️ A single recent max wick would trigger liquidation! Consider adding margin or reducing."
+safe = "✅ Recent max wicks would not reach the liquidation price."
+adaptive = "📈 Adaptive tiers: warning {warning:.1f}% · critical {critical:.1f}% · emergency {emergency:.1f}%"
+
+[tools.stop]
+unavailable = "Open orders for this position can't be read, so the stop-loss can't be checked right now."
+price = "Stop price: {price}"
+gap = "Gap between stop and liquidation: {gap} (needs at least {required})"
+liq = "Liquidation price: {price}"
+loss = "Loss if liquidated: about {loss}"
+suggest_move = "💡 Put the stop at {price} or more conservative"
+suggest_set = "💡 Set a stop order that triggers before the liquidation price"
+
+[tools.stop.status]
+ok = "✅ Stop-loss is valid and fires before liquidation"
+partial = "⚠️ Stop-loss only covers part of the position"
+no_stop = "🛑 No stop-loss set"
+beyond_liquidation = "🛑 Stop price is beyond liquidation: it will never fire"
+too_close = "⚠️ Stop is too close to liquidation; a wick may beat it"
+
+[tools.funding]
+pay = "pay"
+receive = "receive"
+rate = "Rate: {rate:+.4f}% / {hours:g} h"
+next = "Next settlement: in {minutes:.0f} min you {verb} {amount}"
+drift_item = "{hours:g}h → {dist}"
+drift_none = "{hours:g}h → no liq"
+drift = "Distance to liq at the current rate: {drift}"
+close_fee = "Fee to close (taker {rate:.3f}%): about {fee}"
+no_data = "No funding data for this position yet."
+
+[commands]
+stopdemo = "⏹ Stop the running demo"
+start = "Start / main menu"
+menu = "🏠 Main menu"
+positions = "📊 My positions"
+risk = "🚨 Portfolio risk overview"
+demo = "🎬 Demo mode"
+settings = "🔔 Alert settings"
+bind = "🔑 Bind an account"
+dashboard = "🖥️ Web dashboard link"
+lang = "🌐 Language / 語言"
+help = "❓ Help"
+
+[book]
+simulation = "🎬 Demo mode · market simulation"
+demo = "🎮 Demo mode"
+live = "📡 Live positions"
+
+[menu]
+text = "🏠 Main menu\n\nLiqGuard watches your perpetual futures for liquidation risk: it tells you which position to handle first, then works out the cheapest way to rescue it.\n\n{status}\n\nPick a feature:"
+status_demo = "🎮 Demo mode is on (simulated data)"
+status_bound = "🔗 Connected: {names}"
+status_unbound = "🔌 No account connected yet. Try 🎬 Demo first."
+help = """❓ Help
+
+LiqGuard watches your perpetual futures positions, warns you before liquidation and works out the cheapest rescue.
+
+📊 My positions: every position has Rescue sim / Wick stress / Stop check / Funding impact
+🚨 What first: when several positions are in danger, ranks them by urgency and explains why
+🧪 Stress test: the market drop that liquidates a whole cross wallet when everything falls together
+💸 Funding & fees: what the next funding settlement costs and the fee to close
+🔔 Alerts: alert tiers, wake-up reminder interval, quiet hours
+🔑 Bind account: Binance read-only API key or Hyperliquid wallet address
+🖥️ Dashboard: one-time login link
+🎬 Demo: try every feature with simulated positions (a short, finite run; ⏹ Stop demo ends it at any time)
+🌐 Language / 語言: English or 繁體中文
+
+On an alert: 🚑 Handle this first opens the rescue sim, ✅ I'm awake stops wake-up reminders, 😴 Snooze pauses them for 30 min.
+
+Commands: /menu · /positions · /risk · /demo · /settings · /dashboard · /lang"""
+
+[kb]
+back_menu = "⬅️ Main menu"
+positions = "📊 My positions"
+triage = "🚨 What first"
+stress = "🧪 Stress test"
+funding = "💸 Funding & fees"
+settings = "🔔 Alerts"
+binding = "🔑 Bind account"
+dashboard = "🖥️ Dashboard"
+demo = "🎬 Demo"
+language = "🌐 Language / 語言"
+help = "❓ Help"
+lang_en = "🇬🇧 {name}"
+lang_zh = "🇹🇼 {name}"
+refresh = "🔄 Refresh"
+back_positions = "📊 Back to positions"
+wick_for = "🕯 {symbol} wick stress"
+minutes = "{n:g} min"
+times = "{n}×"
+back_settings = "⬅️ Back to alerts"
+bind_binance = "🟡 Bind Binance"
+bind_hyperliquid = "🟢 Bind Hyperliquid"
+bound = "📋 Show bound"
+unbind = "🗑 Unbind"
+bind_cancel = "❌ Cancel binding"
+back_binding = "⬅️ Back to accounts"
+unbind_confirm = "✅ Yes, unbind"
+cancel = "❌ Cancel"
+open_dashboard = "🖥️ Open my dashboard"
+sim_stop = "⏹ Stop demo"
+demo_off = "❌ Leave demo mode"
+demo_menu = "🎬 Demo menu"
+alert_rescue = "🚑 Handle this first"
+alert_awake = "✅ I'm awake"
+alert_snooze = "😴 Snooze 30 min"
+alert_snooze_demo = "😴 Mute this demo"
+
+[positions]
+no_account = "🔌 No exchange account connected yet.\n\n• Tap 🔑 Bind account to connect Binance (read-only API key) or Hyperliquid (wallet address only)\n• Or tap 🎬 Demo to try it with simulated positions"
+none = "📭 No open positions."
+not_found = "That position no longer exists (it may be closed, or the simulation ended). Here is your updated list."
+not_found_toast = "Position no longer exists"
+row = "{emoji} {symbol} {side} {leverage:g}x · {dist} to liq · uPnL {pnl}"
+title = "📊 My positions · {book}\n(riskiest first)"
+more = "…{n} more positions on the web dashboard"
+hint = "Tap a position for details, or a tool below it."
+size = "Size: {size:g}"
+entry = "Entry: {price}"
+mark = "Mark: {price}"
+liq_exchange = "Liquidation (exchange): {price}"
+liq_true = "Liquidation (LiqGuard, true): {price}"
+distance = "Distance to liq: {dist} ({severity})"
+pnl = "Unrealized PnL: {pnl}"
+priority = "Handling order: #{rank} of {of}"
+add_margin = "💡 Adding {amount} margin brings it back to {target:g}% from liquidation"
+
+[triage]
+title = "🚨 What first"
+title_ordered = "🚨 What first (in handling order)"
+none_at_risk = "✅ No position is inside an alert tier."
+nearest = "Closest is {symbol}, {dist} from liquidation."
+moves = " · ≈ {n:.1f} typical 5-min moves"
+row = "{rank}. {symbol} {side} · {severity} · {dist} to liq{moves}"
+focus = "🎯 Handle {symbol} first: {basis}."
+nearest_later = "({symbol} is nearest in % at {dist}, but ranks lower once volatility and size are counted)"
+button = "Rescue {symbol} (#{rank})"
+
+[triage.basis]
+only_position = "the only position inside an alert zone"
+closest = "closest to liquidation"
+volatility = "closest once volatility is counted (a wilder coin is more dangerous at the same distance)"
+inside_tier = "the only position inside an alert tier"
+combined = "highest combined urgency (time, tiers, size)"
+
+[stress]
+title = "🧪 Stress test"
+account = "📉 {venue} cross wallet ({n} positions: {symbols})"
+equity = "Equity {equity} · maintenance {maintenance}"
+first_liq = "⚠️ If every position moves against you by {move}, the whole account is liquidated"
+liquidated = "💥 liquidated"
+left = "{amount} left"
+shock = "  • Market {move:+g}% → {result}"
+isolated = "Your positions are isolated (or there is only one cross position), so they don't share margin:"
+single = "• {symbol}: liquidated after an adverse move of {dist}"
+earlier = "🧲 Falling together, the account blows up at {account}, earlier than the riskiest single position ({single})."
+
+[funding]
+title = "💸 Funding & fees"
+no_data = "No funding data yet"
+close_fee = "Fee to close ≈ {fee} (taker {rate:.3f}%)"
+total = "Closing everything costs ≈ {fee} in fees"
+sign_note = "Positive rate: longs pay shorts; negative rate: shorts pay longs."
+
+[settings]
+quiet_off = "Off"
+text = "🔔 Alerts\n\nTiers: ⚠️ {warning:g}% · 🚨 {critical:g}% · 🆘 {emergency:g}%\nWake-up reminders: {escalation}, every {interval:g} min, up to {max}×\nQuiet hours: {quiet} (UTC{offset:+g}; critical/emergency alerts still get through)\nAdaptive tiers: {adaptive} (widen on weekends, thin hours and wick-heavy coins)\nStop-loss checks: {stops}"
+tap = "Tap a button to change."
+updated = "Updated"
+choose = "Choose:"
+invalid = "❌ Can't apply: tiers must stay emergency < critical < warning, within the allowed range."
+invalid_toast = "Can't apply this setting"
+saved_note = "✅ Saved"
+saved = "Saved"
+
+[settings.label]
+warning = "⚠️ Warning"
+critical = "🚨 Critical"
+emergency = "🆘 Emergency"
+interval = "⏰ Interval"
+max = "🔁 Max"
+quiet = "🌙 Quiet"
+
+[settings.toggle]
+escalation = "Wake-up reminders"
+adaptive = "Adaptive tiers"
+stops = "Stop checks"
+
+[settings.hint]
+warning = "Send a ⚠️ warning when the distance to liquidation drops below this %"
+critical = "Send a 🚨 critical alert below this % (starts wake-up reminders)"
+emergency = "Send an 🆘 emergency alert below this %"
+interval = "Critical/emergency alerts repeat every this many minutes until you tap ✅ I'm awake"
+max = "Maximum number of reminders"
+quiet = "During quiet hours (Taipei time) only critical and emergency alerts are sent"
+
+[binding]
+read_only = "read-only"
+security_note = """🔒 Security
+• Read-only API keys only: keys with trade, withdraw or transfer permission are rejected
+• Never send a private key, seed phrase or exchange password
+• Hyperliquid needs only your wallet address (0x + 40 characters), no key
+• Keys are encrypted with your own data key; only the last 4 characters are ever shown"""
+none_bullet = "• Nothing connected yet"
+menu = "🔑 Bind account\n\nConnected:\n{bound}"
+private_only = "🔒 For your safety, bind accounts in a private chat with LiqGuard (others can read group messages)."
+cannot_start = "⚠️ Binding can't start right now. Send /menu and try again."
+guide_binance = """🟡 Bind Binance (read-only API key)
+
+1️⃣ Log in to Binance → profile icon → API Management
+2️⃣ Create API → System generated, name it (e.g. LiqGuard)
+3️⃣ Tick only ✅ Enable Reading
+    ❌ Do NOT tick: Futures trading, Spot & Margin trading, Withdrawals, Universal Transfer
+4️⃣ (Recommended) restrict access to trusted IPs
+5️⃣ Send me the API Key and the Secret Key in one message, separated by a space or new line
+    (or send the key first, then the secret)
+
+🧹 I delete your message as soon as I read it; keys that can trade or withdraw are rejected.
+⛔ Never send a private key, seed phrase or password."""
+guide_hyperliquid = """🟢 Bind Hyperliquid (wallet address only)
+
+Send your wallet address: 0x followed by 40 characters (42 in total).
+LiqGuard only reads public position data and never needs or accepts a key.
+
+⛔ Never send a private key or seed phrase (12/24 English words)."""
+bound_empty = "📋 Show bound\n\nNo account connected yet."
+bound_item = "• {label}\n  Permissions: {permissions}"
+bound_title = "📋 Show bound (keys show only the last 4 characters)"
+unbind_empty = "🗑 Unbind\n\nNothing to unbind."
+unbind_pick = "🗑 Unbind\n\nPick the account to remove:"
+gone = "That binding no longer exists."
+gone_toast = "Binding no longer exists"
+unbind_confirm = "⚠️ Unbind {label}?\n\nThe encrypted key / address is deleted and this account is no longer monitored.\n(The confirm button is valid for 2 minutes.)"
+unbound = "✅ {venue} unbound; the key was deleted."
+unbound_toast = "Unbound"
+cancelled_toast = "Binding cancelled"
+cancelled = "Binding cancelled."
+deleted = "🧹 Your message was deleted."
+retry_wallet = "Send the wallet address again, or tap Cancel binding."
+secret_material = "⛔ That looks like a private key or seed phrase! Keep it secret. LiqGuard only needs a Binance read-only API key."
+key_secret_only = "❌ Send only the API Key and the Secret, separated by a space or new line."
+key_received = "✅ API Key received.\n\nNow send the Secret Key:"
+expired = "⌛ The flow timed out. Send the API Key and Secret again."
+ended = "Binding flow ended."
+see_positions = "You can check 📊 My positions now."
+retry_binance = "Send the API Key and Secret again, or tap Cancel binding."
+
+[binding.result]
+secret_material_key = "⛔ That looks like a private key or seed phrase. Keep it safe and never share it. LiqGuard only needs a read-only API key."
+key_format = "❌ Wrong format: the API Key and Secret are each 20–128 letters and digits."
+key_equals_secret = "❌ The API Key and Secret can't be the same; check that you copied both."
+bad_network = "❌ Unsupported network."
+binance_unreachable = "⚠️ Can't reach Binance to verify the key right now. Please try again later."
+rejected_permissions = "🚫 Rejected: this key has {permissions} permission. Create a new key with only Enable Reading ticked."
+invalid_key = "❌ Wrong API Key or Secret. Copy them again and retry."
+rejected = "🚫 Not accepted: {reason}"
+binance_ok = "✅ {label} connected (key {hint}), permissions: {permissions}"
+secret_material_wallet = "⛔ That looks like a private key or seed phrase, not a wallet address! Keep it secret. Hyperliquid only needs your public 0x address (40 hex characters)."
+wallet_format = "❌ Wrong wallet address format: it must be 0x followed by 40 hex characters."
+hyperliquid_unreachable = "⚠️ Can't reach Hyperliquid right now. Please try again later."
+wallet_rejected = "❌ This address can't be used: {reason}"
+hyperliquid_ok = "✅ Hyperliquid wallet {hint} connected (public data only)"
+
+[dashboard]
+private_only = "🔒 Dashboard links are personal. Tap 🖥️ Dashboard in your private chat with LiqGuard."
+disabled = "🖥️ The web dashboard isn't enabled on this LiqGuard instance; everything is available here."
+link = "🖥️ Your private LiqGuard dashboard\n\n{url}\n\n• Works once and expires in {minutes} min\n• Shows only your own positions, alerts and audit log\n• Don't share it: until it's used, anyone with the link can sign in as you\n• /dashboard revoke signs out every device"
+
+[demo]
+not_running = "⏹ No demo is running; nothing more will be sent."
+intro = "🎬 Demo mode\n\nTry LiqGuard with simulated positions, no account needed:\n• Normal / Volatile / Near liquidation / Safe: fixed demo books\n• 🎬 Liquidation sim: prices walk toward liquidation; alerts and reminders arrive here\n• 🎬 5 longs, one wallet: five correlated cross-margin longs fall together: which to rescue first, and the drop that liquidates the account\n\nEach simulation is a short, finite run (about 30 s) that ends by itself; ⏹ Stop demo ends it and all its reminders at once. It is private to you and never touches a real account."
+running = "▶️ Simulation running. Check positions, or stop it at any time."
+choose = "Choose a scenario:"
+static_on = "🎮 Demo on: {name}\n\nEvery button below now uses this simulated book."
+static_on_toast = "Demo on"
+sim_title = "🎬 Market simulation · {name}"
+sim_started = "Started."
+sim_already = "Already running."
+sim_body = "Prices walk toward liquidation and alerts arrive here (and on your web dashboard). The run is finite and ends by itself.\nOn an alert: 🚑 Handle this first, ✅ I'm awake, 😴 Mute this demo, or ⏹ Stop demo."
+sim_started_toast = "Simulation started"
+sim_already_toast = "Simulation running"
+stopped = "⏹ Demo stopped. No more demo alerts or reminders will be sent."
+stopped_toast = "Stopped"
+disabled = "📊 Demo mode is off; your connected accounts' real positions are shown from now on."
+disabled_toast = "Demo off"
+
+[demo.scenario]
+normal = "😊 Normal market"
+volatile = "📈 Volatile market"
+critical = "🚨 Near liquidation"
+safe = "✅ Safe portfolio"
+mixed = "🎬 Liquidation sim"
+cross_longs = "🎬 5 longs, one wallet"
+
+[alerts]
+demo_acked = "✅ Got it, you're awake. This demo is now muted: no more demo alerts or reminders ({symbol} was the alert you acknowledged). Start a new demo any time from 🎬 Demo."
+demo_acked_toast = "Demo muted"
+dismissed_toast = "Dismissed"
+gone = "This alert was already acknowledged or has expired."
+acked = "✅ Acknowledged: wake-up reminders for {symbol} stopped. Stay safe!"
+acked_toast = "Reminders stopped"
+snoozed = "😴 Reminders for {symbol} paused for {minutes} min; if it's still dangerous I'll wake you again."
+snoozed_toast = "Paused for {minutes} min"
+demo_quiet = "😴 Demo reminders for {symbol} stopped. The demo sends no more wake-up reminders."
+demo_quiet_toast = "Demo reminders stopped"
+
+[router]
+invalid = "⚠️ This button is invalid or isn't yours."
+expired = "⌛ That button has expired; here is the latest main menu."
+expired_toast = "Button expired"
+error = "❌ Something went wrong. Please try again."
+
+[alert]
+demo_tag = " · demo"
+muse = "Muse"
+muse_mock = "Muse (mock)"
+position_on = "**{symbol}** {side} on {venue}"
+read_only = "_LiqGuard is read-only: it never places or edits orders._"
+rescue_button = "🛟 Rescue options"
+adaptive = "Adaptive tiers {effective}% (yours {base}%): {reasons}"
+
+[alert.reminder]
+distance = " · now **{dist}%** from liquidation"
+head_reminder = "⏰ **REMINDER** {n}/{max}"
+head_urgent = "🚨🚨 **URGENT — STILL UNACKNOWLEDGED** {n}/{max}"
+head_final = "🆘🆘🆘 **FINAL WAKE-UP CALL** {n}/{max}"
+sent = "**{symbol}** {severity} alert sent {minutes} min ago{dist}."
+final = "This is the last reminder. Tap **I'm awake** or act on the position now."
+tap = "Tap **I'm awake** to stop reminders (next in {next} min)."
+
+[alert.tier]
+head = "{emoji} **{level} ALERT**"
+distance = "Distance to liquidation: **{dist}%**"
+add_margin = "💰 Add **${amount}** margin for safety"
+
+[alert.funding]
+head = "⏳ **PRE-FUNDING ALERT**"
+pays = "**{symbol}** {side} on {venue} pays **${amount}** funding in **{minutes} min** ({rate}% per {hours}h, current rate)."
+distance = "Distance to liq: **{before}% → {after}%** after settlement"
+liq = "Liq: {before} → {after}"
+buffer = "That is {share}% of your remaining margin buffer."
+buffer_tier = "That is {share}% of your remaining margin buffer and moves you into a worse alert tier."
+
+[alert.stop]
+head = "🛑 **STOP-LOSS CHECK**"
+head_no_stop = "🛑 **NO STOP-LOSS**"
+head_beyond_liquidation = "🛑 **STOP-LOSS NEVER FIRES**"
+head_too_close = "⚠️ **STOP-LOSS TOO CLOSE TO LIQUIDATION**"
+no_stop = "No stop order. Liquidation at **{liq}** (mark {mark})."
+beyond = "beyond"
+in_front = "in front of"
+vs = "Stop **{stop}** vs liquidation **{liq}**: {gap}% {where} it (needs ≥ {required}% in front)."
+loss = "If liquidated you lose at least {loss}."
+fix_move = "• Move the stop to **{stop}** → PnL at stop {pnl} incl. fees"
+fix_reduce = "• Keep the stop, reduce **{pct}%** (new size {size}) → liq {liq}"
+fix_margin = "• Keep the stop, add **{amount}** margin → liq {liq}"
+
+[alert.adl]
+head = "⚡ **ADL WARNING**"
+body = "**{symbol}** {side} on {venue}: ADL {lights} **{n}/5**, unrealized PnL **+{pnl}**."
+explain = "When a liquidation exceeds the insurance fund, the exchange auto-deleverages the most profitable, most leveraged positions on the other side first. At 4–5 lights this position is near the front of that queue."
+options = "Options: take partial profit or lower leverage to move down the queue."
+
+[alert.wick]
+part = "{interval}: {max}× max ({max_pct}%), {typical}× typical ({typical_pct}%)"
+one_liquidates = " ⚠️ one max wick liquidates"
+line = "Wicks before liq — {parts}"
+
+[alert.duration]
+min = "~{n} min"
+h = "~{n} h"
+d = "~{n} d"
+
+[alert.priority]
+first = "{icon} **{label}** (#{rank} of {of} positions by urgency)"
+later = "Priority #{rank} of {of} — {icon} handle **{symbol}** first"
+
+[alert.triage]
+head = "{icon} **{n} POSITIONS AT RISK — HANDLE IN THIS ORDER**"
+row = "{rank}. {icon} **{symbol}** {side} · {dist} from liq · {time} at typical volatility · ${notional} notional"
+why = "Why {symbol} first: {why}."
+order = "_Order = time to liquidation at typical volatility, distance vs your tiers, position size._"
+
+[alert.sizing]
+head = "📏 **POSITION SIZE TOO LARGE FOR THE ACCOUNT**"
+line = "📏 Oversized: {reasons}. Suggested size ≤ **{size}** (≈ {notional}, cut {cut}%)"
+limits = "Account equity {equity} · your limits: lose ≤ {risk}% per trade at the exit, margin ≤ {margin}% of equity per position."
+row = "• **{symbol}** {side} {size} ({notional}, {x}× equity): loses {loss} = **{risk}** at its {exit}, margin {margin}% → suggested **{suggested}** (≈ {suggested_notional})"
+change = "Change limits with `/settings risk 2` and `/settings maxmargin 25`."
+
+[alert.stress]
+head = "{icon} **PORTFOLIO STRESS TEST**"
+account_head = "{venue} cross account ({n} positions, one wallet):"
+liquidated = "💀 LIQUIDATED"
+left = "✅ {amount} left"
+together = "If everything moves together — {cells}"
+account = "Account liquidated by a **{down}%** market drop (coins moving by their beta)"
+uniform = ", {uni}% if all move equally"
+
+[alert.compare]
+line = "{symbol}: platform liq {platform} ({platform_dist}% away) · LiqGuard correlated liq **{correlated}** ({correlated_dist}% away)"
+closer = " ⚠️ **{gap} pts closer**"
+head = "Platform line vs real (correlated) liquidation:"
+note = "_The platform's line assumes every other position stays still. In a fast move they fall together._"
+
+[sim]
+alert_head = "{emoji} **{level} ALERT**"
+distance = "Distance to liq: **{dist}%**"
+tier = " (tier {tier}%)"
+mark_liq = "Mark: ${mark} · Liq: ${liq}"
+widened = "Tiers widened: {reasons}"
+where_cross = "to the cross wallet"
+where_margin = "margin"
+add = "💰 Add **${amount}** {where} → {target}% from liq"
+reduce = "✂️ Or reduce size by **{pct}%**"
+cheapest = "🛟 Cheapest rescue: **{title}** (${cost} incl. fees + 24h funding)"
+compare_rescue = "🛟 Compare rescue options"
+propose = "✅ Propose adding ${amount}"
+dismiss = "❌ Dismiss"
+rescue_first = "🛟 Rescue {symbol} first"
+acked_elsewhere = "✅ {symbol} alert acknowledged on the {source}: this demo is muted, no more demo alerts or reminders."
+finished = "⏹ **Demo finished.** No more demo alerts or reminders will be sent."
+finished_hint = "Use /risk for the portfolio overview, or 🎬 Demo to run it again."
+esc_on = "⏰ Critical/emergency alerts repeat every {interval} demo min (×{seconds}s) until you tap ✅ I'm awake, up to {max}."
+esc_off = "⏰ Wake-up reminders are off (/settings)."
+widened_session = ", widened per symbol for 30-day wicks and the session (demo clock {weekday}: {reasons})"
+started = "🎬 **Market simulation started** (demo data) · **{name}**\nA finite run: {steps} steps, about {seconds} s, then it ends by itself."
+started_tiers = "Prices will walk toward liquidation. Your tiers: ⚠️ {warning}% · 🚨 {critical}% · 🆘 {emergency}%{widened}."
+started_body = "Liquidation prices are computed for cross margin; demo funding settles on a simulated clock and ⏳ warns before large payments. 🎯 Several positions at risk at once arrive as one list in handling order; 🛑 stop-losses are checked against liquidation and ⚡ ADL lights are watched."
+started_stop = "✅ I'm awake, 😴 Mute this demo or ❌ Dismiss on any alert mutes the rest of this demo. ⏹ Stop demo (or /stopdemo) ends it at once."
+
+[sim.source]
+dashboard = "dashboard"
+web = "web dashboard"

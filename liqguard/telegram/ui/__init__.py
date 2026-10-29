@@ -1,5 +1,5 @@
 """
-Inline-keyboard UI (zh-Hant-TW): 🏠 主選單 and everything reachable from it.
+Inline-keyboard UI (English / 繁體中文, per user): 🏠 Main menu and everything reachable from it.
 
     codec      signed, versioned callback_data (≤ 64 bytes, bound to one user)
     actions    every button: owning feature, argument shapes, TTL
@@ -7,6 +7,7 @@ Inline-keyboard UI (zh-Hant-TW): 🏠 主選單 and everything reachable from it
     router     decode → validate → dispatch table → render; always answers
     services   the only gateway to the domain, keyed by the caller's user id
     features/  one module per menu entry; features never import each other
+    i18n       every string is a locale key (liqguard/i18n/locales/*.toml)
 
 Legacy callbacks (`rescue:`, `ack:`, `settings:` …) keep working through
 `BotHandlers`; this router only claims payloads that start with "1.".
@@ -24,6 +25,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BotCommand, CallbackQuery, Message
 
 from liqguard.core import AppContext
+from liqguard.i18n import EN, LANGUAGES, TELEGRAM_CODES, Translator, t
 
 from . import keyboards
 from .codec import CallbackCodec, derive_secret, is_ui_payload
@@ -35,20 +37,14 @@ from .services import UIServices
 
 logger = logging.getLogger(__name__)
 
-BOT_COMMANDS = (
-    ("start", "開始／主選單"),
-    ("menu", "🏠 主選單"),
-    ("positions", "📊 我的倉位"),
-    ("risk", "🚨 風險總覽"),
-    ("demo", "🎬 Demo 模式"),
-    ("settings", "🔔 通知設定"),
-    ("bind", "🔑 綁定帳號"),
-    ("dashboard", "🖥️ 網頁看板"),
-    ("help", "❓ 幫助"),
-)
+BOT_COMMANDS = ("start", "menu", "positions", "risk", "demo", "stopdemo", "settings", "bind", "dashboard", "lang", "help")
 
-COMMAND_ACTIONS = {"start": "m", "menu": "m", "help": "h", "positions": "pl", "demo": "dm",
-                   "settings": "se", "bind": "b", "unbind": "bu"}
+COMMAND_ACTIONS = {"start": "m", "menu": "m", "help": "h", "positions": "pl", "demo": "dm", "stopdemo": "dx",
+                   "settings": "se", "bind": "b", "unbind": "bu", "lang": "l", "language": "l"}
+
+
+def bot_commands(lang: str = EN) -> list[BotCommand]:
+    return [BotCommand(command=c, description=t(lang, f"commands.{c}")) for c in BOT_COMMANDS]
 
 
 class TelegramUI:
@@ -75,18 +71,24 @@ class TelegramUI:
         dp.include_router(r)
 
     async def set_commands(self, bot: Bot) -> None:
-        try:
-            await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in BOT_COMMANDS])
-        except Exception as e:
-            logger.warning("setMyCommands failed: %s", type(e).__name__)
+        """English for everyone by default, 繁體中文 for Telegram apps set to any zh* language."""
+        for lang in LANGUAGES:
+            try:
+                await bot.set_my_commands(bot_commands(lang), language_code=TELEGRAM_CODES[lang])
+            except Exception as e:
+                logger.warning("setMyCommands(%s) failed: %s", lang, type(e).__name__)
+
+    async def translator_for(self, message: Message) -> Translator:
+        return await self.router.translator(message.from_user.id, getattr(message.from_user, "language_code", None))
 
     async def on_command(self, message: Message, state: FSMContext, command: Optional[CommandObject] = None) -> None:
         name = (command.command if command else "start").lower()
         if command is not None and command.args and name in ("settings", "start"):
             raise SkipHandler()
         await state.clear()
+        T = await self.translator_for(message)
         screen = await self.router.run(message.from_user.id, COMMAND_ACTIONS.get(name, "m"),
-                                       chat_type=str(message.chat.type), state=state, message=message)
+                                       chat_type=str(message.chat.type), state=state, message=message, T=T)
         await send(message.bot, message.chat.id, message, screen)
 
     async def on_callback(self, callback: CallbackQuery, state: FSMContext) -> None:
@@ -95,15 +97,17 @@ class TelegramUI:
     async def on_bind_message(self, message: Message, state: FSMContext) -> None:
         if (message.text or "").startswith("/") and message.text.strip().lower() not in binding_feature.CANCEL_WORDS:
             raise SkipHandler()
-        screen = await binding_feature.on_message(self.services, message, state, self.signer(message.from_user.id))
+        T = await self.translator_for(message)
+        screen = await binding_feature.on_message(self.services, message, state, self.signer(message.from_user.id), T)
         await send(message.bot, message.chat.id, None, screen)
 
     # ------------------------------------------------------------------ alert buttons
 
-    def alert_markup(self, user_id: int, actions: list[tuple[str, str]]) -> Any:
+    def alert_markup(self, user_id: int, actions: list[tuple[str, str]], lang: str = EN, demo: bool = False) -> Any:
         """
-        Turn an alert's legacy actions into the UI buttons 🚑 先處理這個 / ✅ 我醒了 /
-        😴 暫停提醒 30 分鐘, keeping any other legacy buttons after them.
+        Turn an alert's legacy actions into the UI buttons 🚑 Handle this first / ✅ I'm awake /
+        😴 Snooze (plus ⏹ Stop demo on demo alerts), keeping any other legacy buttons after them.
+        `lang` is the language the alert body was written in, so body and buttons always match.
         """
         source = symbol = ack_id = None
         rest = []
@@ -115,7 +119,7 @@ class TelegramUI:
             else:
                 rest.append((label, data))
         try:
-            rows = keyboards.alert_rows(self.signer(user_id), source, symbol, ack_id)
+            rows = keyboards.alert_rows(Translator(lang), self.signer(user_id), source, symbol, ack_id, demo)
         except ValueError:
             return None
         rows += [[keyboards.Button(text=label, callback_data=data)] for label, data in rest]
@@ -126,4 +130,4 @@ def build_ui(ctx: AppContext) -> TelegramUI:
     return TelegramUI(ctx)
 
 
-__all__ = ["BOT_COMMANDS", "CallbackCodec", "CallbackRouter", "Screen", "Signer", "TelegramUI", "UIServices", "build_ui"]
+__all__ = ["BOT_COMMANDS", "COMMAND_ACTIONS", "bot_commands", "CallbackCodec", "CallbackRouter", "Screen", "Signer", "TelegramUI", "UIServices", "build_ui"]

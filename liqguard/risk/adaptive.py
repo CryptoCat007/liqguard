@@ -19,6 +19,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import Position, Side, UserThreshold, WickProfile
 
 from .sessions import SessionInfo
@@ -64,7 +65,7 @@ def adaptive_threshold(
     session: Optional[SessionInfo] = None,
 ) -> AdaptiveThreshold:
     if not base.adaptive_thresholds:
-        return AdaptiveThreshold(base, base, session=session, reasons=["adaptive tiers off (/settings)"])
+        return AdaptiveThreshold(base, base, session=session, reasons=[Msg("risk.adaptive.off")])
     long = position.side == Side.LONG
     tiers = _tiers(base)
     floors: dict[str, float] = {}
@@ -78,8 +79,8 @@ def adaptive_threshold(
         floors["warning"] = 2 * five.max_pct(long)
     for tier, floor in floors.items():
         if floor > tiers[tier]:
-            reasons.append(f"{tier} ≥ {floor:.1f}% ({'1m' if tier == 'emergency' else '5m'} max wick"
-                           f"{' × 2' if tier == 'warning' else ''})")
+            reasons.append(Msg("risk.adaptive.floor_x2" if tier == "warning" else "risk.adaptive.floor",
+                               tier=Msg(f"common.tier.{tier}"), floor=floor, interval="1m" if tier == "emergency" else "5m"))
             tiers[tier] = floor
     if session is not None and session.factor > 1:
         tiers = {k: v * session.factor for k, v in tiers.items()}

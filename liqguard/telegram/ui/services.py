@@ -13,6 +13,7 @@ from typing import Optional
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.binding import BindingService
 from liqguard.core.positions import LABEL_SIMULATION
+from liqguard.i18n import normalize
 from liqguard.models import Position, User, UserThreshold
 from liqguard.risk import (
     PortfolioInsights,
@@ -33,17 +34,54 @@ class Found:
     source: str
 
 
+MAX_PENDING_LANGUAGES = 10_000
+
+
 class UIServices:
     def __init__(self, ctx: AppContext, binding: Optional[BindingService] = None):
         self.ctx = ctx
         self.binding = binding or BindingService(ctx.storage, default_threshold=ctx.settings.default_threshold)
+        self._first_language: dict[int, str] = {}
 
     async def user(self, user_id: int) -> User:
         user = await self.ctx.storage.get_user(user_id)
         if user is None:
-            user = User(telegram_id=user_id, threshold=self.ctx.settings.default_threshold())
+            user = User(telegram_id=user_id, threshold=self.ctx.settings.default_threshold(),
+                        language=self._first_language.pop(user_id, normalize(None)))
             await self.ctx.storage.save_user(user)
         return user
+
+    async def language(self, user_id: int, telegram_code: Optional[str] = None) -> str:
+        """
+        The user's language: their explicit choice (🌐 / /lang) if they made one,
+        else their Telegram app language (zh* → zh-Hant, anything else → English),
+        else English. Never creates a user (a stranger's rejected tap stays a no-op).
+        """
+        user = await self.ctx.storage.get_user(user_id)
+        if user is None:
+            lang = normalize(telegram_code)
+            if telegram_code:
+                if len(self._first_language) >= MAX_PENDING_LANGUAGES:
+                    self._first_language.clear()
+                self._first_language[user_id] = lang
+            return lang
+        if not user.language_explicit and telegram_code and normalize(telegram_code) != user.language:
+            user.language = normalize(telegram_code)
+            await self.ctx.storage.set_language(user_id, user.language, explicit=False)
+            self._sync_simulation(user_id, user.language)
+        return normalize(user.language)
+
+    async def set_language(self, user_id: int, lang: str) -> str:
+        user = await self.user(user_id)
+        user.language, user.language_explicit = normalize(lang), True
+        await self.ctx.storage.set_language(user_id, user.language, explicit=True)
+        self._sync_simulation(user_id, user.language)
+        return user.language
+
+    def _sync_simulation(self, user_id: int, lang: str) -> None:
+        sim = self.ctx.simulations.get(user_id)
+        if sim is not None:
+            sim.set_language(lang)
 
     async def snapshot(self, user: User) -> BookSnapshot:
         return await self.ctx.positions.snapshot_for(user)
@@ -109,22 +147,38 @@ class UIServices:
         if not enabled:
             self.ctx.positions.drop_demo(user_id)
 
-    async def acknowledge(self, user_id: int, ack_id: str) -> Optional[str]:
-        """Symbol of the caller's own alert that was acknowledged (live monitor first, then their simulation)."""
+    async def acknowledge(self, user_id: int, ack_id: str) -> Optional[tuple[str, bool]]:
+        """(symbol, is_demo) of the caller's own acknowledged alert (live monitor first, then their simulation).
+        A live position stays silenced until it materially worsens; a demo alert mutes the rest of that demo."""
         ack = self.ctx.escalations.acknowledge(user_id, ack_id, time.time())
         if ack is not None:
-            return ack.symbol
+            return ack.symbol, False
         sim = self.ctx.simulations.get(user_id)
         event = await sim.acknowledge(ack_id, source="telegram") if sim is not None else None
-        return event["symbol"] if event else None
+        return (event["symbol"], True) if event else None
 
-    async def snooze(self, user_id: int, ack_id: str, minutes: float = 30) -> Optional[str]:
+    async def snooze(self, user_id: int, ack_id: str, minutes: float = 30) -> Optional[tuple[str, bool]]:
+        """(symbol, is_demo). A live alert is held for `minutes`; a demo alert mutes the rest of that demo."""
         ack = self.ctx.escalations.snooze(user_id, ack_id, time.time() + minutes * 60)
         if ack is not None:
-            return ack.symbol
+            return ack.symbol, False
         sim = self.ctx.simulations.get(user_id)
-        event = await sim.snooze(ack_id, minutes, source="telegram") if sim is not None else None
-        return event["symbol"] if event else None
+        if sim is None:
+            return None
+        symbol = sim.pending_symbol(ack_id)
+        if symbol is None:
+            return None
+        await sim.mute(source="telegram")
+        return symbol, True
+
+    async def stop_demo(self, user_id: int) -> bool:
+        """End the caller's demo and all its reminders now; True if one was running."""
+        sim = self.ctx.simulations.get(user_id)
+        if sim is None:
+            return False
+        running = sim.is_running
+        await sim.stop(source="telegram")
+        return running
 
     async def dashboard_link(self, user_id: int) -> Optional[tuple[str, int]]:
         """(one-time URL, minutes valid), or None when the dashboard is not enabled."""

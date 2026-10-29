@@ -79,6 +79,7 @@ class User:
     telegram_id: int
     username: Optional[str] = None
     language: str = "en"
+    language_explicit: bool = False
 
     bindings: list[ExchangeBinding] = field(default_factory=list)
     threshold: UserThreshold = field(default_factory=UserThreshold)
@@ -123,6 +124,7 @@ class User:
             "telegram_id": self.telegram_id,
             "username": self.username,
             "language": self.language,
+            "language_explicit": self.language_explicit,
             "bindings": [b.to_dict() for b in self.bindings],
             "threshold": self.threshold.to_dict(),
             "is_demo_mode": self.is_demo_mode,

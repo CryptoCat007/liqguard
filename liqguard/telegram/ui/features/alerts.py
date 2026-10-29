@@ -1,4 +1,9 @@
-"""Alert buttons: ✅ 我醒了 and 😴 暫停提醒 30 分鐘 (🚑 先處理這個 is the positions feature's 救倉試算)."""
+"""
+Alert buttons: ✅ I'm awake and 😴 Snooze (🚑 Handle this first is the positions
+feature's rescue sim, ⏹ Stop demo the demo feature's). On a live alert ✅ silences
+that position until it materially worsens; on a demo alert either button mutes
+the rest of that demo, so nothing more arrives from it.
+"""
 
 from __future__ import annotations
 
@@ -6,23 +11,32 @@ from .. import keyboards as kb
 from ..screen import Request, Screen
 
 SNOOZE_MINUTES = 30
-GONE = "這則警報已確認或已失效。"
 
 
 async def acknowledge(req: Request) -> Screen:
-    symbol = await req.services.acknowledge(req.user_id, req.args[0])
-    if symbol is None:
-        return Screen(GONE, toast=GONE, edit=False)
-    return Screen(f"✅ 已確認，{symbol} 的喚醒提醒已停止。注意安全！", kb.back_only(req.sign),
-                  toast="已停止提醒", new_message=True, strip_keyboard=True)
+    T = req.T
+    result = await req.services.acknowledge(req.user_id, req.args[0])
+    if result is None:
+        return Screen(T("alerts.gone"), toast=T("alerts.gone"), edit=False, strip_keyboard=True)
+    symbol, demo = result
+    if demo:
+        return Screen(T("alerts.demo_acked", symbol=symbol), kb.back_only(T, req.sign),
+                      toast=T("alerts.demo_acked_toast"), new_message=True, strip_keyboard=True)
+    return Screen(T("alerts.acked", symbol=symbol), kb.back_only(T, req.sign),
+                  toast=T("alerts.acked_toast"), new_message=True, strip_keyboard=True)
 
 
 async def snooze(req: Request) -> Screen:
-    symbol = await req.services.snooze(req.user_id, req.args[0], SNOOZE_MINUTES)
-    if symbol is None:
-        return Screen(GONE, toast=GONE, edit=False)
-    return Screen(f"😴 {symbol} 的提醒暫停 {SNOOZE_MINUTES} 分鐘；之後若仍危險會再叫醒你。", kb.back_only(req.sign),
-                  toast=f"已暫停 {SNOOZE_MINUTES} 分鐘", new_message=True)
+    T = req.T
+    result = await req.services.snooze(req.user_id, req.args[0], SNOOZE_MINUTES)
+    if result is None:
+        return Screen(T("alerts.gone"), toast=T("alerts.gone"), edit=False, strip_keyboard=True)
+    symbol, demo = result
+    if demo:
+        return Screen(T("alerts.demo_quiet", symbol=symbol), kb.back_only(T, req.sign),
+                      toast=T("alerts.demo_quiet_toast"), new_message=True, strip_keyboard=True)
+    return Screen(T("alerts.snoozed", symbol=symbol, minutes=SNOOZE_MINUTES), kb.back_only(T, req.sign),
+                  toast=T("alerts.snoozed_toast", minutes=SNOOZE_MINUTES), new_message=True, strip_keyboard=True)
 
 
 HANDLERS = {"aa": acknowledge, "az": snooze}

@@ -20,6 +20,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import CROSS, MarginAccount, Position, UserThreshold
 
 from .stops import OK, PARTIAL, StopCheck
@@ -77,9 +78,9 @@ class SizingCheck:
     def reasons(self) -> list[str]:
         out = []
         if self.risk_pct is not None and self.risk_pct > self.max_risk_pct:
-            out.append(f"loses {self.risk_pct:.1f}% of equity at its {self.exit_kind} (limit {self.max_risk_pct:g}%)")
+            out.append(Msg("risk.sizing.loses", risk=self.risk_pct, exit=Msg(f"risk.exit.{self.exit_kind.replace(' ', '_')}"), limit=self.max_risk_pct))
         if self.margin_pct > self.max_margin_pct:
-            out.append(f"ties up {self.margin_pct:.0f}% of equity as margin (limit {self.max_margin_pct:g}%)")
+            out.append(Msg("risk.sizing.margin", margin=self.margin_pct, limit=self.max_margin_pct))
         return out
 
     def to_dict(self) -> dict:
