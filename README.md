@@ -510,8 +510,22 @@ and the demo's advice cards go out at once with the deterministic text; when Mus
 same Telegram message is edited (or the dashboard card replaced via `advice_update` /
 `alert_update` events). Validated answers are cached per input (portfolio snapshot, rescue plan,
 stop check) for 10 minutes and concurrent callers share one request, so refreshing `/risk` on an
-unchanged book costs no second call. `GET …/rescue` returns the rule-based comparison with
-`muse_pending: true`; the dashboard then asks again with `wait=1`.
+unchanged book costs no second call.
+
+**One Muse service for every channel.** Telegram (commands, menus, quick-report buttons, the
+alert monitor, the demo bridge) and the web dashboard (public demo, private demo, account view)
+all ask Muse through `AppContext.muse` (`core/muse_service.py`). It builds the inputs the same
+way for each channel, so a book that Telegram's `/risk` already summarized costs the dashboard no
+second request, and both show the same words in the reader's language. On the dashboard:
+
+| What | Shown at once | Muse's text arrives as (WebSocket) |
+|---|---|---|
+| Account view: portfolio summary and the suggestion for the position to handle first | `/api/me/account` → `muse` (`summary`, `suggestion`, `view`) | `account_muse` (tagged with `view`, so an older answer never replaces a newer one) |
+| Rescue recommendation (demo and live positions) | `…/rescue`, `/api/me/rescue/live` with `muse_pending` | `rescue_muse` (`scope`, `symbol`, `venue`, `explanation`) |
+| Quick reports: rescue and stop check (✦ Muse line; wick and funding reports are numbers only) | `…/position-tool`, `/api/me/position-tool/live` with `muse_pending` | `report_muse` (`scope`, `tool`, `symbol`, `venue`, the full re-rendered `report`) |
+
+Events go only to the simulation hub of the user who asked (or the public demo in that language).
+Without an open socket the page falls back to asking again with `wait=1`.
 
 **The badge is honest.** The dashboard's Muse pill reads *Muse · live* only when the last Muse
 call produced an answer that was used; otherwise *Muse · connecting* (no call yet), *Muse ·
@@ -897,9 +911,9 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 | `…/ack` | POST | `{"ack_id": …}`: "I'm awake" for one of this simulation's alerts (CSRF header required) |
 | `…/insights` | GET | Priority triage, per-account stress test, platform vs correlated liquidation, concentration and sizing for this simulation |
 | `…/scenario` | POST | `{"scenario": "mixed" \| "cross_longs"}`: switch the demo book (CSRF header required; 409 while running) |
-| `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, per-position protection (wicks, tiers, stop, ADL), portfolio insights (triage, stress, liq comparison, concentration, sizing), pending live reminders, audit log |
+| `/api/me/session` · `/api/me/account` | GET | Session info; your bindings (masked), positions overview, per-position protection (wicks, tiers, stop, ADL), portfolio insights (triage, stress, liq comparison, concentration, sizing), Muse summary and suggestion (same service and cache as `/risk`), pending live reminders, audit log |
 | `/api/me/live/ack` · `/api/me/live/snooze` | POST | Acknowledge or snooze (30 min) one of *your* live monitor's reminders (CSRF header required) |
-| `…/position-tool?symbol=&tool=` · `/api/me/position-tool/live?symbol=&venue=&tool=` | GET | `tool` = `rescue` \| `wick` \| `stop` \| `funding`: the per-position report for a simulated or live position |
+| `…/position-tool?symbol=&tool=` · `/api/me/position-tool/live?symbol=&venue=&tool=` | GET | `tool` = `rescue` \| `wick` \| `stop` \| `funding`: the per-position report for a simulated or live position, with Muse's line for rescue and stop (same text as the Telegram buttons) |
 | `/api/me/language` | GET · POST | Read / save your language (`{"language": "en"}` or `"zh-Hant"`, CSRF header required); shared with Telegram |
 | `/api/i18n/{lang}` | GET | Dashboard UI strings for the EN / 中文 toggle (public) |
 | `/api/me/settings` | GET · POST | Read / change one notification setting (`{"key", "value"}`, CSRF header required) |
@@ -908,7 +922,7 @@ The same simulation routes exist under `/api/demo/*` (public, demo data) and `/a
 | `/api/health` · `/api/auth/config` | GET | Status (incl. funding and wick feed freshness/errors); login options (no secrets) |
 | `/auth/login?token=` · `/auth/telegram` | GET | One-time link / Telegram widget sign-in |
 | `/auth/logout` | POST | Sign out (CSRF header required) |
-| `/ws/demo` · `/ws/me` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `funding` / `summary` / `audit` / `status` / `escalation` / `ack` events |
+| `/ws/demo` · `/ws/me` | WebSocket | Snapshot on connect, then `tick` / `alert` / `advice` / `funding` / `summary` / `audit` / `status` / `escalation` / `ack` events, plus Muse follow-ups `muse` / `advice_update` / `alert_update` / `account_muse` / `rescue_muse` / `report_muse` |
 
 ### Security
 
@@ -932,6 +946,7 @@ python3 -m pytest liqguard/tests/ -q
 | `test_portfolio.py` | `/risk` portfolio aggregation and metrics |
 | `test_llm.py` | Mock mode, severity levels, one-line portfolio summary (incl. live-response validation) |
 | `test_muse_api.py` | Live Muse path against a mocked HTTP layer: model / base / budget defaults and env overrides, `content: null` and `finish_reason: length` retried with a larger budget, 404 `model_not_found`, timeouts, HTTP errors, invalid JSON, `reasoning_effort` fallback, per-input cache, honest status, no key or prompt in logs |
+| `test_muse_channels.py` | Telegram and the dashboard hold the same `MuseService` (handlers, menus, monitor, every simulation, the web app); `/risk` and `/api/me/account` on one book make one summary request and show the same headline; account, rescue and quick-report text follow over the WebSocket only to the asking user; quick reports match Telegram word for word; zh-Hant follow-ups contain no English |
 | `test_muse_async.py` | Muse never blocks: demo steps, `/risk`, rescue buttons, `/ask` and monitor alerts go out with the rule-based text and are edited when Muse answers; timeouts keep the rule-based text; `/rescue?wait=1` |
 | `test_muse_live.py` | Opt-in real Meta API check (`LIQGUARD_LIVE_TESTS=1` + `META_API_KEY`) |
 | `test_simulation.py` | Deterministic path, tier ordering, advice/audit, Telegram bridge and handlers |

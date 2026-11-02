@@ -157,3 +157,28 @@ def test_muse_badge_is_honest_and_cards_update_in_place(live_server, browser):
     ids = cards.evaluate_all("(nodes) => nodes.map((n) => n.dataset.advice)")
     assert len(ids) == len(set(ids)) > 0
     assert not errors, errors
+
+
+def test_quick_report_and_rescue_take_muse_text_from_the_socket(live_server, browser):
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    errors: list[str] = []
+    refetches: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("request", lambda r: refetches.append(r.url) if "wait=1" in r.url else None)
+    page.goto(f"{live_server}/?lang=en")
+    page.wait_for_function("() => document.querySelectorAll('#positions .prow').length > 0", timeout=15000)
+    page.wait_for_function("() => ws && ws.readyState === WebSocket.OPEN", timeout=15000)
+
+    page.evaluate("() => openTool('stop', 'ETH', 'hyperliquid', false)")
+    page.wait_for_selector("#toolBody .tool-line.muse")
+    assert page.inner_text("#toolBody .tool-line.muse").startswith("✦ Muse (mock):")
+    page.wait_for_function(
+        "() => document.querySelector('#toolBody .tool-line.muse')?.textContent.startsWith('✦ Muse: Muse reviewed the stop.')",
+        timeout=15000)
+    page.click("#toolClose")
+
+    page.evaluate("() => loadRescue('BTCUSDT', { scroll: false })")
+    page.wait_for_function("() => S.rescue?.explanation?.headline === 'Muse compares the rescue options.'", timeout=15000)
+    assert "Muse compares the rescue options." in page.inner_text("#rescueBody")
+    assert not refetches, refetches
+    assert not errors, errors
