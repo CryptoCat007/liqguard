@@ -442,7 +442,7 @@ pairwise correlation is ≥ 0.6. It also reports **effective independent bets**,
 
 ## How We Use Meta AI
 
-LiqGuard leverages Meta's Muse Spark model with a unique architecture:
+LiqGuard leverages Meta's Muse Spark model (`muse-spark-1.3` by default) with a unique architecture:
 
 ### Deterministic Numbers + AI Explanations
 
@@ -487,6 +487,40 @@ When `META_API_KEY` is not set, the client automatically switches to determinist
 ```python
 client = MetaLLMClient()  # Auto-detects: mock if no key
 client.is_mock  # True when running without API key
+```
+
+### Live API: budget, retries, timeouts
+
+With `META_API_KEY` set, LiqGuard calls `muse-spark-1.3` at `https://api.meta.ai/v1`
+(`META_MODEL` / `META_API_BASE` override both). That model reasons before it answers and spends
+roughly 900-1200 tokens doing so, so a small `max_tokens` ends with `finish_reason: "length"` and
+`content: null`. The client therefore:
+
+- asks with `max_tokens` 2000 (`META_MAX_TOKENS`) and `reasoning_effort` `low`; if the API
+  rejects `reasoning_effort` with a 400 that names it, it is dropped for the rest of the process;
+- treats `content: null` or `finish_reason: "length"` as a failure, retries once with double the
+  budget, then falls back to the deterministic text;
+- treats a 404 (`model_not_found`), any other HTTP error, a connection error, invalid JSON or an
+  answer that fails validation (wrong symbol, an amount not in the plan, an unknown fix) the same way;
+- gives each answer 15 s (`META_TIMEOUT`), retry included; the SDK's own retries are off;
+- logs the call kind, model, finish reason and reasoning tokens, never the key or the prompt.
+
+**Muse never holds up a message.** `/risk`, rescue buttons, `/ask`, tier and stop-loss alerts,
+and the demo's advice cards go out at once with the deterministic text; when Muse answers, the
+same Telegram message is edited (or the dashboard card replaced via `advice_update` /
+`alert_update` events). Validated answers are cached per input (portfolio snapshot, rescue plan,
+stop check) for 10 minutes and concurrent callers share one request, so refreshing `/risk` on an
+unchanged book costs no second call. `GET …/rescue` returns the rule-based comparison with
+`muse_pending: true`; the dashboard then asks again with `wait=1`.
+
+**The badge is honest.** The dashboard's Muse pill reads *Muse · live* only when the last Muse
+call produced an answer that was used; otherwise *Muse · connecting* (no call yet), *Muse ·
+offline* (the last call failed; rule-based text is showing) or *Muse · mock* (no key).
+
+Opt-in live check (skipped unless both are set):
+
+```bash
+LIQGUARD_LIVE_TESTS=1 META_API_KEY=... python3 -m pytest -q liqguard/tests/test_muse_live.py
 ```
 
 ### Screenshot Understanding
@@ -897,6 +931,9 @@ python3 -m pytest liqguard/tests/ -q
 | `test_advice.py` | Actionable advice; added margin lands exactly on the target distance |
 | `test_portfolio.py` | `/risk` portfolio aggregation and metrics |
 | `test_llm.py` | Mock mode, severity levels, one-line portfolio summary (incl. live-response validation) |
+| `test_muse_api.py` | Live Muse path against a mocked HTTP layer: model / base / budget defaults and env overrides, `content: null` and `finish_reason: length` retried with a larger budget, 404 `model_not_found`, timeouts, HTTP errors, invalid JSON, `reasoning_effort` fallback, per-input cache, honest status, no key or prompt in logs |
+| `test_muse_async.py` | Muse never blocks: demo steps, `/risk`, rescue buttons, `/ask` and monitor alerts go out with the rule-based text and are edited when Muse answers; timeouts keep the rule-based text; `/rescue?wait=1` |
+| `test_muse_live.py` | Opt-in real Meta API check (`LIQGUARD_LIVE_TESTS=1` + `META_API_KEY`) |
 | `test_simulation.py` | Deterministic path, tier ordering, advice/audit, Telegram bridge and handlers |
 | `test_dashboard.py` | Endpoints, WebSocket, controls, no execution routes, no secret leakage |
 | `test_storage.py` | Master key sources, envelope encryption, rotation, legacy migration |
@@ -956,7 +993,11 @@ process: look for a second bot instance polling the same token.
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Bot only | Telegram Bot API token |
 | `META_API_KEY` | No | Meta AI API key (Muse runs in deterministic mock mode if unset) |
-| `META_MODEL` | No | Model name (default: muse-spark) |
+| `META_MODEL` | No | Model name (default: `muse-spark-1.3`; must be one `GET /v1/models` lists) |
+| `META_API_BASE` | No | OpenAI-compatible base URL (default: `https://api.meta.ai/v1`) |
+| `META_MAX_TOKENS` | No | Completion budget per Muse call, reasoning included (default: 2000) |
+| `META_TIMEOUT` | No | Seconds Muse gets per answer, retry included, before the rule-based text stays (default: 15) |
+| `META_REASONING_EFFORT` | No | `low` / `medium` / `high`, sent only while the API accepts it; `none` disables it (default: `low`) |
 | `LIQGUARD_MASTER_KEY` | Recommended | Master key(s), comma-separated for rotation. Legacy name `LIQGUARD_ENCRYPTION_KEY` still works |
 | `LIQGUARD_DATA_DIR` | No | One directory for all state; the three paths below default into it (`liqguard.db`, `encryption.key`, `audit.log`). The Docker image sets `/data` |
 | `LIQGUARD_KEY_FILE` | No | Key file used when no env key is set (default `$LIQGUARD_DATA_DIR/encryption.key`, else `~/.liqguard/encryption.key`; created mode 600 on first boot) |

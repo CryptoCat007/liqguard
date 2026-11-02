@@ -36,6 +36,11 @@ LIQGUARD_PUBLIC_URL=https://liqguard.example.com # used in /dashboard login link
 META_API_KEY=                                    # optional; Muse runs in mock mode without it
 ```
 
+With `META_API_KEY` set, Muse uses `muse-spark-1.3` by default. If the logs say `model_not_found`,
+set `META_MODEL` to a model `GET https://api.meta.ai/v1/models` lists. `META_API_BASE`,
+`META_MAX_TOKENS` (2000), `META_TIMEOUT` (15 s) and `META_REASONING_EFFORT` (`low`) are optional;
+see the README's environment table. Startup logs one `Muse: live API · model … at …` line (never the key).
+
 Never commit `.env`. `docker-compose.yml` pins the data paths, bind address and port, so the
 `LIQGUARD_DB_PATH` / `LIQGUARD_DASHBOARD_HOST` lines from `.env.example` cannot move state out of
 the volume.
