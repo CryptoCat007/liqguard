@@ -7,6 +7,7 @@ the tapping user's language.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable, Optional
@@ -40,6 +41,25 @@ class CallbackRouter:
         self.services = services
         self.handlers = handlers
         self.clock = clock
+        self._followups: set[asyncio.Task] = set()
+
+    def follow_up(self, shown: Any, screen: Screen) -> None:
+        """Swap Muse's text into the message showing `screen` once it arrives; buttons stay as they are."""
+        edit = getattr(shown, "edit_text", None)
+        if screen.later is None or edit is None:
+            return
+
+        async def run() -> None:
+            try:
+                text = await screen.later()
+                if text and text != screen.text:
+                    await edit(text, reply_markup=screen.keyboard, parse_mode=None, disable_web_page_preview=True)
+            except Exception as e:
+                logger.info("Muse follow-up not applied: %s", type(e).__name__)
+
+        task = asyncio.create_task(run())
+        self._followups.add(task)
+        task.add_done_callback(self._followups.discard)
 
     def signer(self, user_id: int) -> Signer:
         return Signer(self.codec, user_id, self.clock())
@@ -94,7 +114,7 @@ class CallbackRouter:
             chat_type = str(getattr(chat, "type", "private") or "private")
             screen, handled = await self.resolve(uid, callback.data, chat_type, state, callback.message, T=T)
             toast, alert = screen.toast, screen.alert
-            await render(callback, screen)
+            self.follow_up(await render(callback, screen), screen)
         except Exception as e:
             logger.error("UI callback failed for %s: %s", getattr(callback.from_user, "id", "?"), type(e).__name__, exc_info=True)
             toast, alert = T(ERROR), True
@@ -106,7 +126,8 @@ class CallbackRouter:
         return handled
 
 
-async def render(callback: Any, screen: Screen) -> None:
+async def render(callback: Any, screen: Screen) -> Any:
+    """Show `screen`; returns the message now showing it (None if nothing was shown)."""
     message = callback.message
     if screen.strip_keyboard and message is not None:
         try:
@@ -114,25 +135,24 @@ async def render(callback: Any, screen: Screen) -> None:
         except Exception:
             pass
     if not screen.edit and not screen.new_message:
-        return
+        return None
     kwargs = {"reply_markup": screen.keyboard, "parse_mode": None, "disable_web_page_preview": True}
     if not screen.new_message and message is not None:
         try:
             await message.edit_text(screen.text, **kwargs)
-            return
+            return message
         except Exception as e:
             if "not modified" in str(e):
-                return
-    await send(callback.bot, callback.from_user.id, message, screen)
+                return message
+    return await send(callback.bot, callback.from_user.id, message, screen)
 
 
-async def send(bot: Any, chat_id: int, message: Any, screen: Screen) -> None:
+async def send(bot: Any, chat_id: int, message: Any, screen: Screen) -> Any:
     kwargs = {"reply_markup": screen.keyboard, "parse_mode": None, "disable_web_page_preview": True}
     answer = getattr(message, "answer", None) if message is not None else None
     if answer is not None:
         try:
-            await answer(screen.text, **kwargs)
-            return
+            return await answer(screen.text, **kwargs)
         except Exception:
             pass
-    await bot.send_message(chat_id, screen.text, **kwargs)
+    return await bot.send_message(chat_id, screen.text, **kwargs)

@@ -114,6 +114,14 @@ class UIServices:
         return position_protection(found.position, found.snapshot.context, found.user.threshold).to_dict()
 
     @staticmethod
+    def protection_check(found: Found):
+        return position_protection(found.position, found.snapshot.context, found.user.threshold)
+
+    @property
+    def muse(self):
+        return self.ctx.muse
+
+    @staticmethod
     def insights(user: User, snapshot: BookSnapshot) -> PortfolioInsights:
         return portfolio_insights(snapshot.positions, snapshot.context, user.threshold)
 

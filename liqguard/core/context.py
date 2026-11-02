@@ -23,6 +23,7 @@ from liqguard.storage import EncryptedStorage
 
 from .executor import BindingActionExecutor
 from .market import MarketDataService
+from .muse_service import MuseService
 from .positions import PositionService
 from .wicks import WickService
 
@@ -43,6 +44,11 @@ class AppContext:
     wicks: WickService
     escalations: EscalationTracker
     demo_alerts: DemoAlertWindow = field(default_factory=DemoAlertWindow)
+    muse: Optional[MuseService] = None
+
+    def __post_init__(self) -> None:
+        if self.muse is None:
+            self.muse = MuseService(self.llm)
 
     @classmethod
     async def create(

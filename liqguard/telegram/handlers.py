@@ -25,7 +25,6 @@ from liqguard.i18n import t
 from liqguard.models import MAINNET, TESTNET, ExchangeBinding, Position, Side, User
 from liqguard.risk import (
     AdviceCalculator,
-    PortfolioAnalyzer,
     RescuePlan,
     RescueSimulator,
     RiskEngine,
@@ -78,7 +77,7 @@ class BotHandlers:
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
         self.storage = ctx.storage
-        self.llm = ctx.llm
+        self.muse = ctx.muse
         self._muse_followups: set[asyncio.Task] = set()
         self.actions_manager = ctx.actions
         self.positions = ctx.positions
@@ -441,17 +440,16 @@ class BotHandlers:
         return f"🧠 _{tag}:_ {summary['headline']}\n\n"
 
     async def _risk_overview_text(self, overview, language: str, focus: Optional[dict] = None) -> str:
-        summary = self.llm.summarize_portfolio_now(overview, language, focus).result
+        summary = self.muse.llm.summarize_portfolio_now(overview, language, focus).result
         return self._summary_line(summary) + format_portfolio_overview_text(overview, language)
 
     async def _risk_reply(self, user: User) -> Optional["RiskReply"]:
         snapshot = await self._snapshot(user)
         if not snapshot.positions:
             return None
-        overview = PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(snapshot.positions)
-        insights = portfolio_insights(snapshot.positions, snapshot.context, user.threshold)
+        book = self.muse.portfolio(user, snapshot)
+        overview, insights, headline = book.overview, book.insights, book.summary
         focus = insights.focus
-        headline = self.llm.summarize_portfolio_now(overview, user.language, focus)
         text = format_portfolio_overview_text(overview, user.language)
         buttons = []
         riskiest = next((p for p in overview.position_summaries
@@ -523,7 +521,7 @@ class BotHandlers:
         if plan is None:
             await callback.answer("Position not found")
             return
-        instant = self.llm.explain_rescue_now(plan, user.language)
+        instant = self.muse.rescue(plan, user.language)
         data = plan.to_dict()
         if kind:
             text = format_option_detail(data, kind, instant.result)
@@ -896,7 +894,7 @@ class BotHandlers:
         news = None
         if any(s in question.lower() for s in ["news", "market", "sentiment", "新聞", "市場"]):
             news = get_news_stub(positions[0].symbol)
-        instant = self.llm.answer_portfolio_question_now(positions, question, user.language, news)
+        instant = self.muse.answer_now(positions, question, user.language, news)
         await status_msg.edit_text(instant.result)
         self._muse_followup(instant.pending, status_msg.edit_text)
 
@@ -906,7 +904,7 @@ class BotHandlers:
         try:
             file = await message.bot.get_file(message.photo[-1].file_id)
             image_bytes = (await message.bot.download_file(file.file_path)).read()
-            parsed = await self.llm.parse_screenshot(image_bytes)
+            parsed = await self.muse.parse_screenshot(image_bytes)
         except Exception as e:
             logger.error("Screenshot parsing failed for user %s: %s", message.from_user.id, type(e).__name__)
             await status_msg.edit_text(GENERIC_ERROR)

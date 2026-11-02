@@ -143,9 +143,17 @@ def close_fee_line(T: Translator, position: Position, context: RiskContext) -> s
     return T("tools.funding.close_fee", rate=context.fees.taker_rate(position.venue) * 100, fee=money(fee))
 
 
+def muse_line(T: Translator, note: dict) -> str:
+    return f"✦ {T('alert.muse_mock' if note.get('mock') else 'alert.muse')}: {note['text']}"
+
+
 def report(tool: str, position: Position, context: RiskContext, protection: dict,
-           plan: Optional[dict] = None, demo: bool = False, lang: str = EN) -> dict:
-    """{tool, title, lines} for one quick action on one position, in `lang`."""
+           plan: Optional[dict] = None, demo: bool = False, lang: str = EN, muse: Optional[dict] = None) -> dict:
+    """
+    {tool, title, lines, muse} for one quick action on one position, in `lang`.
+    `muse` is `MuseService.tool_note` output ({"text", "mock"}): the rescue
+    recommendation or stop-loss fix in words, shown as the last line.
+    """
     if tool not in TOOLS:
         raise ValueError(f"unknown tool {tool!r}")
     T = Translator(lang)
@@ -159,5 +167,7 @@ def report(tool: str, position: Position, context: RiskContext, protection: dict
         lines = stop_lines(T, protection.get("stop"))
     else:
         lines = (funding_lines(T, position, context) or [T("tools.funding.no_data")]) + [close_fee_line(T, position, context)]
+    if muse:
+        lines = [*lines, "", muse_line(T, muse)]
     return {"tool": tool, "symbol": position.symbol, "venue": position.venue.value, "title": title, "lines": lines,
-            "lang": T.lang}
+            "lang": T.lang, "muse": muse}

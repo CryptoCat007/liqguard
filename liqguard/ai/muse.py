@@ -67,6 +67,18 @@ class Instant:
     result: Any
     pending: Optional["asyncio.Future[Any]"] = None
 
+    def map(self, fn: Callable[[Any], Any]) -> "Instant":
+        """The same answer shaped by `fn` (now, and when Muse's arrives; None stays None)."""
+        if self.pending is None:
+            return Instant(fn(self.result))
+        source = self.pending
+
+        async def later() -> Any:
+            live = await source
+            return None if live is None else fn(live)
+
+        return Instant(fn(self.result), asyncio.ensure_future(later()))
+
 
 @dataclass
 class _Job:

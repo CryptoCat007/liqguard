@@ -89,7 +89,7 @@ class TelegramUI:
         T = await self.translator_for(message)
         screen = await self.router.run(message.from_user.id, COMMAND_ACTIONS.get(name, "m"),
                                        chat_type=str(message.chat.type), state=state, message=message, T=T)
-        await send(message.bot, message.chat.id, message, screen)
+        self.router.follow_up(await send(message.bot, message.chat.id, message, screen), screen)
 
     async def on_callback(self, callback: CallbackQuery, state: FSMContext) -> None:
         await self.router.handle(callback, state)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from aiogram.types import InlineKeyboardMarkup
 
@@ -35,6 +35,8 @@ class Screen:
     new_message: bool = False
     edit: bool = True
     strip_keyboard: bool = False
+    later: Optional[Callable[[], Awaitable[Optional[str]]]] = None
+    """Muse's version of `text`, still on its way: the router edits the shown message when it arrives."""
 
 
 @dataclass

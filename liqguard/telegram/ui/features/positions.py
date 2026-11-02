@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from liqguard.core.position_tools import report
 
 from .. import keyboards as kb
@@ -79,16 +81,31 @@ async def _tool(req: Request, tool: str, code: str) -> Screen:
     found = await _found(req)
     if found is None:
         return _gone(req)
-    plan = None
+    built = None
     if tool == "rescue":
         built = req.services.rescue_plan(found)
         if built is None:
             return _gone(req)
-        plan = built.to_dict()
-    data = report(tool, found.position, found.snapshot.context, req.services.protection(found), plan,
-                  demo=found.source in ("sim", "demo"), lang=req.T.lang)
-    return Screen(data["title"] + "\n\n" + "\n".join(data["lines"]).strip(),
-                  kb.position_tools(req.T, req.sign, found.source, found.position.symbol, current=code))
+    plan = built.to_dict() if built is not None else None
+    protection = req.services.protection_check(found)
+    note = req.services.muse.tool_note(tool, req.T.lang, plan=built, check=protection.stop)
+    demo = found.source in ("sim", "demo")
+
+    def text(muse: Optional[dict]) -> str:
+        data = report(tool, found.position, found.snapshot.context, protection.to_dict(), plan, demo=demo,
+                      lang=req.T.lang, muse=muse)
+        return data["title"] + "\n\n" + "\n".join(data["lines"]).strip()
+
+    later = None
+    if note is not None and note.pending is not None:
+        pending = note.pending
+
+        async def later() -> Optional[str]:
+            live = await pending
+            return text(live) if live else None
+
+    return Screen(text(note.result if note else None),
+                  kb.position_tools(req.T, req.sign, found.source, found.position.symbol, current=code), later=later)
 
 
 async def rescue(req: Request) -> Screen:

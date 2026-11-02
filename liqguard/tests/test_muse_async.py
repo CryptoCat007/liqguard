@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from liqguard.ai import MetaLLMClient
 from liqguard.alerts import AlertManager, PositionMonitor
+from liqguard.core import MuseService
 from liqguard.models import Position, Side, User, Venue
 from liqguard.simulation import MarketSimulation
 from liqguard.telegram.handlers import BotHandlers
@@ -159,7 +160,7 @@ class TestTelegram:
     @pytest.fixture
     def handlers(self, ctx, gate):
         h = BotHandlers(ctx)
-        h.llm = live_llm(SmartMuse(gate))
+        h.muse = MuseService(live_llm(SmartMuse(gate)))
         return h
 
     async def demo_user(self, ctx, handlers):

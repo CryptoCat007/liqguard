@@ -3,6 +3,8 @@
 from .context import AppContext
 from .executor import BindingActionExecutor
 from .market import MarketDataService
+from .muse_service import MuseService, PortfolioMuse, Suggestion
 from .positions import BookSnapshot, PositionService
 
-__all__ = ["AppContext", "BindingActionExecutor", "BookSnapshot", "MarketDataService", "PositionService"]
+__all__ = ["AppContext", "BindingActionExecutor", "BookSnapshot", "MarketDataService", "MuseService", "PortfolioMuse",
+           "PositionService", "Suggestion"]
