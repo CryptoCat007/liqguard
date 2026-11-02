@@ -154,10 +154,11 @@ class TestLLMClientMockMode:
 class TestLLMClientModel:
     """Test model configuration."""
 
-    def test_default_model(self):
-        """Test default model is used."""
+    def test_default_model(self, monkeypatch):
+        """The default is a model GET /v1/models lists (bare "muse-spark" is a 404)."""
+        monkeypatch.delenv("META_MODEL", raising=False)
         client = MetaLLMClient(use_mock=True)
-        assert client.model == "muse-spark"
+        assert client.model == "muse-spark-1.3"
 
     def test_custom_model(self):
         """Test custom model can be set."""
@@ -220,7 +221,8 @@ class TestPortfolioSummary:
 
         assert result["riskiest_symbol"] == "BTCUSDT"
         assert "BTCUSDT" in result["headline"]
-        assert result["mock"] is False
+        assert result["mock"] is True
+        assert client.mode == "fallback" and client.last_error.startswith("rejected")
 
     async def test_live_headline_used_when_valid(self, overview):
         from unittest.mock import AsyncMock, MagicMock
