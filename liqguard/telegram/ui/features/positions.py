@@ -56,7 +56,8 @@ async def detail(req: Request) -> Screen:
     c = found.snapshot.context
     true_liq = c.liquidation(p).price if c.computable(p) else None
     lines = [
-        f"{RISK_EMOJI.get(a.risk_level_str, '❓')} {p.symbol} {side(T, p.side.value)} · {p.leverage:g}x · {p.margin_mode}{demo_tag(T, found.source)}",
+        f"{RISK_EMOJI.get(a.risk_level_str, '❓')} {p.symbol} {side(T, p.side.value)} · {p.leverage:g}x · "
+        f"{T(f'common.margin_mode.{p.margin_mode}')}{demo_tag(T, found.source)}",
         "",
         T("positions.size", size=p.size),
         T("positions.entry", price=price(p.entry_price)),

@@ -174,8 +174,8 @@ price = "停損價：{price}"
 gap = "停損與強平間距：{gap}（至少需要 {required}）"
 liq = "強平價：{price}"
 loss = "若被強平損失約：{loss}"
-suggest_move = "💡 建議把停損設在 {price} 或更保守"
-suggest_set = "💡 建議設定一張觸發價在強平價之前的停損單"
+suggest_move = "🔧 建議把停損設在 {price} 或更保守"
+suggest_set = "🔧 建議設定一張觸發價在強平價之前的停損單"
 
 [tools.stop.status]
 ok = "✅ 停損有效，會在強平前觸發"
@@ -199,14 +199,16 @@ no_data = "這個倉位暫無資金費率資料。"
 stopdemo = "⏹ 停止進行中的 Demo"
 start = "開始／主選單"
 menu = "🏠 主選單"
-positions = "📊 我的倉位"
-risk = "🚨 風險總覽"
+positions = "📋 我的倉位"
+risk = "📊 風險總覽"
 demo = "🎬 Demo 模式"
 settings = "🔔 通知設定"
 bind = "🔑 綁定帳號"
 dashboard = "🖥️ 網頁看板"
 lang = "🌐 Language / 語言"
 help = "❓ 幫助"
+ask = "🤖 問 Muse"
+status = "🧾 帳戶與保護動作"
 
 [book]
 simulation = "🎬 Demo 模式 · 市場模擬"
@@ -220,21 +222,25 @@ status_bound = "🔗 已綁定：{names}"
 status_unbound = "🔌 尚未綁定帳號，可先試試 🎬 Demo"
 help = """❓ 幫助
 
-LiqGuard 盯住你的永續合約倉位，在被強平之前提醒你，並算出最便宜的救倉方式。
+LiqGuard 盯住你的永續合約倉位，在被強平之前提醒你，並算出最便宜的救倉方式。每個畫面最上方的 💡 建議由 Muse（Meta，muse-spark-1.3）撰寫。
 
-📊 我的倉位：每個倉位下方有 救倉試算 / 插針壓測 / 停損檢查 / 資金費影響
+📊 風險總覽：整體風險、Muse 摘要、處理順序、停損與插針提醒
+📋 我的倉位 → 點選倉位 → 🛟 救倉試算 / 🕯 插針壓測 / 🛑 停損檢查 / 💸 資金費影響
+🛡 停損檢查：逐一比對每個倉位的停損價與強平價
 🚨 先處理哪個：多個倉位同時告急時，依緊急程度排序並說明原因
 🧪 壓力測試：同一錢包所有倉位一起下跌時，帳戶在跌多少 % 時被強平
 💸 資金費率/手續費：下一次結算要付多少、平倉手續費
+🤖 問 Muse：預設問題，或用 /ask 問自己的問題
 🔔 通知設定：警示門檻、喚醒提醒間隔、勿擾時段
 🔑 綁定帳號：Binance 唯讀 API 金鑰或 Hyperliquid 錢包地址
+🧾 帳戶與保護動作：帳戶狀態、僅限測試網的保護動作、緊急停止
 🖥️ 網頁看板：一次性登入連結
 🎬 Demo：用模擬倉位體驗所有功能（短暫、會自行結束；⏹ 停止 Demo 可隨時結束）
 🌐 Language / 語言：English 或 繁體中文
 
 收到警報時：🚑 先處理這個 直接開啟救倉試算，✅ 我醒了 停止喚醒提醒，😴 暫停提醒 30 分鐘。
 
-指令：/menu · /positions · /risk · /demo · /settings · /dashboard · /stopdemo · /lang"""
+每個指令在這裡都有按鈕：/menu · /risk · /positions · /ask · /demo · /settings · /bind · /status · /dashboard · /stopdemo · /lang"""
 
 [kb]
 risk_rescue = "🛟 {symbol} 救倉選項"
@@ -244,7 +250,16 @@ risk_details = "📋 倉位明細"
 risk_refresh = "🔄 重新整理"
 risk_back = "📊 回到總覽"
 back_menu = "⬅️ 返回主選單"
-positions = "📊 我的倉位"
+risk_overview = "📊 風險總覽"
+stop_check = "🛡 停損檢查"
+ask = "🤖 問 Muse"
+account = "🧾 帳戶與保護動作"
+killswitch_on = "🔴 開啟緊急停止"
+killswitch_off = "🟢 關閉緊急停止"
+rescue_first = "🚑 先救 {symbol}"
+ask_more = "🤖 再問一題"
+confirm_action = "✅ 確認 {short}"
+positions = "📋 我的倉位"
 triage = "🚨 先處理哪個"
 stress = "🧪 壓力測試"
 funding = "💸 資金費率/手續費"
@@ -257,7 +272,7 @@ help = "❓ 幫助"
 lang_en = "🇬🇧 {name}"
 lang_zh = "🇹🇼 {name}"
 refresh = "🔄 重新整理"
-back_positions = "📊 返回倉位列表"
+back_positions = "📋 返回倉位列表"
 wick_for = "🕯 {symbol} 插針壓測"
 minutes = "{n:g} 分"
 times = "{n} 次"
@@ -285,7 +300,7 @@ none = "📭 目前沒有持倉。"
 not_found = "這個倉位已不存在（可能已平倉或模擬已結束），已為你更新倉位列表。"
 not_found_toast = "倉位已不存在"
 row = "{emoji} {symbol} {side} {leverage:g}x · 距強平 {dist} · 未實現 {pnl}"
-title = "📊 我的倉位 · {book}\n（由最危險排起）"
+title = "📋 我的倉位 · {book}\n（由最危險排起）"
 more = "…另有 {n} 個倉位，請到網頁看板查看"
 hint = "點倉位名稱看詳情，或直接點下方工具。"
 size = "倉位大小：{size:g}"
@@ -415,7 +430,7 @@ key_secret_only = "❌ 請只傳 API Key 和 Secret（用空白或換行隔開�
 key_received = "✅ 已收到 API Key。\n\n現在請傳送 Secret Key："
 expired = "⌛ 流程已逾時，請重新傳送 API Key 和 Secret。"
 ended = "已結束綁定流程。"
-see_positions = "可以到 📊 我的倉位 查看了。"
+see_positions = "可以到 📋 我的倉位 查看了。"
 retry_binance = "請重新傳送 API Key 和 Secret，或按「取消綁定」。"
 
 [binding.result]
@@ -1216,3 +1231,70 @@ error_widget = "無法驗證 Telegram 登入（或登入資料已過期），請
 error_session = "你的登入已過期或已被撤銷，請重新登入。"
 error_disabled = "這台伺服器未啟用登入功能，但仍可使用公開示範。"
 notice_signed_out = "你已登出。想再登入時，向機器人傳送 /dashboard 即可。"
+
+[overview]
+title = "📊 風險總覽 · {book}"
+level = "{emoji} 整體風險：{level} · 共 {n} 個倉位，{at_risk} 個進入警示區"
+closest = "最接近強平：{symbol} {side}，距離 {dist}"
+margin = "讓所有倉位回到 {target:g}% 安全距離需追加：{amount}"
+pnl = "未實現損益：{pnl}"
+order = "🚨 處理順序"
+all_safe = "✅ 沒有倉位進入警示區。"
+stops_ok = "🛡 所有停損都會在強平前觸發。"
+stops_bad = "🛡 停損需要處理：{symbols}"
+stops_unknown = "🛡 這裡讀不到掛單；請點 🛡 停損檢查逐一查看。"
+one_wick = "🕯 一根最大插針就會強平：{symbols}"
+adl = "⚡ 自動減倉 4–5/5：{symbols}"
+hint = "點 🛡 停損檢查查看每個停損，或點 📋 我的倉位使用各倉位的工具。"
+
+[stopcheck]
+title = "🛡 停損檢查 · {book}"
+row = "{symbol} {side}：{status}"
+unknown = "❔ 無法讀取掛單"
+hint = "點選倉位查看完整停損報告與 Muse 的修正建議。"
+button = "🛑 {symbol} {side}"
+
+[account]
+title = "🧾 帳戶與保護動作"
+id = "🆔 使用者 ID：{id}"
+language = "🌐 語言：{name}"
+demo_on = "🎮 模擬模式：開啟（模擬資料）"
+demo_off = "🎮 模擬模式：關閉"
+bound = "🔗 已綁定：{names}（主網僅唯讀）"
+unbound = "🔌 尚未綁定交易所"
+tiers = "🔔 警示門檻：⚠️ {warning:g}% · 🚨 {critical:g}% · 🆘 {emergency:g}%"
+protect_on = "🛡 保護動作（僅限測試網）：已啟用"
+protect_off = "🛡 保護動作（僅限測試網）：未啟用"
+kill_on = "🔴 緊急停止：開啟，任何動作都不會執行"
+kill_off = "🟢 緊急停止：關閉"
+daily = "今日：{total}，每日上限 {limit}"
+pending_title = "待確認的動作："
+pending_none = "目前沒有待確認的保護動作。倉位有風險時才會提出。"
+pending_row = "🔸 {id} · {kind} {symbol} · {amount} · {status}"
+kill_on_toast = "🔴 已開啟緊急停止：待確認動作已取消"
+kill_off_toast = "🟢 已關閉緊急停止"
+done_toast = "✅ 已在測試網執行"
+cancelled_toast = "❌ 已取消動作"
+failed_toast = "⚠️ 未執行：{reason}"
+
+[ask]
+title = "🤖 問 Muse"
+text = "選一個問題，Muse 會根據你目前的倉位回答。\n\n也可以輸入 /ask 加上任何問題，例如：/ask 我的 BTC 需要追加保證金嗎？"
+none = "📭 目前沒有倉位可以詢問。請先綁定帳號或開始 🎬 模擬。"
+answer = "🤖 {question}"
+
+[ask.q]
+risk = "我的倉位風險如何？"
+first = "現在有什麼建議？"
+pnl = "我的未實現損益是多少？"
+
+[overview.levels]
+safe = "安全"
+low = "低"
+moderate = "中等"
+high = "高"
+critical = "危急"
+
+[common.margin_mode]
+cross = "全倉"
+isolated = "逐倉"

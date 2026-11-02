@@ -37,10 +37,17 @@ from .services import UIServices
 
 logger = logging.getLogger(__name__)
 
-BOT_COMMANDS = ("start", "menu", "positions", "risk", "demo", "stopdemo", "settings", "bind", "dashboard", "lang", "help")
+BOT_COMMANDS = ("start", "menu", "risk", "positions", "ask", "demo", "stopdemo", "settings", "bind", "status", "dashboard",
+                "lang", "help")
 
-COMMAND_ACTIONS = {"start": "m", "menu": "m", "help": "h", "positions": "pl", "demo": "dm", "stopdemo": "dx",
-                   "settings": "se", "bind": "b", "unbind": "bu", "lang": "l", "language": "l"}
+COMMAND_ACTIONS = {"start": "m", "menu": "m", "help": "h", "risk": "ro", "positions": "pl", "demo": "dm", "stopdemo": "dx",
+                   "settings": "se", "threshold": "se", "bind": "b", "unbind": "bu", "lang": "l", "language": "l",
+                   "status": "ac", "actions": "ac", "killswitch": "ak"}
+"""Commands this UI answers itself with the screen their menu button opens."""
+
+MENU_ROUTES = {**COMMAND_ACTIONS, "ask": "qa", "dashboard": "db"}
+"""Every slash command → the inline-keyboard action that offers the same thing. /ask (free-form question)
+and /dashboard (one-time link, or `revoke`) stay on `BotHandlers`; their buttons are 🤖 Ask Muse and 🖥️ Dashboard."""
 
 
 def bot_commands(lang: str = EN) -> list[BotCommand]:
@@ -87,7 +94,11 @@ class TelegramUI:
             raise SkipHandler()
         await state.clear()
         T = await self.translator_for(message)
-        screen = await self.router.run(message.from_user.id, COMMAND_ACTIONS.get(name, "m"),
+        action = COMMAND_ACTIONS.get(name, "m")
+        args: tuple[str, ...] = ()
+        if action == "ak":
+            args = ("off" if self.ctx.actions.is_kill_switch_active(message.from_user.id) else "on",)
+        screen = await self.router.run(message.from_user.id, action, args,
                                        chat_type=str(message.chat.type), state=state, message=message, T=T)
         self.router.follow_up(await send(message.bot, message.chat.id, message, screen), screen)
 
@@ -130,4 +141,4 @@ def build_ui(ctx: AppContext) -> TelegramUI:
     return TelegramUI(ctx)
 
 
-__all__ = ["BOT_COMMANDS", "COMMAND_ACTIONS", "bot_commands", "CallbackCodec", "CallbackRouter", "Screen", "Signer", "TelegramUI", "UIServices", "build_ui"]
+__all__ = ["BOT_COMMANDS", "COMMAND_ACTIONS", "MENU_ROUTES", "bot_commands", "CallbackCodec", "CallbackRouter", "Screen", "Signer", "TelegramUI", "UIServices", "build_ui"]

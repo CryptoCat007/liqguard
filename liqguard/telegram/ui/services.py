@@ -121,6 +121,11 @@ class UIServices:
     def muse(self):
         return self.ctx.muse
 
+    @property
+    def actions(self):
+        """The protective-actions manager (proposals execute on testnet only)."""
+        return self.ctx.actions
+
     @staticmethod
     def insights(user: User, snapshot: BookSnapshot) -> PortfolioInsights:
         return portfolio_insights(snapshot.positions, snapshot.context, user.threshold)

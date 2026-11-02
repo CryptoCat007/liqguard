@@ -52,6 +52,8 @@ SAMPLE_ARGS = {
     "pd": ("sim", "BTCUSDT"), "pr": ("binance", "ETHUSDT"), "pw": ("hyperliquid", "kPEPE"), "ps": ("demo", "SOLUSDT"),
     "pf": ("sim", "AVAXUSDT"), "sp": ("quiet",), "ss": ("quiet", "23-7"), "bx": ("binance", "mainnet"),
     "by": ("hyperliquid", "mainnet"), "ds": ("cross_longs",), "aa": ("AbCdEf123_-x",), "az": ("AbCdEf123_-x",),
+    "ro": (), "sc": (), "ac": (), "ak": ("on",), "ay": ("pa_0123456789ab",), "an": ("pa_0123456789ab",),
+    "qa": (), "qq": ("first",),
 }
 
 
@@ -183,6 +185,12 @@ def all_keyboards(T: Translator, sign: Signer) -> list:
         kb.demo_started(T, sign),
         kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x"),
         kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x", demo=True),
+        kb.risk_overview(T, sign, ("sim", "BTCUSDT")),
+        kb.stop_list(T, sign, [("sim", "BTCUSDT", "🛑 BTCUSDT")]),
+        kb.account(T, sign, [("pa_0123456789ab", "89ab")], kill_active=False),
+        kb.account(T, sign, [], kill_active=True),
+        kb.ask_menu(T, sign, ("risk", "first", "pnl")),
+        kb.ask_answer(T, sign),
     ]
 
 
@@ -320,7 +328,8 @@ class TestKeyboards:
     @pytest.mark.parametrize("lang", LANGUAGES)
     def test_main_menu_has_every_feature_and_the_language_button(self, lang):
         T = Translator(lang)
-        keys = ["positions", "triage", "stress", "funding", "settings", "binding", "dashboard", "demo", "language", "help"]
+        keys = ["risk_overview", "positions", "stop_check", "triage", "stress", "funding", "ask", "settings", "binding",
+                "account", "dashboard", "demo", "language", "help"]
         assert labels(kb.main_menu(T, self.sign)) == [T(f"kb.{k}") for k in keys]
         assert labels(kb.main_menu(T, self.sign, demo_running=True))[0] == T("kb.sim_stop")
         assert T("kb.language") == "🌐 Language / 語言"
@@ -544,7 +553,8 @@ class TestRouterDispatch:
         await ui.on_command(message, state_for(fsm_storage, ALICE), MagicMock(command="start", args=None))
         text, markup = message.answer.await_args.args[0], message.answer.await_args.kwargs["reply_markup"]
         assert text.split("\n")[0] == T("menu.text", status="").split("\n")[0]
-        assert len(labels(markup)) == 10 and T("kb.language") in labels(markup)
+        assert len(labels(markup)) == 14 and T("kb.language") in labels(markup)
+        assert labels(markup)[0] == T("kb.risk_overview") == {"en": "📊 Risk overview", "zh-Hant": "📊 風險總覽"}[lang]
 
     async def test_settings_with_arguments_falls_through_to_legacy(self, ui, fsm_storage):
         with pytest.raises(SkipHandler):
@@ -668,7 +678,7 @@ class TestStaleButtons:
         text, markup = shown(cb)
         assert handled == "m" and text.startswith(T(EXPIRED))
         assert toast(cb)[0] == T(EXPIRED_TOAST)
-        assert labels(markup)[0] == T("kb.positions")
+        assert labels(markup)[0] == T("kb.risk_overview")
 
     async def test_expired_unbind_confirmation_does_nothing(self, ui):
         assert (await ui.services.binding.bind_hyperliquid(ALICE, WALLET)).ok
@@ -757,7 +767,7 @@ class TestDemoClickThrough:
 
         await click(ui, ALICE, ui.signer(ALICE)("ds", "critical"), state)
         visited, seen = await crawl(ui, ALICE, menu, state)
-        expected = set(ACTIONS) - {"do", "dx", "by", "bb", "bh", "bc", "db", "bx", "aa", "az", "ls"}
+        expected = set(ACTIONS) - {"do", "dx", "by", "bb", "bh", "bc", "db", "bx", "aa", "az", "ls", "ay", "an"}
         assert expected <= visited, expected - visited
         tools = {(a, args) for a, args in seen if a in ("pr", "pw", "ps", "pf")}
         assert {args for _, args in tools} >= {("demo", s) for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT")}

@@ -20,6 +20,9 @@ VENUE = re.compile(r"^(binance|hyperliquid)$")
 NETWORK = re.compile(r"^(mainnet|testnet)$")
 SCENARIO = re.compile(r"^(normal|volatile|critical|safe|mixed|cross_longs)$")
 LANGUAGE = re.compile(r"^(en|zh)$")
+QUESTION = re.compile(r"^(risk|first|pnl)$")
+ON_OFF = re.compile(r"^(on|off)$")
+ACTION_ID = re.compile(r"^pa_[0-9a-f]{12}$")
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,9 @@ ACTIONS: dict[str, ActionSpec] = {
     "h": ActionSpec("menu", description="❓ Help"),
     "l": ActionSpec("language", description="🌐 Language picker"),
     "ls": ActionSpec("language", (LANGUAGE,), ttl=DAY, description="Set language"),
-    "pl": ActionSpec("positions", ttl=7 * DAY, description="📊 My positions"),
+    "ro": ActionSpec("risk", ttl=7 * DAY, description="📊 Risk overview"),
+    "sc": ActionSpec("risk", ttl=7 * DAY, description="🛡 Stop-loss check list"),
+    "pl": ActionSpec("positions", ttl=7 * DAY, description="📋 My positions"),
     "pd": ActionSpec("positions", POSITION, ttl=DAY, description="Position detail"),
     "pr": ActionSpec("positions", POSITION, ttl=DAY, description="Rescue sim"),
     "pw": ActionSpec("positions", POSITION, ttl=DAY, description="Wick stress"),
@@ -61,6 +66,12 @@ ACTIONS: dict[str, ActionSpec] = {
     "by": ActionSpec("binding", (VENUE, NETWORK), ttl=2 * MINUTE, description="Do unbind"),
     "bc": ActionSpec("binding", ttl=DAY, description="Cancel binding"),
     "db": ActionSpec("dashboard", description="🖥️ Dashboard"),
+    "ac": ActionSpec("account", description="🧾 Account & actions"),
+    "ak": ActionSpec("account", (ON_OFF,), ttl=HOUR, description="Set the kill switch"),
+    "ay": ActionSpec("account", (ACTION_ID,), ttl=HOUR, description="Confirm a protective action (testnet)"),
+    "an": ActionSpec("account", (ACTION_ID,), ttl=HOUR, description="Cancel a protective action"),
+    "qa": ActionSpec("ask", description="🤖 Ask Muse"),
+    "qq": ActionSpec("ask", (QUESTION,), ttl=DAY, description="Ask one preset question"),
     "dm": ActionSpec("demo", description="🎬 Demo"),
     "ds": ActionSpec("demo", (SCENARIO,), ttl=DAY, description="Pick a demo scenario"),
     "dx": ActionSpec("demo", ttl=DAY, description="Stop simulation"),

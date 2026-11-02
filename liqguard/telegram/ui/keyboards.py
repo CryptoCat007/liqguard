@@ -38,11 +38,14 @@ def back_row(T: Translator, sign: Signer) -> list[Button]:
 def main_menu(T: Translator, sign: Signer, demo_running: bool = False) -> InlineKeyboardMarkup:
     return _kb([
         [Button(text=T("kb.sim_stop"), callback_data=sign("dx"))] if demo_running else [],
-        [Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.triage"), callback_data=sign("tr"))],
-        [Button(text=T("kb.stress"), callback_data=sign("st")), Button(text=T("kb.funding"), callback_data=sign("ff"))],
+        [Button(text=T("kb.risk_overview"), callback_data=sign("ro"))],
+        [Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.stop_check"), callback_data=sign("sc"))],
+        [Button(text=T("kb.triage"), callback_data=sign("tr")), Button(text=T("kb.stress"), callback_data=sign("st"))],
+        [Button(text=T("kb.funding"), callback_data=sign("ff")), Button(text=T("kb.ask"), callback_data=sign("qa"))],
         [Button(text=T("kb.settings"), callback_data=sign("se")), Button(text=T("kb.binding"), callback_data=sign("b"))],
-        [Button(text=T("kb.dashboard"), callback_data=sign("db")), Button(text=T("kb.demo"), callback_data=sign("dm"))],
-        [Button(text=T("kb.language"), callback_data=sign("l")), Button(text=T("kb.help"), callback_data=sign("h"))],
+        [Button(text=T("kb.account"), callback_data=sign("ac")), Button(text=T("kb.dashboard"), callback_data=sign("db"))],
+        [Button(text=T("kb.demo"), callback_data=sign("dm")), Button(text=T("kb.language"), callback_data=sign("l"))],
+        [Button(text=T("kb.help"), callback_data=sign("h"))],
     ])
 
 
@@ -96,6 +99,50 @@ def stress(T: Translator, sign: Signer, wick_targets: Sequence[tuple[str, str]])
     rows.append([Button(text=T("kb.refresh"), callback_data=sign("st"))])
     rows.append(back_row(T, sign))
     return _kb(rows)
+
+
+def risk_overview(T: Translator, sign: Signer, first: Optional[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """`first`: (source, symbol) of the position triage puts first, if any is at risk."""
+    return _kb([
+        [Button(text=T("kb.rescue_first", symbol=first[1]), callback_data=sign("pr", *first))] if first else [],
+        [Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.stop_check"), callback_data=sign("sc"))],
+        [Button(text=T("kb.triage"), callback_data=sign("tr")), Button(text=T("kb.stress"), callback_data=sign("st"))],
+        [Button(text=T("kb.ask"), callback_data=sign("qa")), Button(text=T("kb.refresh"), callback_data=sign("ro"))],
+        back_row(T, sign),
+    ])
+
+
+def stop_list(T: Translator, sign: Signer, positions: Sequence[tuple[str, str, str]]) -> InlineKeyboardMarkup:
+    """`positions`: (source, symbol, label); each opens that position's full stop-loss report."""
+    rows: Rows = [[Button(text=label, callback_data=sign("ps", source, symbol))] for source, symbol, label in positions[:MAX_POSITIONS]]
+    rows.append([Button(text=T("kb.refresh"), callback_data=sign("sc")), Button(text=T("kb.risk_overview"), callback_data=sign("ro"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def account(T: Translator, sign: Signer, pending: Sequence[tuple[str, str]], kill_active: bool) -> InlineKeyboardMarkup:
+    """`pending`: (action id, short id), each with confirm / cancel."""
+    rows: Rows = [[Button(text=T("kb.confirm_action", short=short), callback_data=sign("ay", action_id)),
+                   Button(text=T("kb.cancel"), callback_data=sign("an", action_id))] for action_id, short in pending]
+    rows.append([Button(text=T("kb.killswitch_off" if kill_active else "kb.killswitch_on"),
+                        callback_data=sign("ak", "off" if kill_active else "on"))])
+    rows.append([Button(text=T("kb.settings"), callback_data=sign("se")), Button(text=T("kb.binding"), callback_data=sign("b"))])
+    rows.append([Button(text=T("kb.refresh"), callback_data=sign("ac"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def ask_menu(T: Translator, sign: Signer, questions: Sequence[str]) -> InlineKeyboardMarkup:
+    rows: Rows = [[Button(text=T(f"ask.q.{q}"), callback_data=sign("qq", q))] for q in questions]
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def ask_answer(T: Translator, sign: Signer) -> InlineKeyboardMarkup:
+    return _kb([
+        [Button(text=T("kb.ask_more"), callback_data=sign("qa")), Button(text=T("kb.risk_overview"), callback_data=sign("ro"))],
+        back_row(T, sign),
+    ])
 
 
 def refresh_back(T: Translator, sign: Signer, action: str) -> InlineKeyboardMarkup:
@@ -186,7 +233,8 @@ def dashboard(T: Translator, sign: Signer, url: Optional[str]) -> InlineKeyboard
 def demo_menu(T: Translator, sign: Signer, running: bool, demo_mode: bool) -> InlineKeyboardMarkup:
     rows: Rows = []
     if running:
-        rows.append([Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.triage"), callback_data=sign("tr"))])
+        rows.append([Button(text=T("kb.risk_overview"), callback_data=sign("ro"))])
+        rows.append([Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.stop_check"), callback_data=sign("sc"))])
         rows.append([Button(text=T("kb.sim_stop"), callback_data=sign("dx"))])
     else:
         buttons = [Button(text=T(f"demo.scenario.{key}"), callback_data=sign("ds", key)) for key in SCENARIOS]
@@ -199,8 +247,10 @@ def demo_menu(T: Translator, sign: Signer, running: bool, demo_mode: bool) -> In
 
 def demo_started(T: Translator, sign: Signer) -> InlineKeyboardMarkup:
     return _kb([
-        [Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.triage"), callback_data=sign("tr"))],
-        [Button(text=T("kb.stress"), callback_data=sign("st")), Button(text=T("kb.funding"), callback_data=sign("ff"))],
+        [Button(text=T("kb.risk_overview"), callback_data=sign("ro"))],
+        [Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.stop_check"), callback_data=sign("sc"))],
+        [Button(text=T("kb.triage"), callback_data=sign("tr")), Button(text=T("kb.stress"), callback_data=sign("st"))],
+        [Button(text=T("kb.funding"), callback_data=sign("ff"))],
         [Button(text=T("kb.demo_menu"), callback_data=sign("dm"))],
         back_row(T, sign),
     ])

@@ -7,7 +7,9 @@ services object it receives; features never import each other.
 from __future__ import annotations
 
 from . import (
+    account,
     alerts,
+    ask,
     binding,
     dashboard,
     demo,
@@ -15,6 +17,7 @@ from . import (
     language,
     menu,
     positions,
+    risk,
     settings,
     stress,
     triage,
@@ -23,6 +26,7 @@ from . import (
 FEATURES = {
     "menu": menu,
     "language": language,
+    "risk": risk,
     "positions": positions,
     "triage": triage,
     "stress": stress,
@@ -32,6 +36,8 @@ FEATURES = {
     "dashboard": dashboard,
     "demo": demo,
     "alerts": alerts,
+    "account": account,
+    "ask": ask,
 }
 
 
