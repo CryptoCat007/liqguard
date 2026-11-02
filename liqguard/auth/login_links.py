@@ -11,6 +11,7 @@ from typing import Callable, Optional, Protocol
 class LoginTokenStore(Protocol):
     async def create(self, telegram_id: int, token_hash: str, created_at: float, expires_at: float) -> None: ...
     async def consume(self, token_hash: str, now: float) -> Optional[int]: ...
+    async def status(self, token_hash: str, now: float) -> Optional[str]: ...
 
 
 def hash_token(raw: str) -> str:
@@ -38,3 +39,10 @@ class LoginLinkService:
         if not raw or len(raw) > 128:
             return None
         return await self.store.consume(hash_token(raw), self._clock())
+
+    async def failure(self, raw: Optional[str]) -> str:
+        """Why `redeem` refused `raw`: "link_used", "link_expired" or "link" (unknown or malformed)."""
+        if not raw or len(raw) > 128:
+            return "link"
+        state = await self.store.status(hash_token(raw), self._clock())
+        return {"used": "link_used", "expired": "link_expired"}.get(state or "", "link")

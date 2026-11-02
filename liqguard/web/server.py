@@ -28,7 +28,7 @@ from typing import Optional
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi import Path as PathParam
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -49,6 +49,7 @@ from liqguard.risk import (
 from liqguard.simulation import SCENARIOS, MarketSimulation
 
 from .auth import SessionAuth, register_auth_routes
+from .pages import remember_language, render_login, request_language
 from .security import apply_security_headers, require_csrf
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,8 @@ def create_app(
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         apply_security_headers(response, request.url.path)
+        if request.method == "GET" and not request.url.path.startswith(("/api/", "/ws/", "/static/")):
+            remember_language(response, request)
         return response
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -218,8 +221,9 @@ def create_app(
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/login", include_in_schema=False)
-    async def login_page():
-        return FileResponse(STATIC_DIR / "login.html")
+    async def login_page(request: Request, error: Optional[str] = None, notice: Optional[str] = None):
+        settings = ctx.settings if ctx is not None else None
+        return HTMLResponse(render_login(request_language(request), settings, error, notice))
 
     @app.get("/me", include_in_schema=False)
     async def me_page(claims: Optional[SessionClaims] = Depends(auth.optional)):

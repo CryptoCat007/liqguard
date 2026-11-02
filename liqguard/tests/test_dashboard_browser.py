@@ -106,3 +106,25 @@ def test_en_dashboard_keeps_english(server, browser):
     assert page.inner_text("#riskLevel") in {"SAFE", "WARNING", "DANGER"}
     assert page.inner_text("#positions .prow-risk") in {"Safe", "Warning", "Critical", "Emergency"}
     assert "Total cost" in page.inner_text("#rescueBody")
+
+
+def test_language_follows_the_user_between_dashboard_and_login(server, browser):
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = context.new_page()
+    page.goto(f"{server}/")
+    page.wait_for_function("() => document.documentElement.lang === 'en'", timeout=15000)
+    page.click(f"#{LANG_TOGGLE}")
+    page.wait_for_function("() => document.documentElement.lang === 'zh-Hant-TW'", timeout=15000)
+
+    page.goto(f"{server}/login?error=link_expired")
+    assert page.evaluate("() => document.documentElement.lang") == "zh-Hant-TW"
+    assert "連結已過期" in page.inner_text("#loginError")
+    assert not _visible_english(page)
+    color = page.evaluate("() => getComputedStyle(document.querySelector('.login-card a:not(.btn)')).color")
+    assert color == "rgb(94, 234, 212)"
+
+    page.click(f"#{LANG_TOGGLE}")
+    page.wait_for_function("() => document.documentElement.lang === 'en'")
+    page.goto(f"{server}/")
+    page.wait_for_function("() => document.documentElement.lang === 'en'", timeout=15000)
+    context.close()

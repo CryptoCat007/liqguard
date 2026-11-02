@@ -1,6 +1,7 @@
 """The dashboard in zh-Hant: every payload the page renders is Chinese apart from tickers, names and units."""
 
 import re
+from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from liqguard.core.position_tools import TOOLS
 from liqguard.i18n import EN, ZH, Msg, localize
 from liqguard.simulation import SCENARIOS, MarketSimulation
 from liqguard.web import create_app
+from liqguard.web.pages import ERRORS, NOTICES, render_login
 
 from .zh_scan import english_in, english_words
 
@@ -149,3 +151,54 @@ def test_every_english_text_in_the_page_has_a_locale_key():
     parser = _Texts()
     parser.feed((STATIC / "index.html").read_text())
     assert not parser.loose, parser.loose
+
+
+class _VisibleText(HTMLParser):
+    """Rendered text and user-visible attributes of a server page (scripts and styles skipped)."""
+
+    ATTRS = {"title", "aria-label", "alt", "placeholder"}
+
+    def __init__(self, skip_ids=()):
+        super().__init__()
+        self.skip_ids = set(skip_ids)
+        self.hidden = 0
+        self.texts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self.hidden += 1
+        if dict(attrs).get("id") not in self.skip_ids:
+            self.texts += [v for k, v in attrs if k in self.ATTRS and v]
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self.hidden -= 1
+
+    def handle_data(self, data):
+        if not self.hidden and data.strip():
+            self.texts.append(data.strip())
+
+
+LOGIN_VARIANTS = [("error", e) for e in ERRORS] + [("notice", n) for n in NOTICES] + [(None, None)]
+
+
+@pytest.mark.parametrize("public_url", ["https://liqguard.test", "http://127.0.0.1:8765"])
+@pytest.mark.parametrize("kind,value", LOGIN_VARIANTS)
+def test_zh_login_page_has_no_english(settings, public_url, kind, value):
+    cfg = replace(settings, public_url=public_url)
+    html = render_login(ZH, cfg, value if kind == "error" else None, value if kind == "notice" else None)
+    assert ('id="widgetDivider"' in html) == public_url.startswith("https://")
+    # The toggle's tooltip invites switching to English, so it is English by design.
+    parser = _VisibleText(skip_ids={"langBtn"})
+    parser.feed(html)
+    assert len(parser.texts) > 8
+    leftovers = [text for text in parser.texts if english_words(text)]
+    assert not leftovers, leftovers
+
+
+def test_zh_login_page_served_with_cookie_has_no_english():
+    with TestClient(create_app(demo_simulation=demo())) as c:
+        c.get(f"/?{ZH_Q}")
+        parser = _VisibleText(skip_ids={"langBtn"})
+        parser.feed(c.get("/login?error=link_used").text)
+        assert not [text for text in parser.texts if english_words(text)]

@@ -183,7 +183,7 @@ async def test_two_users_end_to_end(ctx, handlers, fsm):
     with TestClient(app, base_url="https://testserver") as alice_web, TestClient(app, base_url="https://testserver") as bob_web:
         assert alice_web.get(alice_link, follow_redirects=False).headers["location"] == "/me"
         assert bob_web.get(bob_link, follow_redirects=False).headers["location"] == "/me"
-        assert alice_web.get(bob_link, follow_redirects=False).headers["location"] == "/login?error=link"
+        assert alice_web.get(bob_link, follow_redirects=False).headers["location"] == "/login?error=link_used"
 
         alice_account = alice_web.get("/api/me/account").json()
         bob_account = bob_web.get("/api/me/account").json()

@@ -342,6 +342,19 @@ class LoginTokenRepository:
             await conn.commit()
         return row["telegram_id"] if row else None
 
+    async def status(self, token_hash: str, now: float) -> Optional[str]:
+        """"used", "expired", "valid", or None for a token that was never issued (or was purged)."""
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT used_at, expires_at FROM login_tokens WHERE token_hash = ?", (token_hash,)
+            ) as c:
+                row = await c.fetchone()
+        if row is None:
+            return None
+        if row["used_at"] is not None:
+            return "used"
+        return "expired" if row["expires_at"] <= now else "valid"
+
     async def revoke_all(self, telegram_id: int) -> None:
         async with self.db.connect() as conn:
             await conn.execute("DELETE FROM login_tokens WHERE telegram_id = ?", (telegram_id,))

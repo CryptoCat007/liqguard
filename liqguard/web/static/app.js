@@ -22,6 +22,7 @@ const MODE = location.pathname.startsWith("/me") ? "me" : "demo";
 const API = MODE === "me" ? "/api/me" : "/api/demo";
 const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
 const LANG_KEY = "liqguard.lang";
+const LANG_COOKIE = "liqguard_lang";
 const I18N = { lang: "en", strings: {} };
 
 function L(key, params) {
@@ -53,10 +54,20 @@ async function loadStrings(lang) {
   $("langBtn").lang = data.lang === "zh-Hant" ? "en" : "zh-Hant-TW";
 }
 
+/** Shared with the server-rendered login pages, which read the cookie. */
+function rememberLanguage(lang) {
+  localStorage.setItem(LANG_KEY, lang);
+  document.cookie = `${LANG_COOKIE}=${encodeURIComponent(lang)}; path=/; max-age=31536000; samesite=lax`;
+}
+function cookieLanguage() {
+  const hit = document.cookie.split("; ").find((c) => c.startsWith(`${LANG_COOKIE}=`));
+  return hit ? decodeURIComponent(hit.slice(LANG_COOKIE.length + 1)) : null;
+}
+
 async function initialLanguage() {
   const fromUrl = new URLSearchParams(location.search).get("lang");
   if (fromUrl) {
-    localStorage.setItem(LANG_KEY, fromUrl);
+    rememberLanguage(fromUrl);
     return fromUrl;
   }
   if (MODE === "me") {
@@ -65,7 +76,7 @@ async function initialLanguage() {
       if (r.ok) return (await r.json()).language;
     } catch (err) { /* fall back to the browser choice */ }
   }
-  return localStorage.getItem(LANG_KEY) || "en";
+  return cookieLanguage() || localStorage.getItem(LANG_KEY) || "en";
 }
 
 const S = {
@@ -2027,7 +2038,7 @@ function setupAccountPanels() {
 
 async function switchLanguage() {
   const next = I18N.lang === "zh-Hant" ? "en" : "zh-Hant";
-  localStorage.setItem(LANG_KEY, next);
+  rememberLanguage(next);
   if (MODE === "me") await sendJson("/api/me/language", { language: next });
   const url = new URL(location.href);
   if (url.searchParams.has("lang")) url.searchParams.set("lang", next);
@@ -2037,6 +2048,7 @@ async function switchLanguage() {
 async function bootstrap() {
   try {
     await loadStrings(await initialLanguage());
+    rememberLanguage(I18N.lang);
   } catch (err) { /* keep the built-in English text */ }
   if (!(await setupScope())) return;
   try {
@@ -2061,7 +2073,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("foldChart").addEventListener("toggle", () => { if ($("foldChart").open) { buildTabs(); buildChart(); } });
   $("signOutBtn").addEventListener("click", async () => {
     await fetch("/auth/logout", { method: "POST", headers: CSRF_HEADERS, credentials: "same-origin" });
-    location.assign("/");
+    location.assign("/login?notice=signed_out");
   });
   $("toolClose").addEventListener("click", () => $("toolDialog").close());
   $("langBtn").addEventListener("click", switchLanguage);

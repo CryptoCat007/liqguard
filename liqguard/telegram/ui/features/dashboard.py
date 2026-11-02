@@ -10,7 +10,7 @@ async def dashboard(req: Request) -> Screen:
     T = req.T
     if req.chat_type != "private":
         return Screen(T("dashboard.private_only"), kb.back_only(T, req.sign), toast=T("common.use_private"), alert=True)
-    link = await req.services.dashboard_link(req.user_id)
+    link = await req.services.dashboard_link(req.user_id, T.lang)
     if link is None:
         return Screen(T("dashboard.disabled"), kb.back_only(T, req.sign))
     url, minutes = link

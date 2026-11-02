@@ -10,6 +10,7 @@ from liqguard.ai import MetaLLMClient
 from liqguard.alerts import DEMO_VENUE, AlertManager, DemoAlertWindow, EscalationTracker
 from liqguard.auth import LoginLinkService, SessionSigner
 from liqguard.config import Settings
+from liqguard.i18n import normalize
 from liqguard.protect import (
     AuditLogger,
     ExecutionTier,
@@ -130,8 +131,10 @@ class AppContext:
             active = active or running
         return active
 
-    def dashboard_login_url(self, raw_token: str) -> str:
-        return f"{self.settings.dashboard_url}/auth/login?token={raw_token}"
+    def dashboard_login_url(self, raw_token: str, lang: Optional[str] = None) -> str:
+        """One-time login URL; `lang` makes the login and error pages open in the user's language."""
+        suffix = f"&lang={normalize(lang)}" if lang else ""
+        return f"{self.settings.dashboard_url}/auth/login?token={raw_token}{suffix}"
 
     async def close(self) -> None:
         await self.market.stop()

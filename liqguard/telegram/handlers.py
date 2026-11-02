@@ -1061,7 +1061,7 @@ class BotHandlers:
             return
 
         token = await self.ctx.login_links.create(user.telegram_id)
-        url = self.ctx.dashboard_login_url(token)
+        url = self.ctx.dashboard_login_url(token, user.language)
         minutes = max(1, self.ctx.settings.login_link_ttl // 60)
         keyboard = None
         if url.startswith("https://"):

@@ -185,9 +185,9 @@ class UIServices:
         """End the caller's demo — simulation, demo-book alerts and every demo reminder — now; True if any was active."""
         return await self.ctx.mute_demo(user_id, source="telegram", stop=True)
 
-    async def dashboard_link(self, user_id: int) -> Optional[tuple[str, int]]:
+    async def dashboard_link(self, user_id: int, lang: Optional[str] = None) -> Optional[tuple[str, int]]:
         """(one-time URL, minutes valid), or None when the dashboard is not enabled."""
         if not self.ctx.settings.dashboard_login_available:
             return None
         token = await self.ctx.login_links.create(user_id)
-        return self.ctx.dashboard_login_url(token), max(1, self.ctx.settings.login_link_ttl // 60)
+        return self.ctx.dashboard_login_url(token, lang), max(1, self.ctx.settings.login_link_ttl // 60)

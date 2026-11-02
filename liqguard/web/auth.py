@@ -12,6 +12,7 @@ from liqguard.auth import SessionClaims, verify_telegram_login
 from liqguard.core import AppContext
 from liqguard.models import User
 
+from .pages import widget_available
 from .security import require_csrf, same_origin
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ def register_auth_routes(app: FastAPI, ctx: Optional[AppContext], auth: SessionA
         return {
             "login_enabled": login_enabled(),
             "bot_username": ctx.settings.bot_username if ctx else None,
-            "widget_enabled": bool(ctx and ctx.settings.bot_username and ctx.settings.telegram_token),
+            "widget_enabled": widget_available(ctx.settings if ctx else None),
             "link_ttl_seconds": ctx.settings.login_link_ttl if ctx else None,
         }
 
@@ -84,7 +85,7 @@ def register_auth_routes(app: FastAPI, ctx: Optional[AppContext], auth: SessionA
             return RedirectResponse("/login?error=disabled", status_code=303)
         user_id = await ctx.login_links.redeem(token)
         if user_id is None:
-            return RedirectResponse("/login?error=link", status_code=303)
+            return RedirectResponse(f"/login?error={await ctx.login_links.failure(token)}", status_code=303)
         user = await ctx.storage.get_user(user_id)
         logger.info("Dashboard login via one-time link for user %s", user_id)
         return await auth.start_session(user_id, user.username if user else None)

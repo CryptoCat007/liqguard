@@ -1,6 +1,7 @@
 """Dashboard authentication: one-time login links, signed session cookies, Telegram Login Widget, CSRF."""
 
 import time
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from liqguard.auth import (
     telegram_login_hash,
     verify_telegram_login,
 )
+from liqguard.i18n import t
 from liqguard.models import User
 from liqguard.web import create_app
 from liqguard.web.auth import SESSION_COOKIE
@@ -168,8 +170,28 @@ class TestDashboardLogin:
         client.cookies.clear()
 
         response = client.get(f"/auth/login?token={token}", follow_redirects=False)
-        assert response.headers["location"] == "/login?error=link"
+        assert response.headers["location"] == "/login?error=link_used"
         assert SESSION_COOKIE not in response.headers.get("set-cookie", "")
+
+    async def test_failed_link_says_why(self, ctx, client):
+        await ctx.storage.save_user(User(telegram_id=ALICE))
+        clock = Clock(time.time())
+        ctx.login_links = LoginLinkService(ctx.storage.login_tokens, ttl_seconds=300, clock=clock)
+        expired = await ctx.login_links.create(ALICE)
+        clock.now += 301
+        assert client.get(f"/auth/login?token={expired}", follow_redirects=False).headers["location"] == "/login?error=link_expired"
+        for bad in ("not-a-real-token", "x" * 500, ""):
+            assert client.get(f"/auth/login?token={bad}", follow_redirects=False).headers["location"] == "/login?error=link"
+
+    async def test_bot_link_carries_the_language_into_a_cookie(self, ctx, client):
+        await ctx.storage.save_user(User(telegram_id=ALICE))
+        url = ctx.dashboard_login_url(await ctx.login_links.create(ALICE), "zh-TW")
+        assert url.endswith("&lang=zh-Hant")
+        client.get(url.replace("https://liqguard.test", ""), follow_redirects=False)
+        response = client.get(url.replace("https://liqguard.test", ""), follow_redirects=False)
+        assert response.headers["location"] == "/login?error=link_used"
+        assert "liqguard_lang=zh-Hant" in response.headers["set-cookie"]
+        assert "使用 Telegram 登入" in client.get("/login?error=link_used").text
 
     def test_me_redirects_to_login_without_session(self, client):
         response = client.get("/me", follow_redirects=False)
@@ -262,7 +284,8 @@ class TestDashboardCommand:
 
         text = message.answer.call_args.args[0]
         assert "https://liqguard.test/auth/login?token=" in text
-        token = text.split("token=")[1].split()[0]
+        token, _, lang = text.split("token=")[1].split()[0].partition("&lang=")
+        assert lang == "en"
         assert await ctx.login_links.redeem(token) == ALICE
 
     async def test_group_chat_gets_no_link(self, ctx, handlers):
@@ -276,3 +299,57 @@ class TestDashboardCommand:
         before = await ctx.storage.get_session_epoch(ALICE)
         await handlers.cmd_dashboard(fake_message(ALICE, "/dashboard revoke"), MagicMock(args="revoke"))
         assert await ctx.storage.get_session_epoch(ALICE) == before + 1
+
+
+# --------------------------------------------------------------------------- server-rendered login page
+
+
+class TestLoginPage:
+    def test_english_by_default_with_bot_link_and_steps(self, client):
+        html = client.get("/login").text
+        assert '<html lang="en">' in html and "Sign in with Telegram" in html
+        assert '<a href="https://t.me/liqguard_test_bot" rel="noopener">@liqguard_test_bot</a>' in html
+        assert "<code>/dashboard</code>" in html and "valid for 5 min" in html
+        assert 'href="/login?lang=zh-Hant"' in html and "login.js" not in html
+
+    def test_lang_query_renders_chinese_and_is_remembered(self, client):
+        response = client.get("/login?lang=zh-TW&error=link_expired")
+        assert '<html lang="zh-Hant-TW">' in response.text and "連結已過期" in response.text
+        assert 'href="/login?error=link_expired&amp;lang=en"' in response.text
+        assert "liqguard_lang=zh-Hant" in response.headers["set-cookie"]
+        assert "使用 Telegram 登入" in client.get("/login").text
+        client.get("/?lang=en")
+        assert "Sign in with Telegram" in client.get("/login").text
+
+    @pytest.mark.parametrize("error", ["link", "link_used", "link_expired", "widget", "session", "disabled"])
+    def test_every_error_has_its_own_message(self, client, error):
+        en = client.get(f"/login?error={error}&lang=en").text
+        zh = client.get(f"/login?error={error}&lang=zh-Hant").text
+        assert 'id="loginError"' in en and 'id="loginError"' in zh
+        assert t("en", f"login.error_{error}") in en.replace("&#x27;", "'")
+        assert t("zh-Hant", f"login.error_{error}") in zh
+
+    def test_unknown_error_and_markup_are_not_reflected(self, client):
+        html = client.get("/login", params={"error": "<script>alert(1)</script>", "notice": "x"}).text
+        assert "<script>alert" not in html and 'id="loginError"' not in html and 'id="loginNotice"' not in html
+
+    def test_signed_out_notice(self, client):
+        assert 'id="loginNotice"' in client.get("/login?notice=signed_out").text
+        assert "你已登出" in client.get("/login?notice=signed_out&lang=zh-Hant").text
+
+    def test_widget_shown_only_for_https_public_domain(self, ctx, client):
+        html = client.get("/login").text
+        assert 'data-telegram-login="liqguard_test_bot"' in html and 'id="widgetDivider"' in html
+        assert 'data-auth-url="https://liqguard.test/auth/telegram"' in html
+        assert client.get("/api/auth/config").json()["widget_enabled"] is True
+        for url in ("http://liqguard.test", "https://127.0.0.1:8765", "https://localhost", "http://127.0.0.1:8765",
+                    "https://app.localhost", None):
+            ctx.settings = replace(ctx.settings, public_url=url)
+            html = client.get("/login").text
+            assert "telegram-widget.js" not in html and 'id="widgetDivider"' not in html, url
+            assert client.get("/api/auth/config").json()["widget_enabled"] is False
+
+    def test_login_page_without_context(self):
+        with TestClient(create_app(), base_url="https://testserver") as c:
+            html = c.get("/login?error=disabled&lang=zh-Hant").text
+            assert "未啟用登入功能" in html and "telegram-widget.js" not in html and "t.me/" not in html
