@@ -7,6 +7,10 @@ python3 -m ruff check liqguard scripts --fix -q
 python3 -m pytest -q
 ```
 
+`test_dashboard_browser.py` drives the dashboard in Chromium and is skipped without Playwright.
+Install it once with `pip install -e ".[browser]" && playwright install chromium` so the zh-Hant
+page check runs locally too.
+
 ## Before every release
 
 Every release must pass the pre-release check:
@@ -36,4 +40,5 @@ runs every scenario under pytest as well.
 - Never commit secrets (`.env`, keys, databases). Mainnet keys are read-only; execution is testnet only.
 - Keep per-user isolation: a user can only see and act on their own data and buttons.
 - Business logic (`risk/`, `alerts/`, `models/`) stays free of Telegram/web framework imports.
-- Every user-facing string goes through `liqguard/i18n` with both `en` and `zh-Hant` entries.
+- Every user-facing string goes through `liqguard/i18n` with both `en` and `zh-Hant` entries,
+  including dashboard text (`L("key")` in `app.js`, `data-i18n` in `index.html`).

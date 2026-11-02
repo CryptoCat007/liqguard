@@ -15,16 +15,9 @@ const LEVEL_ICON = {
   triage: "🎯", sizing: "📏", correlation: "🧲",
 };
 const NEW_COUNTS = () => ({ warning: 0, critical: 0, emergency: 0, funding: 0, stop: 0, adl: 0, triage: 0, sizing: 0, correlation: 0 });
-const STOP_LABEL = {
-  ok: ["✅ Stop fires first", "safe"], partial: ["⚠️ Partial stop", "warning"], no_stop: ["🛑 No stop-loss", "critical"],
-  too_close: ["⚠️ Stop too close to liq", "warning"], beyond_liquidation: ["🛑 Stop beyond liq", "emergency"],
-};
+const STOP_TONE = { ok: "safe", partial: "warning", no_stop: "critical", too_close: "warning", beyond_liquidation: "emergency" };
 const FIX_ICON = { move_stop: "🎯", add_margin: "💰", reduce: "✂️" };
-const OPTION_META = {
-  add_margin: { icon: "💰", label: "Add margin" },
-  reduce: { icon: "✂️", label: "Reduce" },
-  hedge: { icon: "🛡", label: "Hedge" },
-};
+const OPTION_ICON = { add_margin: "💰", reduce: "✂️", hedge: "🛡" };
 const MODE = location.pathname.startsWith("/me") ? "me" : "demo";
 const API = MODE === "me" ? "/api/me" : "/api/demo";
 const CSRF_HEADERS = { "X-LiqGuard-CSRF": "1" };
@@ -35,6 +28,15 @@ function L(key, params) {
   const template = I18N.strings[key];
   if (template == null) return key;
   return template.replace(/\{(\w+)\}/g, (m, name) => (params && name in params ? String(params[name]) : m));
+}
+const hasL = (key) => key in I18N.strings;
+
+/** A demo API url; the public demo runs one simulation per language, picked by `lang`. */
+function api(path, params = {}) {
+  const q = new URLSearchParams(params);
+  if (MODE === "demo") q.set("lang", I18N.lang);
+  const s = q.toString();
+  return `${API}${path}${s ? `?${s}` : ""}`;
 }
 
 async function loadStrings(lang) {
@@ -47,6 +49,7 @@ async function loadStrings(lang) {
   for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = L(node.dataset.i18n);
   for (const node of document.querySelectorAll("[data-i18n-title]")) node.title = L(node.dataset.i18nTitle);
   for (const node of document.querySelectorAll("[data-i18n-aria]")) node.setAttribute("aria-label", L(node.dataset.i18nAria));
+  for (const node of document.querySelectorAll("[data-i18n-placeholder]")) node.placeholder = L(node.dataset.i18nPlaceholder);
   $("langBtn").lang = data.lang === "zh-Hant" ? "en" : "zh-Hant-TW";
 }
 
@@ -71,7 +74,7 @@ const S = {
   overview: null, counts: NEW_COUNTS(), lastSeverity: {},
   minutesPerStep: null, wallets: {}, fundingEvents: [], fundingSteps: {}, rescue: null,
   protection: {}, session: null, escalation: null, pending: {}, stopMuse: {},
-  insights: null, scenario: null, scenarios: [],
+  insights: null, scenario: null, scenarios: [], openSym: null, adviceBySym: {}, adviceCount: 0, auditCount: 0,
 };
 let chart = null;
 let ws = null;
@@ -116,6 +119,7 @@ function price(v) {
   return `$${v.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
 }
 function pct(v, dp = 1) { return v == null ? "—" : `${v.toFixed(dp)}%`; }
+function signedRate(f) { return `${f.rate_pct >= 0 ? "+" : ""}${f.rate_pct.toFixed(4)}%/${f.interval_hours}h`; }
 function clock(iso) {
   return new Date(iso).toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
@@ -133,15 +137,50 @@ function tierFor(distance, sym) {
   if (distance <= t.warning) return "warning";
   return "safe";
 }
-function venueLabel(v) { return v === "hyperliquid" ? "Hyperliquid" : v === "binance" ? "Binance" : v === "demo" ? "Demo" : v; }
+/** SAFE / WARNING / DANGER for first-time readers: critical and emergency are both "act now". */
+function statusOf(level) {
+  if (level === "critical" || level === "emergency") return "danger";
+  return level === "warning" ? "warning" : "safe";
+}
+const tierLabel = (t) => L(`tier_${t || "safe"}`);
+const sideLabel = (s) => (s ? L(`side_${s}`) : "");
+const modeLabel = (m) => L(`mode_${m}`);
+const stopLabel = (status) => (STOP_TONE[status] ? L(`stop_${status}`) : status);
+const optionLabel = (kind) => `${OPTION_ICON[kind] || "•"} ${L(`opt_${kind}`)}`;
+function venueLabel(v) {
+  if (v === "hyperliquid") return "Hyperliquid";
+  if (v === "binance") return "Binance";
+  return v === "demo" ? L("venue_demo") : v;
+}
+function channelName(c) {
+  if (c === "telegram") return "Telegram";
+  return c === "web" ? L("channel_web") : c;
+}
+function sourceName(s) { return hasL(`src_${s}`) ? L(`src_${s}`) : s; }
 function duration(minutes) {
   if (minutes == null) return "—";
   const m = Math.max(0, Math.round(minutes));
   return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`;
 }
-function distText(d, noLiq) { return noLiq || d == null ? "no liq" : pct(d); }
+function distText(d, noLiq) { return noLiq || d == null ? L("no_liq") : pct(d); }
 function empty(glyph, title, body) {
   return el("div", { class: "empty" }, el("div", { class: "glyph" }, glyph), el("b", {}, title), el("div", {}, body));
+}
+function sideTag(side) { return side ? el("span", { class: `side side-${side}` }, sideLabel(side)) : null; }
+function venueTag(venue) { return el("span", { class: `venue venue-${venue}` }, venueLabel(venue)); }
+function symTag(sym, tag = "b") { return el(tag, { class: "sym", style: { color: symbolColor(sym) } }, sym); }
+function setTag(id, text, cls = "") {
+  const tag = $(id);
+  if (!tag) return;
+  tag.textContent = text;
+  tag.className = `tag${cls ? ` ${cls}` : ""}`;
+  tag.hidden = !text;
+}
+function openFold(id, scroll = true) {
+  const fold = $(id);
+  if (!fold) return;
+  fold.open = true;
+  if (scroll) fold.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 /* ---------------- snapshot & events ---------------- */
@@ -175,6 +214,10 @@ function applySnapshot(snap) {
   S.summary = snap.summary || null;
   S.scenario = snap.scenario || null;
   S.scenarios = snap.scenarios || [];
+  S.adviceBySym = {};
+  S.adviceCount = 0;
+  S.auditCount = 0;
+  if (S.openSym && !S.order.includes(S.openSym)) S.openSym = null;
   renderScenarios();
   if (S.view !== "distance" && !S.order.includes(S.view)) S.view = "distance";
 
@@ -182,23 +225,23 @@ function applySnapshot(snap) {
   $("musePill").classList.toggle("live", snap.muse_mode === "live");
   renderChannels(snap.channels || []);
 
-  renderOverview(snap.overview);
-  renderSummary(snap.summary);
-
   $("timeline").replaceChildren();
   (snap.alerts || []).forEach((a) => addAlert(a, { quiet: true }));
   (snap.escalation_log || []).forEach((e) => addEscalation(e, { quiet: true }));
-  if (!snap.alerts?.length) $("timeline").append(empty("🔕", "No alerts yet", "Press Simulate market to walk prices toward liquidation."));
+  if (!snap.alerts?.length) $("timeline").append(empty("🔕", L("empty_alerts"), L("empty_alerts_hint")));
   updateCounts();
 
   $("advice").replaceChildren();
   (snap.advice || []).forEach((c) => addAdvice(c));
-  if (!snap.advice?.length) $("advice").append(empty("✦", "No advice yet", "Muse explains each alert with exact margin and size numbers."));
+  if (!snap.advice?.length) $("advice").append(empty("✦", L("empty_advice"), L("empty_advice_hint")));
 
   $("audit").replaceChildren();
   (snap.audit || []).forEach((e) => addAudit(e));
-  if (!snap.audit?.length) $("audit").append(empty("📋", "Audit log is empty", "Alerts, suggestions and Telegram action steps are recorded here."));
+  if (!snap.audit?.length) $("audit").append(empty("📋", L("empty_audit"), L("empty_audit_hint")));
+  updateHistoryCounts();
 
+  renderOverview(snap.overview);
+  renderSummary(snap.summary);
   renderProtection();
   renderInsights();
   renderWake();
@@ -225,6 +268,7 @@ function handle(msg) {
       break;
     case "advice":
       addAdvice(data);
+      renderHero();
       break;
     case "summary":
       if (data && data.step != null && S.step != null && data.step !== S.step) break;
@@ -277,10 +321,10 @@ function onTick(data) {
   setProgress();
 }
 
-/* ---------------- overview ---------------- */
+/* ---------------- overview: hero, KPIs, positions ---------------- */
 
 function renderChannels(channels) {
-  const names = channels.map((c) => (c === "web" ? "Web" : c === "telegram" ? "Telegram" : c));
+  const names = channels.map(channelName);
   $("channelsPill").textContent = L("channels", { names: names.length ? names.join(" + ") : L("channels_none") });
   $("channelsPill").classList.toggle("live", channels.includes("telegram"));
 }
@@ -290,173 +334,288 @@ function renderOverview(ov) {
   S.overview = ov;
   const sum = ov.summary, rm = ov.risk_metrics, ex = ov.exposure;
 
-  const level = rm.overall_risk_level;
-  const banner = $("banner");
-  banner.className = `banner card lvl-${level}`;
-  $("riskLevel").textContent = level.toUpperCase();
-
   $("kpiNotional").textContent = money(sum.total_notional_value);
-  $("kpiVenues").textContent = `${sum.total_positions} positions · ${(ov.venues || []).map(venueLabel).join(" + ")}`;
-  $("kpiMargin").textContent = money(sum.total_margin_used);
-  const eff = sum.total_margin_used ? sum.total_notional_value / sum.total_margin_used : 0;
-  $("kpiLeverage").textContent = `${eff.toFixed(1)}× effective leverage`;
+  $("kpiVenues").textContent = L("kpi_positions_venues", { n: sum.total_positions, venues: (ov.venues || []).map(venueLabel).join(" + ") });
   const pnl = $("kpiPnl");
   pnl.textContent = money(sum.total_unrealized_pnl, { signed: true });
   pnl.className = `kpi-value ${sum.total_unrealized_pnl >= 0 ? "pos" : "neg"}`;
-  $("kpiNet").textContent = money(ex.net_exposure, { signed: true });
-  $("kpiLongShort").textContent = `L ${money(ex.long_exposure)} · S ${money(ex.short_exposure)}`;
 
   const closest = [...ov.positions].sort((a, b) => a.distance_to_liquidation_pct - b.distance_to_liquidation_pct)[0];
   const minD = rm.min_distance_to_liquidation;
   const md = $("kpiMinDist");
   md.textContent = pct(minD);
   md.className = `kpi-value c-${tierFor(minD, closest?.symbol)}`;
-  $("kpiMinDistSym").textContent = closest ? `${closest.symbol} ${closest.side}` : "—";
+  $("kpiMinDistSym").textContent = closest ? `${closest.symbol} · ${sideLabel(closest.side)}` : "—";
   $("kpiSafety").textContent = money(rm.total_margin_needed_for_safety);
   $("kpiSafetySub").textContent = rm.total_margin_needed_for_safety > 0
-    ? `to restore a ${S.safetyTarget ?? 30}% buffer` : "all above safety target";
+    ? L("kpi_safety_sub", { target: S.safetyTarget ?? 30 }) : L("kpi_safety_ok");
 
-  const riskiestSym = S.summaryRiskiest || S.insights?.focus?.symbol || ov.riskiest_position?.symbol;
-  const rp = ov.positions.find((p) => p.symbol === riskiestSym);
-  if (rp) setRiskiest(rp.symbol, rp.side, rp.distance_to_liquidation_pct);
+  const eff = sum.total_margin_used ? sum.total_notional_value / sum.total_margin_used : 0;
+  $("exposureLine").textContent = L("exposure_line", {
+    margin: money(sum.total_margin_used), lev: eff.toFixed(1), net: money(ex.net_exposure, { signed: true }),
+    long: money(ex.long_exposure), short: money(ex.short_exposure),
+  });
 
   renderPositions(ov.positions);
+  renderHero();
 }
 
 function renderSummary(summary) {
   if (!summary) {
-    S.summaryRiskiest = null;
     $("headline").textContent = L("muse_summarizing");
     $("summaryTag").hidden = true;
+    renderHero();
     return;
   }
   $("headline").textContent = summary.headline;
   $("summaryTag").hidden = !summary.mock;
-  S.summaryRiskiest = summary.riskiest_symbol;
-  const why = summary.priority_reason && summary.priority_basis !== "closest to liquidation" && summary.priority_basis !== "only position"
-    ? summary.priority_reason : "";
-  $("riskiestWhy").textContent = why;
-  $("riskiestWhy").hidden = !why;
-  if (S.overview) {
-    const rp = S.overview.positions.find((p) => p.symbol === summary.riskiest_symbol);
-    if (rp) setRiskiest(rp.symbol, rp.side, rp.distance_to_liquidation_pct);
-  }
+  renderHero();
 }
 
-function setRiskiest(sym, side, dist) {
-  const chip = $("riskiest");
-  chip.replaceChildren(
-    el("span", { style: { color: symbolColor(sym) } }, sym), " ",
-    el("span", { class: `side side-${side}` }, side.toUpperCase()), " ",
-    el("span", { class: `c-${tierFor(dist, sym)}` }, pct(dist)),
-  );
+/** Triage #1 (the same position Telegram and the Muse summary name), else the closest one. */
+function riskiestPosition() {
+  const ov = S.overview;
+  if (!ov?.positions?.length) return null;
+  const sym = S.insights?.focus?.symbol || S.summary?.riskiest_symbol || ov.riskiest_position?.symbol;
+  return ov.positions.find((p) => p.symbol === sym) || ov.riskiest_position || ov.positions[0];
+}
+
+function renderHero() {
+  const ov = S.overview;
+  const hero = $("banner");
+  if (!ov) return;
+  const rp = riskiestPosition();
+  const counts = { warning: 0, danger: 0 };
+  for (const p of ov.positions) {
+    const st = statusOf(tierFor(p.distance_to_liquidation_pct, p.symbol));
+    if (st !== "safe") counts[st] += 1;
+  }
+  const status = counts.danger ? "danger" : counts.warning ? "warning" : "safe";
+  hero.className = `hero card status-${status}`;
+  $("riskLevel").textContent = L(`status_${status}`);
+  $("statusSub").textContent = counts.danger ? L("status_danger_sub", { n: counts.danger })
+    : counts.warning ? L("status_warning_sub", { n: counts.warning }) : L("status_safe_sub", { n: ov.positions.length });
+
+  if (!rp) {
+    $("riskiest").textContent = L("no_positions");
+    $("heroDist").textContent = "—";
+    $("riskiestWhy").hidden = true;
+    $("heroAction").textContent = L("action_none");
+    $("heroActionSub").textContent = "";
+    $("heroRescueBtn").hidden = true;
+    $("heroDetailBtn").hidden = true;
+    return;
+  }
+  const tier = tierFor(rp.distance_to_liquidation_pct, rp.symbol);
+  $("riskiest").replaceChildren(symTag(rp.symbol, "span"), " ", venueTag(rp.venue), " ", sideTag(rp.side),
+    el("span", { class: "lev" }, ` ${rp.leverage}×`));
+  const dist = $("heroDist");
+  dist.textContent = pct(rp.distance_to_liquidation_pct);
+  dist.className = `c-${tier}`;
+  const focus = S.insights?.focus;
+  const explain = focus && focus.symbol === rp.symbol && (S.insights?.triage || []).length > 1
+    && !["closest", "only_position"].includes(focus.basis_code);
+  $("riskiestWhy").textContent = explain ? focus.why : "";
+  $("riskiestWhy").hidden = !explain;
+
+  const advice = S.adviceBySym[rp.symbol];
+  const plan = advice?.rescue;
+  const best = plan?.options?.find((o) => o.kind === plan.recommended);
+  const margin = rp.margin_advice, reduce = rp.reduction_advice;
+  let title, sub;
+  if (status === "safe") {
+    title = L("action_none");
+    sub = margin?.margin_to_add_usd > 0
+      ? L("action_optional", { amount: money(margin.margin_to_add_usd), symbol: rp.symbol, target: margin.target_distance_pct })
+      : L("action_watching");
+  } else if (best && !plan.already_safe) {
+    title = L("action_cheapest", { title: best.title });
+    sub = L("action_cheapest_sub", { cost: money(best.costs.total_cost_usd, { dp: 2 }), dist: distText(best.new_distance_pct, best.no_liquidation) });
+  } else if (margin?.margin_to_add_usd > 0) {
+    title = L("action_add_margin", { amount: money(margin.margin_to_add_usd), symbol: rp.symbol });
+    sub = reduce?.reduce_size_pct
+      ? L("action_or_reduce", { pct: pct(reduce.reduce_size_pct), target: margin.target_distance_pct })
+      : L("action_target", { target: margin.target_distance_pct });
+  } else {
+    title = L("action_review", { symbol: rp.symbol });
+    sub = L("action_watching");
+  }
+  $("heroAction").textContent = title;
+  $("heroActionSub").textContent = sub;
+  $("heroRescueBtn").hidden = false;
+  $("heroDetailBtn").hidden = false;
+  $("heroRescueBtn").onclick = () => loadRescue(rp.symbol);
+  $("heroDetailBtn").onclick = () => openPosition(rp.symbol);
+}
+
+function positionOrder(positions) {
+  const triage = S.insights?.triage || [];
+  const rank = Object.fromEntries(triage.map((t) => [t.symbol, t.rank]));
+  return [...positions].sort((a, b) => (rank[a.symbol] ?? 99) - (rank[b.symbol] ?? 99)
+    || a.distance_to_liquidation_pct - b.distance_to_liquidation_pct);
+}
+
+function openPosition(sym) {
+  S.openSym = sym;
+  if (S.overview) renderPositions(S.overview.positions);
+  const row = document.querySelector(`[data-pos="${CSS.escape(sym)}"]`);
+  if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function togglePosition(sym) {
+  S.openSym = S.openSym === sym ? null : sym;
+  if (S.overview) renderPositions(S.overview.positions);
 }
 
 function renderPositions(positions) {
-  const bySym = Object.fromEntries(positions.map((p) => [p.symbol, p]));
-  const order = S.order.length ? S.order.filter((s) => bySym[s]) : positions.map((p) => p.symbol);
   const box = $("positions");
+  if (!positions.length) {
+    box.replaceChildren(empty("📭", L("no_positions"), L("no_positions_open")));
+    return;
+  }
   const scale = Math.max(35, S.safetyTarget ? S.safetyTarget + 5 : 35);
-
-  box.replaceChildren(...order.map((sym) => {
-    const p = bySym[sym];
+  box.replaceChildren(...positionOrder(positions).map((p) => {
+    const sym = p.symbol;
     const d = p.distance_to_liquidation_pct;
     const tier = tierFor(d, sym);
-    const color = COLORS[tier];
     const prev = S.lastSeverity[sym];
     S.lastSeverity[sym] = tier;
-    const th = tiersOf(sym);
-
-    const ticks = TIERS.map((t) => el("div", {
-      class: "gauge-tick", title: `${t} ${th[t]}%`,
-      style: { left: `${(Math.min(th[t], scale) / scale) * 100}%`, background: COLORS[t] },
-    }));
-    const labels = TIERS.map((t) => el("span", { style: { left: `${(Math.min(th[t], scale) / scale) * 100}%` } }, `${+th[t].toFixed(1)}`));
-
-    const node = el("div", {
-      class: `position${S.view === sym ? " selected" : ""}${prev && prev !== tier ? " flash" : ""}`,
-      style: { "--flash": alpha(color, 0.5) },
-      title: "Show price vs liquidation", onclick: () => setView(sym),
+    const open = S.openSym === sym;
+    const row = el("div", {
+      class: `prow tier-${tier}${open ? " open" : ""}${prev && prev !== tier ? " flash" : ""}`,
+      style: { "--flash": alpha(COLORS[tier], 0.5) }, role: "button", tabindex: "0", "aria-expanded": open ? "true" : "false",
+      "data-pos": sym, title: L("position_toggle"),
+      onclick: () => togglePosition(sym),
+      onkeydown: (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); togglePosition(sym); } },
     },
-      el("div", { class: "pos-top" },
-        el("span", { class: "pos-sym", style: { color: symbolColor(sym) } }, sym),
-        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
-        el("span", { class: `side side-${p.side}` }, p.side.toUpperCase()),
-        el("span", { class: "lev" }, `${p.leverage}×`),
-        el("span", { class: `pos-dist c-${tier}` }, pct(d)),
-      ),
-      el("div", { class: "gauge" },
-        el("div", { class: "gauge-fill", style: { width: `${Math.min(d / scale, 1) * 100}%`, background: `linear-gradient(90deg, ${alpha(color, 0.55)}, ${color})` } }),
-        ...ticks,
-      ),
-      el("div", { class: "gauge-labels" }, ...labels),
-      el("div", { class: "pos-meta" },
-        el("span", {}, `mark ${price(p.mark_price)}`),
-        el("span", {}, `liq ${price(p.true_liquidation?.price ?? p.liquidation_price)}`),
-        el("span", { class: p.unrealized_pnl >= 0 ? "pos" : "neg" }, money(p.unrealized_pnl, { signed: true })),
-      ),
-      liqDetail(p),
-      fundingDetail(p.funding),
-      protectionChips(S.protection[sym]),
-      insightChips(sym),
-      el("div", { class: "pos-actions" }, toolButtons(sym, p.venue, false)),
+      el("span", { class: "prow-sym" }, el("i", { class: "prow-dot" }), symTag(sym, "span")),
+      el("span", { class: "prow-venue" }, venueTag(p.venue)),
+      el("span", { class: "prow-side" }, sideTag(p.side), el("span", { class: "lev" }, ` ${p.leverage}×`)),
+      el("span", { class: "prow-dist" },
+        el("span", { class: "prow-bar" }, el("i", { style: { width: `${Math.min(d / scale, 1) * 100}%`, background: COLORS[tier] } })),
+        el("b", { class: `c-${tier}` }, pct(d))),
+      el("span", { class: `prow-risk risk-${tier}` }, tierLabel(tier)),
+      el("span", { class: "prow-chev", "aria-hidden": "true" }, "›"),
     );
-    return node;
+    return open ? el("div", { class: "pgroup open" }, row, positionDetail(p, tier, scale)) : el("div", { class: "pgroup" }, row);
   }));
+}
+
+function positionDetail(p, tier, scale) {
+  const sym = p.symbol;
+  const d = p.distance_to_liquidation_pct;
+  const color = COLORS[tier];
+  const th = tiersOf(sym);
+  const ticks = TIERS.map((t) => el("div", {
+    class: "gauge-tick", title: `${tierLabel(t)} ${th[t]}%`,
+    style: { left: `${(Math.min(th[t], scale) / scale) * 100}%`, background: COLORS[t] },
+  }));
+  const labels = TIERS.map((t) => el("span", { style: { left: `${(Math.min(th[t], scale) / scale) * 100}%` } }, `${+th[t].toFixed(1)}`));
+  return el("div", { class: "pdetail" },
+    el("div", { class: "gauge" },
+      el("div", { class: "gauge-fill", style: { width: `${Math.min(d / scale, 1) * 100}%`, background: `linear-gradient(90deg, ${alpha(color, 0.55)}, ${color})` } }),
+      ...ticks,
+    ),
+    el("div", { class: "gauge-labels" }, ...labels),
+    el("div", { class: "pos-meta" },
+      el("span", {}, L("mark_at", { price: price(p.mark_price) })),
+      el("span", {}, L("liq_at", { price: price(p.true_liquidation?.price ?? p.liquidation_price) })),
+      el("span", { class: p.unrealized_pnl >= 0 ? "pos" : "neg" }, L("pnl_at", { pnl: money(p.unrealized_pnl, { signed: true }) })),
+    ),
+    liqDetail(p),
+    fundingDetail(p.funding),
+    protectionChips(S.protection[sym]),
+    insightChips(sym),
+    el("div", { class: "pos-actions" },
+      el("button", { class: "mini-btn primary", type: "button", onclick: (ev) => { ev.stopPropagation(); loadRescue(sym); } }, L("btn_rescue_sim")),
+      el("button", { class: "mini-btn", type: "button", onclick: (ev) => { ev.stopPropagation(); showOnChart(sym); } }, L("btn_chart")),
+      toolButtons(sym, p.venue, false),
+    ),
+  );
+}
+
+function showOnChart(sym) {
+  openFold("foldChart");
+  setView(sym);
 }
 
 function liqDetail(p) {
   const t = p.true_liquidation;
   if (!t) return null;
   const parts = t.margin_mode === "cross"
-    ? [`cross wallet ${money(t.wallet_balance)}`, `other PnL ${money(t.other_upnl, { signed: true })}`, `other maint. ${money(t.other_maintenance)}`]
-    : [`isolated margin ${money(t.wallet_balance)}`];
+    ? [L("liq_cross_wallet", { amount: money(t.wallet_balance) }), L("liq_other_pnl", { amount: money(t.other_upnl, { signed: true }) }),
+      L("liq_other_maint", { amount: money(t.other_maintenance) })]
+    : [L("liq_isolated", { amount: money(t.wallet_balance) })];
   const ex = t.exchange_price, diff = ex && t.price ? Math.abs(ex - t.price) / ex : 0;
-  if (diff > 0.0005) parts.push(`exchange ${price(ex)}`);
+  if (diff > 0.0005) parts.push(L("liq_exchange", { price: price(ex) }));
   return el("div", { class: "pos-detail" },
-    el("span", { class: `mode mode-${t.margin_mode}` }, t.margin_mode.toUpperCase()),
-    el("span", {}, `true liq ${t.price ? price(t.price) : "none"} · ${parts.join(" · ")}`),
+    el("span", { class: `mode mode-${t.margin_mode}` }, modeLabel(t.margin_mode)),
+    el("span", {}, `${L("true_liq", { price: t.price ? price(t.price) : L("none") })} · ${parts.join(" · ")}`),
   );
+}
+
+function driftText(f) {
+  return (f.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ");
 }
 
 function fundingDetail(f) {
   if (!f) return null;
   const pays = f.next_payment_usd > 0;
-  const drift = (f.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ");
   return el("div", { class: "pos-detail funding-line" },
-    el("span", { class: "mode mode-funding" }, `${f.rate_pct >= 0 ? "+" : ""}${f.rate_pct.toFixed(4)}%/${f.interval_hours}h`),
-    el("span", {}, `${pays ? "pays" : "receives"} ${money(Math.abs(f.next_payment_usd), { dp: 2 })} in ${duration(f.minutes_to_settlement)} · drift ${drift} `,
-      el("i", {}, f.label)),
+    el("span", { class: "mode mode-funding" }, signedRate(f)),
+    el("span", {}, L(pays ? "funding_pays_in" : "funding_receives_in", { amount: money(Math.abs(f.next_payment_usd), { dp: 2 }), when: duration(f.minutes_to_settlement) }),
+      ` · ${L("funding_drift", { drift: driftText(f) })} `, el("i", {}, f.label)),
   );
 }
 
-/* ---------------- timeline / advice / audit ---------------- */
+/* ---------------- alert timeline ---------------- */
 
 function clearEmpty(box) { const e = box.querySelector(".empty"); if (e) e.remove(); }
 
+function channelChip(c) {
+  return el("span", { class: `chip chip-${c}` }, `${channelName(c)} ✓`);
+}
+
+function rescueButton(sym, label) {
+  return el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(sym) }, label || L("btn_rescue"));
+}
+
+function tlHead(label, cls, a) {
+  return el("div", { class: "tl-head" },
+    el("span", { class: `lvl ${cls}` }, label),
+    a.symbol ? el("span", { class: "tl-sym", style: { color: symbolColor(a.symbol) } }, a.symbol) : null,
+    sideTag(a.side),
+    el("span", { class: "tl-time" }, clock(a.timestamp)),
+  );
+}
+
+function trackPending(a, severity) {
+  if (a.ack_id && !S.pending[a.ack_id] && S.escalation?.enabled !== false) {
+    S.pending[a.ack_id] = { id: a.ack_id, symbol: a.symbol, severity, reminders_sent: 0, max_reminders: S.escalation?.max_reminders ?? 5, distance_pct: a.distance_pct };
+    renderWake();
+  }
+}
+
+function flashEmergency() {
+  document.body.classList.add("flash-emergency");
+  setTimeout(() => document.body.classList.remove("flash-emergency"), 1400);
+}
+
 function addFundingAlert(a, opts) {
   const f = a.funding;
-  const box = $("timeline");
-  box.prepend(el("li", { class: "tl-item tl-funding" },
+  $("timeline").prepend(el("li", { class: "tl-item tl-funding" },
     el("span", { class: "tl-node" }),
-    el("div", { class: "tl-head" },
-      el("span", { class: "lvl lvl-funding-b" }, "PRE-FUNDING"),
-      el("span", { class: "tl-sym", style: { color: symbolColor(a.symbol) } }, a.symbol),
-      el("span", { class: `side side-${a.side}` }, a.side.toUpperCase()),
-      el("span", { class: "tl-time" }, clock(a.timestamp)),
-    ),
+    tlHead(L("lvl_prefunding"), "lvl-funding-b", a),
     el("div", { class: "tl-body" },
-      "Pays ", el("b", {}, money(f.payment_usd, { dp: 2 })), ` in ${duration(f.minutes_to_settlement)} (${f.rate_pct.toFixed(4)}%/${f.interval_hours}h) — distance `,
+      L("prefunding_pays", { amount: money(f.payment_usd, { dp: 2 }), when: duration(f.minutes_to_settlement), rate: `${f.rate_pct.toFixed(4)}%/${f.interval_hours}h` }), " ",
       el("b", {}, pct(f.distance_before_pct)), " → ", el("b", {}, pct(f.distance_after_pct)),
-      ` · ${f.buffer_share_pct.toFixed(1)}% of the margin buffer`,
+      ` · ${L("prefunding_buffer", { share: pct(f.buffer_share_pct) })}`,
     ),
-    el("div", { class: "chips" },
-      ...(a.channels || []).map((c) => el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c)),
-      el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(a.symbol) }, "🛟 Rescue"),
-    ),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip), rescueButton(a.symbol)),
   ));
   if (!opts.quiet) {
-    toast("⏳", `PRE-FUNDING · ${a.symbol}`, `Pays ${money(f.payment_usd, { dp: 2 })} in ${duration(f.minutes_to_settlement)} → ${pct(f.distance_after_pct)} from liquidation`, COLORS.funding);
+    toast("⏳", `${L("lvl_prefunding")} · ${a.symbol}`,
+      L("prefunding_toast", { amount: money(f.payment_usd, { dp: 2 }), when: duration(f.minutes_to_settlement), dist: pct(f.distance_after_pct) }), COLORS.funding);
   }
 }
 
@@ -471,42 +630,31 @@ function addAlert(a, opts = {}) {
   if (a.level === "triage") { addTriageAlert(a, opts); return; }
   if (a.level === "sizing") { addSizingAlert(a, opts); return; }
   if (a.level === "correlation") { addCorrelationAlert(a, opts); return; }
-  if (a.ack_id && !opts.quiet && !S.pending[a.ack_id] && S.escalation?.enabled !== false) {
-    S.pending[a.ack_id] = { id: a.ack_id, symbol: a.symbol, severity: a.level, reminders_sent: 0, max_reminders: S.escalation?.max_reminders ?? 5, distance_pct: a.distance_pct };
-    renderWake();
-  }
-  const chips = (a.channels || []).map((c) => el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c));
+  if (!opts.quiet) trackPending(a, a.level);
+  const widened = a.base_threshold_pct != null && Math.abs(a.base_threshold_pct - a.threshold_pct) > 0.01;
   box.prepend(el("li", { class: `tl-item tl-${a.level}` },
     el("span", { class: "tl-node" }),
-    el("div", { class: "tl-head" },
-      el("span", { class: `lvl lvl-${a.level}-b` }, a.level.toUpperCase()),
-      el("span", { class: "tl-sym", style: { color: symbolColor(a.symbol) } }, a.symbol),
-      el("span", { class: `side side-${a.side}` }, a.side.toUpperCase()),
-      el("span", { class: "tl-time" }, clock(a.timestamp)),
-    ),
+    tlHead(tierLabel(a.level), `lvl-${a.level}-b`, a),
     el("div", { class: "tl-body" },
-      "Crossed ", el("b", {}, pct(a.threshold_pct, 2)),
-      a.base_threshold_pct != null && Math.abs(a.base_threshold_pct - a.threshold_pct) > 0.01 ? el("span", { class: "faint" }, ` (base ${a.base_threshold_pct}%)`) : "",
-      " — now ", el("b", {}, pct(a.distance_pct)),
-      ` from liquidation · mark ${price(a.mark_price)} vs liq ${price(a.liquidation_price)}`,
-      a.wicks?.max_wicks_away != null ? el("div", { class: "tl-sub" }, `🕯 ${a.wicks.max_wicks_away.toFixed(1)} max ${a.wicks.worst_interval} wicks from liquidation`) : null,
-      a.adaptive_reasons?.length ? el("div", { class: "tl-sub" }, `Tiers widened: ${a.adaptive_reasons.join(" · ")}`) : null,
+      L("alert_crossed", { tier: pct(a.threshold_pct, 2) }),
+      widened ? el("span", { class: "faint" }, ` ${L("alert_base", { base: `${a.base_threshold_pct}%` })}`) : "",
+      " · ", L("alert_now", { dist: pct(a.distance_pct) }),
+      ` · ${L("alert_prices", { mark: price(a.mark_price), liq: price(a.liquidation_price) })}`,
+      a.wicks?.max_wicks_away != null ? el("div", { class: "tl-sub" }, `🕯 ${L("alert_wicks", { n: a.wicks.max_wicks_away.toFixed(1), interval: a.wicks.worst_interval })}`) : null,
+      a.adaptive_reasons?.length ? el("div", { class: "tl-sub" }, L("alert_widened", { reasons: a.adaptive_reasons.join(" · ") })) : null,
       a.liq_comparison?.gap_pct >= 1 ? el("div", { class: "tl-sub" },
-        `Correlated liq ${price(a.liq_comparison.correlated_price)} is `, el("b", { class: "c-critical" }, `${a.liq_comparison.gap_pct.toFixed(1)} pts closer`),
-        ` than the platform line`) : null,
+        L("alert_corr_liq", { price: price(a.liq_comparison.correlated_price) }), " ",
+        el("b", { class: "c-critical" }, L("pts_closer", { n: a.liq_comparison.gap_pct.toFixed(1) }))) : null,
     ),
-    el("div", { class: "chips" }, priorityChip(a.priority), a.consolidated ? el("span", { class: "chip faint" }, "in one triage alert") : null,
-      ...chips, a.ack_id ? ackButton(a.ack_id, a.symbol) : null),
+    el("div", { class: "chips" }, priorityChip(a.priority), a.consolidated ? el("span", { class: "chip faint" }, L("in_triage_alert")) : null,
+      ...(a.channels || []).map(channelChip), a.ack_id ? ackButton(a.ack_id, a.symbol) : null),
   ));
   if (a.consolidated) opts = { ...opts, quiet: true };
   if (!opts.quiet) {
-    const sent = (a.channels || []).map((c) => (c === "web" ? "Web" : c === "telegram" ? "Telegram" : c)).join(" + ");
-    toast(LEVEL_ICON[a.level], `${a.level.toUpperCase()} · ${a.symbol}`,
-      `${pct(a.distance_pct)} from liquidation — sent to ${sent || "dashboard"}`, COLORS[a.level], `tier:${a.symbol}`);
-    if (a.level === "emergency") {
-      document.body.classList.add("flash-emergency");
-      setTimeout(() => document.body.classList.remove("flash-emergency"), 1400);
-    }
+    const sent = (a.channels || []).map(channelName).join(" + ");
+    toast(LEVEL_ICON[a.level], `${tierLabel(a.level)} · ${a.symbol}`,
+      L("alert_toast", { dist: pct(a.distance_pct), sent: sent || L("channel_web") }), COLORS[a.level], `tier:${a.symbol}`);
+    if (a.level === "emergency") flashEmergency();
   }
 }
 
@@ -522,30 +670,20 @@ function updateCounts() {
   $("cntAdl").textContent = S.counts.adl;
 }
 
-function tlHead(label, cls, a) {
-  return el("div", { class: "tl-head" },
-    el("span", { class: `lvl ${cls}` }, label),
-    el("span", { class: "tl-sym", style: { color: symbolColor(a.symbol) } }, a.symbol),
-    a.side ? el("span", { class: `side side-${a.side}` }, a.side.toUpperCase()) : null,
-    el("span", { class: "tl-time" }, clock(a.timestamp)),
-  );
-}
-
 function addStopAlert(a, opts) {
   const s = a.stop, m = a.explanation;
   S.stopMuse[a.symbol] = m;
-  const [label] = STOP_LABEL[s.status] || [s.status];
+  const label = stopLabel(s.status);
   $("timeline").prepend(el("li", { class: "tl-item tl-stop" },
     el("span", { class: "tl-node" }),
-    tlHead("STOP-LOSS", "lvl-stop-b", a),
+    tlHead(L("lvl_stop"), "lvl-stop-b", a),
     el("div", { class: "tl-body" },
-      el("b", {}, label), s.stop_price ? ` · stop ${price(s.stop_price)}` : "", ` · liq ${price(s.liquidation_price)}`,
+      el("b", {}, label), s.stop_price ? ` · ${L("stop_at", { price: price(s.stop_price) })}` : "", ` · ${L("liq_at", { price: price(s.liquidation_price) })}`,
       m ? el("div", { class: "tl-muse" }, el("span", { class: "muse-glyph" }, "✦ "), m.explanation) : null,
     ),
-    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip),
-      el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(a.symbol) }, "🛟 Rescue")),
+    el("div", { class: "chips" }, ...(a.channels || []).map(channelChip), rescueButton(a.symbol)),
   ));
-  if (!opts.quiet) toast("🛑", `STOP-LOSS · ${a.symbol}`, m?.headline || label, COLORS.emergency);
+  if (!opts.quiet) toast("🛑", `${L("lvl_stop")} · ${a.symbol}`, m?.headline || label, COLORS.emergency);
   renderStops();
 }
 
@@ -554,50 +692,39 @@ function addAdlAlert(a, opts) {
   $("timeline").prepend(el("li", { class: "tl-item tl-adl" },
     el("span", { class: "tl-node" }),
     tlHead(`ADL ${adl.lights}/5`, "lvl-adl-b", a),
-    el("div", { class: "tl-body" }, adlLights(adl.lights), " ",
-      `Profitable (${money(a.unrealized_pnl, { signed: true })}) and near the front of the auto-deleverage queue — could be closed if a counterparty is liquidated past the insurance fund.`),
+    el("div", { class: "tl-body" }, adlLights(adl.lights), " ", L("adl_alert_body", { pnl: money(a.unrealized_pnl, { signed: true }) })),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
   ));
-  if (!opts.quiet) toast("⚡", `ADL ${adl.lights}/5 · ${a.symbol}`, `In profit ${money(a.unrealized_pnl, { signed: true })} — consider taking some off`, COLORS.funding);
-}
-
-function channelChip(c) {
-  return el("span", { class: `chip chip-${c}` }, c === "telegram" ? "Telegram ✓" : c === "web" ? "Web ✓" : c);
+  if (!opts.quiet) toast("⚡", `ADL ${adl.lights}/5 · ${a.symbol}`, L("adl_toast", { pnl: money(a.unrealized_pnl, { signed: true }) }), COLORS.funding);
 }
 
 function priorityChip(pr) {
   if (!pr || (pr.of || 0) < 2) return null;
   return pr.label
     ? el("span", { class: "chip chip-first", title: pr.reason }, `🎯 ${pr.label}`)
-    : el("span", { class: "chip", title: pr.reason }, `priority #${pr.rank} of ${pr.of}`);
+    : el("span", { class: "chip", title: pr.reason }, L("priority_rank", { rank: pr.rank, of: pr.of }));
 }
 
 function addTriageAlert(a, opts) {
   const items = a.items || [];
   $("timeline").prepend(el("li", { class: `tl-item tl-triage tl-${a.severity || "warning"}` },
     el("span", { class: "tl-node" }),
-    tlHead(`${items.length} AT RISK · HANDLE IN ORDER`, `lvl-triage-b`, a),
+    tlHead(L("lvl_triage", { n: items.length }), "lvl-triage-b", a),
     el("ol", { class: "tl-order" }, ...items.map((t) => el("li", { class: t.label ? "first" : "" },
       el("b", { style: { color: symbolColor(t.symbol) } }, t.symbol), " ",
-      el("span", { class: `c-${t.severity || "safe"}` }, `${(t.severity || "ok").toUpperCase()} ${pct(t.distance_pct)}`),
+      el("span", { class: `c-${t.severity || "safe"}` }, `${tierLabel(t.severity)} ${pct(t.distance_pct)}`),
       el("span", { class: "faint" }, ` · ${minutesText(t.minutes_to_liq)}`),
       t.label ? el("span", { class: "first-tag" }, ` 🎯 ${t.label}`) : null,
     ))),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip),
       a.ack_id ? ackButton(a.ack_id, a.symbol) : null,
-      el("button", { class: "mini-btn", type: "button", onclick: () => loadRescue(a.symbol) }, `🛟 Rescue ${a.symbol}`)),
+      rescueButton(a.symbol, L("btn_rescue_sym", { symbol: a.symbol }))),
   ));
-  if (a.ack_id && !opts.quiet && !S.pending[a.ack_id] && S.escalation?.enabled !== false) {
-    S.pending[a.ack_id] = { id: a.ack_id, symbol: a.symbol, severity: a.severity, reminders_sent: 0, max_reminders: S.escalation?.max_reminders ?? 5, distance_pct: a.distance_pct };
-    renderWake();
-  }
+  if (!opts.quiet) trackPending(a, a.severity);
   if (!opts.quiet) {
     const [title, body] = triageToastText(items.map((t) => t.symbol), a.focus);
     toast("🎯", title, body, COLORS[a.severity] || COLORS.critical, "triage");
-    if (a.severity === "emergency") {
-      document.body.classList.add("flash-emergency");
-      setTimeout(() => document.body.classList.remove("flash-emergency"), 1400);
-    }
+    if (a.severity === "emergency") flashEmergency();
   }
 }
 
@@ -605,14 +732,17 @@ function addSizingAlert(a, opts) {
   const checks = a.sizing || [];
   $("timeline").prepend(el("li", { class: "tl-item tl-sizing" },
     el("span", { class: "tl-node" }),
-    tlHead(`OVERSIZED · ${checks.length}`, "lvl-sizing-b", a),
+    tlHead(L("lvl_sizing", { n: checks.length }), "lvl-sizing-b", a),
     el("div", { class: "tl-body" },
       checks.map((c) => el("div", {},
-        el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol), ` loses ${pct(c.risk_pct)} of equity at its ${c.exit_kind} → suggest `,
-        el("b", {}, `${fmtSize(c.suggested_size)}`), el("span", { class: "faint" }, ` (now ${fmtSize(c.size)})`)))),
+        el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol), " ",
+        L("sizing_loses", { risk: pct(c.risk_pct), exit: c.exit_label || c.exit_kind }), " ",
+        el("b", {}, fmtSize(c.suggested_size)), el("span", { class: "faint" }, ` ${L("sizing_now", { size: fmtSize(c.size) })}`)))),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
   ));
-  if (!opts.quiet) toast("📏", "Position size too large", `${checks.map((c) => c.symbol).join(", ")}: over your ${checks[0]?.max_risk_pct}% risk per trade`, COLORS.warning, "sizing");
+  if (!opts.quiet) {
+    toast("📏", L("sizing_toast_title"), L("sizing_toast", { symbols: checks.map((c) => c.symbol).join(", "), limit: checks[0]?.max_risk_pct }), COLORS.warning, "sizing");
+  }
 }
 
 function addCorrelationAlert(a, opts) {
@@ -620,25 +750,25 @@ function addCorrelationAlert(a, opts) {
   const move = st?.liq_move_down_pct;
   $("timeline").prepend(el("li", { class: `tl-item tl-corr tl-${a.severity || "warning"}` },
     el("span", { class: "tl-node" }),
-    tlHead(`STRESS ${a.severity ? a.severity.toUpperCase() : "· CONCENTRATION"}`, "lvl-corr-b", a),
+    tlHead(a.severity ? L("lvl_stress", { tier: tierLabel(a.severity) }) : L("lvl_concentration"), "lvl-corr-b", a),
     el("div", { class: "tl-body" },
-      move != null ? ["A ", el("b", { class: `c-${a.severity || "warning"}` }, pct(move)), ` correlated market drop liquidates the ${venueLabel(st.venue)} account`, el("span", { class: "faint" }, " (at alert time)")] : "",
+      move != null ? [L("stress_drop_liquidates", { move: pct(move), venue: venueLabel(st.venue) }), el("span", { class: "faint" }, ` ${L("at_alert_time")}`)] : "",
       conc.flagged ? el("div", { class: "tl-sub" }, `🧲 ${conc.message}`) : null,
     ),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip)),
   ));
   if (!opts.quiet) {
-    toast("🧲", "Portfolio stress test", stressToastText() || conc.message, COLORS[a.severity] || COLORS.warning, "stress");
+    toast("🧲", L("pstress_title"), stressToastText() || conc.message, COLORS[a.severity] || COLORS.warning, "stress");
   }
 }
 
 /* ---------------- portfolio: triage / stress / liq comparison / sizing ---------------- */
 
 function minutesText(m) {
-  if (m == null) return "no liq";
-  if (m < 120) return `~${Math.round(m)} min at typical vol`;
-  if (m < 72 * 60) return `~${(m / 60).toFixed(1)} h at typical vol`;
-  return `~${Math.round(m / 1440)} d at typical vol`;
+  if (m == null) return L("no_liq");
+  if (m < 120) return L("typical_min", { n: Math.round(m) });
+  if (m < 72 * 60) return L("typical_h", { n: (m / 60).toFixed(1) });
+  return L("typical_d", { n: Math.round(m / 1440) });
 }
 function fmtSize(v) {
   if (v == null) return "—";
@@ -651,11 +781,11 @@ function insightChips(sym) {
   const chips = [];
   const t = (ins.triage || []).find((x) => x.symbol === sym);
   if (t?.label) chips.push(el("span", { class: "pchip chip-first", title: t.reason }, `🎯 ${t.label}`));
-  else if (t?.at_risk && t.of > 1) chips.push(el("span", { class: "pchip", title: t.reason }, `#${t.rank} of ${t.of}`));
+  else if (t?.at_risk && t.of > 1) chips.push(el("span", { class: "pchip", title: t.reason }, L("rank_of", { rank: t.rank, of: t.of })));
   const c = (ins.comparisons || []).find((x) => x.symbol === sym);
-  if (c?.gap_pct >= 1) chips.push(el("span", { class: "pchip c-critical", title: "LiqGuard correlated liquidation vs the platform's line" }, `🧲 real liq ${pct(c.correlated_distance_pct)} away`));
+  if (c?.gap_pct >= 1) chips.push(el("span", { class: "pchip c-critical", title: L("real_liq_title") }, `🧲 ${L("real_liq_away", { dist: pct(c.correlated_distance_pct) })}`));
   const z = (ins.sizing || []).find((x) => x.symbol === sym);
-  if (z?.status === "oversized") chips.push(el("span", { class: "pchip c-warning", title: (z.reasons || []).join(" · ") }, `📏 size → ${fmtSize(z.suggested_size)}`));
+  if (z?.status === "oversized") chips.push(el("span", { class: "pchip c-warning", title: (z.reasons || []).join(" · ") }, `📏 ${L("size_to", { size: fmtSize(z.suggested_size) })}`));
   return chips.length ? el("div", { class: "pchips" }, ...chips) : null;
 }
 
@@ -673,9 +803,9 @@ function renderConcentration() {
   box.hidden = !conc?.flagged;
   if (!conc?.flagged) return;
   const move = accountLiqMove();
-  $("concTitle").textContent = `${pct(conc.dominant_share_pct, 0)} ${conc.dominant_side} across ${conc.dominant_count} correlated coins`;
-  $("concSub").textContent = `${conc.symbols.join(" · ")} move together (avg correlation ${conc.avg_correlation.toFixed(2)}).`
-    + (move ? ` A ${pct(move.pct)} market ${move.dir} liquidates the ${venueLabel(move.venue)} account.` : "");
+  $("concTitle").textContent = L("conc_headline", { share: pct(conc.dominant_share_pct, 0), side: sideLabel(conc.dominant_side), n: conc.dominant_count });
+  $("concSub").textContent = L("conc_body", { symbols: conc.symbols.join(" · "), corr: conc.avg_correlation.toFixed(2) })
+    + (move ? ` ${L(move.down ? "move_drop_liquidates" : "move_rise_liquidates", { move: pct(move.pct), venue: venueLabel(move.venue) })}` : "");
   $("concBets").textContent = conc.effective_bets == null ? "—" : conc.effective_bets.toFixed(1);
 }
 
@@ -683,40 +813,42 @@ function renderTriage() {
   const box = $("triage");
   const items = S.insights?.triage || [];
   const atRisk = items.filter((t) => t.at_risk).length;
-  $("triageTag").textContent = atRisk ? `${atRisk} AT RISK` : "ALL CLEAR";
-  $("triageTag").className = `tag${atRisk ? " tag-hot" : " tag-ro"}`;
+  setTag("triageTag", atRisk ? L("tag_at_risk", { n: atRisk }) : L("tag_all_clear"), atRisk ? "tag-hot" : "tag-ro");
   const focus = S.insights?.focus;
   const why = focus && items.length > 1 ? focus.why : "";
   $("triageWhy").hidden = !why;
-  $("triageWhy").replaceChildren(...(why ? [el("b", {}, focus.label ? "🎯 Why first: " : "Ranked #1: "), why] : []));
-  if (!items.length) { box.replaceChildren(empty("🎯", "No positions", "Positions are ranked here when you have more than one.")); return; }
+  $("triageWhy").replaceChildren(...(why ? [el("b", {}, focus.label ? L("why_first") : L("ranked_first")), " ", why] : []));
+  if (!items.length) { box.replaceChildren(empty("🎯", L("no_positions"), L("triage_empty_hint"))); return; }
   const maxScore = Math.max(...items.map((t) => t.score), 1);
   box.replaceChildren(...items.map((t) => el("li", { class: `tri${t.label ? " first" : ""}${t.at_risk ? "" : " calm"}` },
     el("div", { class: "tri-rank" }, t.rank),
     el("div", { class: "tri-main" },
       el("div", { class: "tri-head" },
         el("b", { style: { color: symbolColor(t.symbol) } }, t.symbol),
-        el("span", { class: `side side-${t.side}` }, t.side.toUpperCase()),
-        el("span", { class: `tri-sev c-${t.severity || "safe"}` }, t.severity ? t.severity.toUpperCase() : "OK"),
+        sideTag(t.side),
+        el("span", { class: `tri-sev c-${t.severity || "safe"}` }, tierLabel(t.severity)),
         t.label ? el("span", { class: "first-tag" }, `🎯 ${t.label}`) : null,
       ),
       el("div", { class: "tri-bar" }, el("i", { style: { width: `${(t.score / maxScore) * 100}%`, background: COLORS[t.severity || "safe"] } })),
       el("div", { class: "tri-meta" },
-        el("span", {}, `${pct(t.distance_pct)} from liq`),
+        el("span", {}, L("from_liq", { dist: pct(t.distance_pct) })),
         el("span", {}, minutesText(t.minutes_to_liq)),
-        el("span", { title: `σ5m ${pct(t.sigma_5m_pct, 2)}${t.sigma_source === "default" ? " (default)" : " (from 5m wicks)"}` },
-          t.typical_moves == null ? "no liq" : `${t.typical_moves.toFixed(1)} typical 5m moves`),
-        el("span", {}, `${money(t.notional)} notional`),
+        el("span", { title: `σ5m ${pct(t.sigma_5m_pct, 2)} ${L(t.sigma_source === "default" ? "sigma_default" : "sigma_wicks")}` },
+          t.typical_moves == null ? L("no_liq") : L("typical_moves", { n: t.typical_moves.toFixed(1) })),
+        el("span", {}, L("notional_of", { amount: money(t.notional) })),
       ),
     ),
-    el("div", { class: "tri-score", title: "Urgency score 0–100" }, t.score.toFixed(0)),
+    el("div", { class: "tri-score", title: L("score_title") }, t.score.toFixed(0)),
   )));
 }
 
 function renderPortfolioStress() {
   const box = $("pstress");
   const accounts = S.insights?.stress || [];
-  if (!accounts.length) { box.replaceChildren(empty("📉", "No cross-margin account", "The stress test covers positions that share one cross wallet.")); return; }
+  const worst = accountLiqMove();
+  setTag("pstressTag", worst?.down ? L("tag_liq_move", { move: pct(worst.pct) }) : accounts.length ? L("tag_no_liq_95") : "",
+    worst?.down && worst.pct <= 10 ? "tag-hot" : "tag-ro");
+  if (!accounts.length) { box.replaceChildren(empty("📉", L("pstress_empty"), L("pstress_empty_hint"))); return; }
   box.replaceChildren(...accounts.map((st) => {
     const down = st.shocks.filter((x) => x.market_move_pct < 0).sort((a, b) => b.market_move_pct - a.market_move_pct);
     const up = st.shocks.filter((x) => x.market_move_pct > 0);
@@ -724,18 +856,19 @@ function renderPortfolioStress() {
     const band = move == null ? "safe" : move <= 2.5 ? "emergency" : move <= 5 ? "critical" : move <= 10 ? "warning" : "safe";
     const cell = (x) => el("div", { class: `ps-cell${x.liquidated ? " dead" : ""}` },
       el("div", { class: "ps-move" }, `${x.market_move_pct > 0 ? "+" : ""}${x.market_move_pct}%`),
-      el("div", { class: "ps-out" }, x.liquidated ? "LIQUIDATED" : `${money(x.margin_left)} left`),
+      el("div", { class: "ps-out" }, x.liquidated ? L("liquidated") : L("margin_left", { amount: money(x.margin_left) })),
     );
+    const notes = [L("by_beta")];
+    if (uni != null) notes.push(L("if_equal", { move: pct(uni) }));
+    if (st.liq_move_up_pct != null) notes.push(L("on_upside", { move: `+${pct(st.liq_move_up_pct)}` }));
     return el("div", { class: "ps-acct" },
       el("div", { class: "ps-head" },
-        el("span", { class: `venue venue-${st.venue}` }, venueLabel(st.venue)),
-        el("span", { class: "faint" }, `${st.symbols.length} cross positions · equity ${money(st.equity)} · maint. ${money(st.maintenance)}`),
+        venueTag(st.venue),
+        el("span", { class: "faint" }, L("ps_account", { n: st.symbols.length, equity: money(st.equity), maint: money(st.maintenance) })),
       ),
       el("div", { class: `ps-big c-${band}` },
         el("div", { class: "ps-n" }, move == null ? "> 95%" : `−${pct(move)}`),
-        el("div", {}, el("b", {}, "market move liquidates the account"),
-          el("div", { class: "faint" }, `coins moving by their beta${uni != null ? ` · ${pct(uni)} if all move equally` : ""}`
-            + (st.liq_move_up_pct != null ? ` · +${pct(st.liq_move_up_pct)} on the upside` : ""))),
+        el("div", {}, el("b", {}, L("ps_liquidates")), el("div", { class: "faint" }, notes.join(" · "))),
       ),
       el("div", { class: "ps-grid" }, ...down.map(cell)),
       up.length ? el("div", { class: "ps-grid ps-up" }, ...up.map(cell)) : null,
@@ -746,21 +879,24 @@ function renderPortfolioStress() {
 function renderLiqComparison() {
   const box = $("liqcmp");
   const comps = (S.insights?.comparisons || []).filter((c) => c.platform_price != null || c.correlated_price != null);
-  if (!comps.length) { box.replaceChildren(empty("📐", "No liquidation prices", "Positions without a liquidation price have nothing to compare.")); return; }
+  const hotCount = comps.filter((c) => c.gap_pct != null && c.gap_pct >= 1).length;
+  setTag("liqcmpTag", comps.length ? (hotCount ? L("tag_closer", { n: hotCount }) : L("tag_matches")) : "", hotCount ? "tag-hot" : "tag-ro");
+  if (!comps.length) { box.replaceChildren(empty("📐", L("liqcmp_empty"), L("liqcmp_empty_hint"))); return; }
   const scale = Math.max(...comps.map((c) => c.platform_distance_pct || 0), 10);
   box.replaceChildren(...comps.map((c) => {
     const gap = c.gap_pct;
     const hot = gap != null && gap >= 1;
     const bar = (d, cls) => el("div", { class: `lc-bar ${cls}` }, el("i", { style: { width: `${Math.min((d || 0) / scale, 1) * 100}%` } }), el("span", {}, pct(d)));
+    const move = c.correlated_market_move_pct;
     return el("div", { class: `lc-row${hot ? " hot" : ""}` },
       el("div", { class: "lc-head" },
         el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol),
-        el("span", { class: `mode mode-${c.margin_mode}` }, c.margin_mode.toUpperCase()),
-        hot ? el("span", { class: "lc-gap" }, `⚠️ ${gap.toFixed(1)} pts closer than shown`) : el("span", { class: "faint" }, "matches the platform"),
+        el("span", { class: `mode mode-${c.margin_mode}` }, modeLabel(c.margin_mode)),
+        hot ? el("span", { class: "lc-gap" }, `⚠️ ${L("pts_closer_shown", { n: gap.toFixed(1) })}`) : el("span", { class: "faint" }, L("matches_platform")),
       ),
-      el("div", { class: "lc-line" }, el("span", { class: "lc-label" }, "Platform shows"), el("span", { class: "lc-price" }, price(c.platform_price)), bar(c.platform_distance_pct, "plat")),
-      el("div", { class: "lc-line" }, el("span", { class: "lc-label" }, "LiqGuard (together)"), el("span", { class: "lc-price" }, price(c.correlated_price)), bar(c.correlated_distance_pct, hot ? "real hot" : "real")),
-      c.correlated_market_move_pct != null ? el("div", { class: "faint lc-note" }, `≈ a ${pct(Math.abs(c.correlated_market_move_pct))} market ${c.correlated_market_move_pct < 0 ? "drop" : "rise"}`) : null,
+      el("div", { class: "lc-line" }, el("span", { class: "lc-label" }, L("platform_shows")), el("span", { class: "lc-price" }, price(c.platform_price)), bar(c.platform_distance_pct, "plat")),
+      el("div", { class: "lc-line" }, el("span", { class: "lc-label" }, L("liqguard_together")), el("span", { class: "lc-price" }, price(c.correlated_price)), bar(c.correlated_distance_pct, hot ? "real hot" : "real")),
+      move != null ? el("div", { class: "faint lc-note" }, L(move < 0 ? "approx_drop" : "approx_rise", { move: pct(Math.abs(move)) })) : null,
     );
   }));
 }
@@ -769,24 +905,24 @@ function renderSizing() {
   const box = $("sizing");
   const checks = S.insights?.sizing || [];
   const over = checks.filter((c) => c.status === "oversized").length;
-  $("sizingTag").textContent = checks.length ? (over ? `${over} OVERSIZED` : "SIZED OK") : "—";
-  $("sizingTag").className = `tag${over ? " tag-hot" : " tag-ro"}`;
+  setTag("sizingTag", checks.length ? (over ? L("tag_oversized", { n: over }) : L("tag_sized_ok")) : "", over ? "tag-hot" : "tag-ro");
   if (checks.length) {
     const c0 = checks[0];
-    $("sizingSub").textContent = `Equity ${money(c0.equity)} · limits ${c0.max_risk_pct}% loss per trade at the exit, ${c0.max_margin_pct}% margin per position${MODE === "me" ? " (/settings in Telegram)" : ""}`;
+    $("sizingSub").textContent = L("sizing_limits", { equity: money(c0.equity), risk: c0.max_risk_pct, margin: c0.max_margin_pct })
+      + (MODE === "me" ? ` ${L("sizing_settings_hint")}` : "");
   }
-  if (!checks.length) { box.replaceChildren(empty("📏", "No account equity", "Sizing needs the account's wallet balance.")); return; }
+  if (!checks.length) { box.replaceChildren(empty("📏", L("sizing_empty"), L("sizing_empty_hint"))); return; }
   box.replaceChildren(...checks.map((c) => el("div", { class: `sz-row${c.status === "oversized" ? " over" : ""}` },
     el("div", { class: "sz-head" },
       el("b", { style: { color: symbolColor(c.symbol) } }, c.symbol),
-      el("span", { class: "faint" }, `${fmtSize(c.size)} · ${money(c.notional)} · ${c.notional_x_equity?.toFixed(1)}× equity`),
-      el("span", { class: c.status === "oversized" ? "c-warning sz-status" : "c-safe sz-status" }, c.status === "oversized" ? `cut ${pct(c.reduce_pct, 0)}` : "fits"),
+      el("span", { class: "faint" }, L("sizing_row", { size: fmtSize(c.size), notional: money(c.notional), x: c.notional_x_equity?.toFixed(1) })),
+      el("span", { class: c.status === "oversized" ? "c-warning sz-status" : "c-safe sz-status" }, c.status === "oversized" ? L("sizing_cut", { pct: pct(c.reduce_pct, 0) }) : L("sizing_fits")),
     ),
     el("div", { class: "sz-meters" },
-      meter("Loss at exit", c.risk_pct, c.max_risk_pct, `${money(c.loss_at_exit_usd)} at ${c.exit_kind}`),
-      meter("Margin share", c.margin_pct, c.max_margin_pct, `${money(c.margin)} margin`),
+      meter(L("meter_loss"), c.risk_pct, c.max_risk_pct, L("meter_loss_sub", { amount: money(c.loss_at_exit_usd), exit: c.exit_label || c.exit_kind })),
+      meter(L("meter_margin"), c.margin_pct, c.max_margin_pct, L("meter_margin_sub", { amount: money(c.margin) })),
     ),
-    c.status === "oversized" ? el("div", { class: "sz-suggest" }, "Suggested size ", el("b", {}, fmtSize(c.suggested_size)), ` (≈ ${money(c.suggested_notional)})`) : null,
+    c.status === "oversized" ? el("div", { class: "sz-suggest" }, L("suggested_size"), " ", el("b", {}, fmtSize(c.suggested_size)), ` (≈ ${money(c.suggested_notional)})`) : null,
   )));
 }
 
@@ -812,19 +948,19 @@ async function switchScenario(key) {
   const sel = $("scenarioSelect");
   sel.disabled = true;
   try {
-    const r = await fetch(`${API}/scenario`, {
+    const r = await fetch(api("/scenario"), {
       method: "POST", credentials: "same-origin",
       headers: { ...CSRF_HEADERS, "Content-Type": "application/json" }, body: JSON.stringify({ scenario: key }),
     });
     if (r.status === 401) { toLogin(); return; }
-    if (r.status === 409) toast("⏹", "Simulation running", "Stop the run before switching the demo book.", COLORS.warning);
+    if (r.status === 409) toast("⏹", L("sim_running_title"), L("sim_running_body"), COLORS.warning);
     else if (!r.ok) throw new Error(`${r.status}`);
     else {
       const sc = S.scenarios.find((x) => x.key === key);
       toast("🎬", sc?.title || key, sc?.description || "", COLORS.safe);
     }
   } catch (err) {
-    toast("⚠️", "Request failed", "Could not switch the scenario.", COLORS.critical);
+    toast("⚠️", L("request_failed"), L("scenario_failed"), COLORS.critical);
   } finally {
     renderScenarios();
   }
@@ -838,7 +974,7 @@ function ackButton(id, sym) {
   return el("button", {
     class: `mini-btn ack-btn${pending ? "" : " done"}`, type: "button", "data-ack": id, "data-sym": sym, disabled: !pending,
     onclick: (ev) => { ev.stopPropagation(); acknowledge(id); },
-  }, pending ? "✅ I'm awake" : "✓ acknowledged");
+  }, pending ? L("awake") : L("acknowledged"));
 }
 
 function refreshAckButtons() {
@@ -846,11 +982,15 @@ function refreshAckButtons() {
 }
 
 async function acknowledge(id) {
-  const res = await postJson(`${API}/ack`, { ack_id: id });
+  const res = await postJson(api("/ack"), { ack_id: id });
   if (!res) return;
   for (const p of Object.values(S.pending)) if (p.id === id || p.symbol === res.symbol) p.acknowledged = true;
   renderWake();
   refreshAckButtons();
+}
+
+function reminderLabel(e) {
+  return L(`reminder_${e.urgency}`, { n: e.reminder, max: e.max_reminders });
 }
 
 function addEscalation(e, opts = {}) {
@@ -861,13 +1001,13 @@ function addEscalation(e, opts = {}) {
   clearEmpty(box);
   box.prepend(el("li", { class: `tl-item tl-esc tl-esc-${e.urgency}` },
     el("span", { class: "tl-node" }),
-    tlHead(`${e.urgency === "final" ? "FINAL " : e.urgency === "urgent" ? "URGENT " : ""}REMINDER ${e.reminder}/${e.max_reminders}`, `lvl-esc-b lvl-esc-${e.urgency}`, e),
+    tlHead(reminderLabel(e), `lvl-esc-b lvl-esc-${e.urgency}`, e),
     el("div", { class: "tl-body" },
-      `${e.severity.toUpperCase()} alert unacknowledged for ${Math.round(e.minutes_since_alert)} min · now `, el("b", {}, pct(e.distance_pct)), " from liquidation"),
+      L("reminder_body", { tier: tierLabel(e.severity), minutes: Math.round(e.minutes_since_alert) }), " ", el("b", {}, pct(e.distance_pct))),
     el("div", { class: "chips" }, ...(e.channels || []).map(channelChip), ackButton(e.ack_id, e.symbol)),
   ));
   if (!opts.quiet) {
-    toast("⏰", `${e.urgency === "final" ? "FINAL WAKE-UP" : "WAKE UP"} · ${e.symbol}`, `Reminder ${e.reminder}/${e.max_reminders} — tap “I'm awake” to stop`, COLORS[e.severity] || COLORS.critical);
+    toast("⏰", `${L(e.urgency === "final" ? "wake_final" : "wake_up")} · ${e.symbol}`, L("wake_toast", { n: e.reminder, max: e.max_reminders }), COLORS[e.severity] || COLORS.critical);
     const wake = $("wake");
     wake.classList.remove("ring");
     void wake.offsetWidth;
@@ -878,13 +1018,12 @@ function addEscalation(e, opts = {}) {
 
 function onAck(data) {
   for (const p of Object.values(S.pending)) if (p.id === data.ack_id || p.symbol === data.symbol) p.acknowledged = true;
-  const box = $("timeline");
-  box.prepend(el("li", { class: "tl-item tl-ack" },
+  $("timeline").prepend(el("li", { class: "tl-item tl-ack" },
     el("span", { class: "tl-node" }),
-    tlHead("ACKNOWLEDGED", "lvl-ack-b", data),
-    el("div", { class: "tl-body" }, `${data.severity} alert acknowledged from ${data.source} after ${data.reminders_sent} reminder(s) — reminders stopped.`),
+    tlHead(L("lvl_ack"), "lvl-ack-b", data),
+    el("div", { class: "tl-body" }, L("ack_body", { tier: tierLabel(data.severity), source: sourceName(data.source), n: data.reminders_sent })),
   ));
-  toast("✅", `Acknowledged · ${data.symbol}`, `From ${data.source} — no more reminders`, COLORS.safe);
+  toast("✅", `${L("lvl_ack")} · ${data.symbol}`, L("ack_toast", { source: sourceName(data.source) }), COLORS.safe);
   renderWake();
   refreshAckButtons();
 }
@@ -899,12 +1038,12 @@ function renderWake() {
   wake.className = `wake card wake-${worst}${wake.classList.contains("ring") ? " ring" : ""}`;
   $("wakeTitle").textContent = L("wake_waiting", { n: items.length });
   $("wakeSub").textContent = esc.interval_minutes
-    ? `Reminders every ${esc.interval_minutes} min (demo: ${esc.seconds_per_minute}s per minute), up to ${esc.max_reminders}, louder each time · same button in Telegram`
-    : "Reminders repeat until acknowledged";
+    ? L("wake_sub", { interval: esc.interval_minutes, seconds: esc.seconds_per_minute, max: esc.max_reminders })
+    : L("wake_sub_plain");
   $("wakeList").replaceChildren(...items.map((a) => el("div", { class: `wake-item c-${a.severity}` },
     el("b", { style: { color: symbolColor(a.symbol) } }, a.symbol),
-    el("span", {}, `${a.severity.toUpperCase()} · ${pct(a.distance_pct)}`),
-    el("span", { class: "faint" }, `${a.reminders_sent || 0}/${a.max_reminders} sent`),
+    el("span", {}, `${tierLabel(a.severity)} · ${pct(a.distance_pct)}`),
+    el("span", { class: "faint" }, L("wake_sent", { n: a.reminders_sent || 0, max: a.max_reminders })),
     ackButton(a.id, a.symbol),
   )));
 }
@@ -925,17 +1064,15 @@ function protectionChips(pr) {
   if (!pr) return null;
   const chips = [];
   if (pr.wicks?.max_wicks_away != null) {
-    chips.push(el("span", { class: `pchip ${wicksClass(pr.wicks.max_wicks_away)}`, title: `Deepest ${pr.wicks.worst_interval} wick in 30 days` },
-      `🕯 ${pr.wicks.max_wicks_away.toFixed(1)} max wicks`));
+    chips.push(el("span", { class: `pchip ${wicksClass(pr.wicks.max_wicks_away)}`, title: L("deepest_wick", { interval: pr.wicks.worst_interval }) },
+      `🕯 ${L("max_wicks", { n: pr.wicks.max_wicks_away.toFixed(1) })}`));
   }
-  if (pr.stop) {
-    const [label, tone] = STOP_LABEL[pr.stop.status] || [pr.stop.status, "muted"];
-    chips.push(el("span", { class: `pchip c-${tone}` }, label));
-  } else chips.push(el("span", { class: "pchip faint" }, "orders n/a"));
+  if (pr.stop) chips.push(el("span", { class: `pchip c-${STOP_TONE[pr.stop.status] || "muted"}` }, stopLabel(pr.stop.status)));
+  else chips.push(el("span", { class: "pchip faint" }, L("orders_na")));
   if (pr.adl?.supported) {
     chips.push(el("span", { class: `pchip${pr.adl.warn ? " c-critical" : ""}`, title: pr.adl.note || "" }, "ADL ", adlLights(pr.adl.lights || 0)));
-  } else if (pr.adl) chips.push(el("span", { class: "pchip faint", title: pr.adl.note || "" }, "ADL n/a"));
-  if (pr.thresholds?.adapted) chips.push(el("span", { class: "pchip", title: pr.thresholds.reasons.join(" · ") }, "📈 adaptive"));
+  } else if (pr.adl) chips.push(el("span", { class: "pchip faint", title: pr.adl.note || "" }, L("adl_na")));
+  if (pr.thresholds?.adapted) chips.push(el("span", { class: "pchip", title: pr.thresholds.reasons.join(" · ") }, `📈 ${L("adaptive")}`));
   return el("div", { class: "pchips" }, ...chips);
 }
 
@@ -947,10 +1084,10 @@ function renderSession() {
   const t = when ? `${s.weekday || ""} ${String(when.getUTCHours()).padStart(2, "0")}:${String(when.getUTCMinutes()).padStart(2, "0")} UTC` : "";
   const stock = Object.values(S.protection).some((p) => p.thresholds?.session?.stock_market_closed);
   box.replaceChildren(
-    el("span", { class: "sess-clock" }, "🕒 ", t, el("span", { class: "faint" }, MODE === "me" || S.minutesPerStep ? " · demo clock" : "")),
-    el("span", { class: `sess${s.weekend ? " on" : ""}` }, "Weekend ×1.15"),
-    el("span", { class: `sess${s.low_liquidity ? " on" : ""}` }, "Thin hours ×1.10"),
-    el("span", { class: `sess${stock ? " on" : ""}` }, "US stocks closed ×1.5"),
+    el("span", { class: "sess-clock" }, "🕒 ", t, el("span", { class: "faint" }, MODE === "me" || S.minutesPerStep ? ` · ${L("demo_clock")}` : "")),
+    el("span", { class: `sess${s.weekend ? " on" : ""}` }, `${L("sess_weekend")} ×1.15`),
+    el("span", { class: `sess${s.low_liquidity ? " on" : ""}` }, `${L("sess_thin")} ×1.10`),
+    el("span", { class: `sess${stock ? " on" : ""}` }, `${L("sess_stocks")} ×1.5`),
   );
 }
 
@@ -963,9 +1100,15 @@ function renderProtection() {
 function renderStress() {
   const box = $("stress");
   const entries = S.order.map((s) => S.protection[s]).filter(Boolean);
-  if (!entries.length) { box.replaceChildren(empty("🕯", "No wick data yet", "Wick stats load from public 1m/5m candles for each open symbol.")); return; }
+  if (!entries.length) {
+    setTag("stressTag", "");
+    box.replaceChildren(empty("🕯", L("stress_empty"), L("stress_empty_hint")));
+    return;
+  }
   const sources = new Set(entries.map((p) => p.wicks?.source).filter(Boolean));
-  $("stressTag").textContent = sources.has("demo") ? "DEMO WICKS" : sources.size ? "LIVE KLINES" : "NO KLINES";
+  const deadly = entries.filter((p) => p.wicks?.one_max_wick_liquidates).length;
+  setTag("stressTag", deadly ? L("tag_one_wick", { n: deadly }) : sources.has("demo") ? L("tag_demo_wicks") : sources.size ? L("tag_live_klines") : L("tag_no_klines"),
+    deadly ? "tag-hot" : "");
   box.replaceChildren(...entries.map((p) => {
     const w = p.wicks, th = p.thresholds;
     const byInt = Object.fromEntries((w?.exposures || []).map((e) => [e.interval, e]));
@@ -974,25 +1117,25 @@ function renderStress() {
       if (!e) return el("div", { class: "st-cell faint" }, `${iv} —`);
       return el("div", { class: "st-cell" },
         el("div", { class: "st-iv" }, iv, e.window_days < 29 ? el("span", { class: "faint" }, ` · ${e.window_days.toFixed(1)}d`) : null),
-        el("div", {}, el("b", { class: wicksClass(e.max_wicks_away) }, e.max_wicks_away == null ? "—" : `${e.max_wicks_away.toFixed(1)}×`), el("span", { class: "faint" }, ` max ${pct(e.max_pct, 2)}`)),
-        el("div", {}, el("b", { class: wicksClass(e.typical_wicks_away / 4) }, e.typical_wicks_away == null ? "—" : `${e.typical_wicks_away.toFixed(0)}×`), el("span", { class: "faint" }, ` typical ${pct(e.typical_pct, 2)}`)),
+        el("div", {}, el("b", { class: wicksClass(e.max_wicks_away) }, e.max_wicks_away == null ? "—" : `${e.max_wicks_away.toFixed(1)}×`), el("span", { class: "faint" }, ` ${L("wick_max", { pct: pct(e.max_pct, 2) })}`)),
+        el("div", {}, el("b", { class: wicksClass(e.typical_wicks_away / 4) }, e.typical_wicks_away == null ? "—" : `${e.typical_wicks_away.toFixed(0)}×`), el("span", { class: "faint" }, ` ${L("wick_typical", { pct: pct(e.typical_pct, 2) })}`)),
       );
     };
     const tiers = th ? TIERS.map((t) => el("span", { class: `st-tier c-${t}` },
-      `${t[0].toUpperCase()} ${th.base[t]}→`, el("b", {}, `${+th.effective[t].toFixed(1)}%`))) : [];
+      `${tierLabel(t)} ${th.base[t]}→`, el("b", {}, `${+th.effective[t].toFixed(1)}%`))) : [];
     return el("div", { class: `st-row${w?.one_max_wick_liquidates ? " danger" : ""}` },
       el("div", { class: "st-sym" },
         el("b", { style: { color: symbolColor(p.symbol) } }, p.symbol),
-        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
+        venueTag(p.venue),
         el("span", { class: `c-${tierFor(p.distance_pct, p.symbol)}` }, pct(p.distance_pct)),
       ),
       el("div", { class: "st-big" },
         el("div", { class: `st-n ${wicksClass(w?.max_wicks_away)}` }, w?.max_wicks_away == null ? "—" : w.max_wicks_away.toFixed(1)),
-        el("div", { class: "faint" }, w?.one_max_wick_liquidates ? "one wick liquidates!" : "max wicks away"),
+        el("div", { class: "faint" }, w?.one_max_wick_liquidates ? L("one_wick_liquidates") : L("max_wicks_away")),
       ),
       cell("1m"), cell("5m"),
       el("div", { class: "st-tiers" }, ...tiers,
-        th?.reasons?.length ? el("div", { class: "st-why faint" }, th.reasons.join(" · ")) : el("div", { class: "st-why faint" }, "base tiers (no widening)")),
+        el("div", { class: "st-why faint" }, th?.reasons?.length ? th.reasons.join(" · ") : L("base_tiers"))),
     );
   }));
 }
@@ -1000,63 +1143,78 @@ function renderStress() {
 function renderStops() {
   const box = $("stops");
   const entries = S.order.map((s) => S.protection[s]).filter(Boolean);
-  if (!entries.length) { box.replaceChildren(empty("🛑", "No positions", "Stop-loss checks run against each position's liquidation price.")); return; }
+  const bad = entries.filter((p) => p.stop?.needs_warning).length;
+  setTag("stopsTag", entries.length ? (bad ? L("tag_needs_attention", { n: bad }) : L("tag_stops_ok")) : "", bad ? "tag-hot" : "tag-ro");
+  if (!entries.length) { box.replaceChildren(empty("🛑", L("no_positions"), L("stops_empty_hint"))); return; }
   box.replaceChildren(...entries.map((p) => {
     const s = p.stop, adl = p.adl || {};
-    const [label, tone] = s ? (STOP_LABEL[s.status] || [s.status, "muted"]) : ["Orders unavailable", "muted"];
+    const tone = s ? (STOP_TONE[s.status] || "muted") : "muted";
+    const label = s ? stopLabel(s.status) : L("orders_unavailable");
     const muse = S.stopMuse[p.symbol];
     const fixes = s?.needs_warning ? (s.fixes || []) : [];
+    const gap = s?.gap_pct != null
+      ? L("stop_gap", { gap: `${s.gap_pct >= 0 ? "" : "−"}${Math.abs(s.gap_pct).toFixed(2)}%`, need: `${s.required_gap_pct.toFixed(2)}%` })
+      : s ? L("stop_need", { need: `${s.required_gap_pct.toFixed(2)}%` }) : "";
     return el("div", { class: `sp-row sp-${tone}` },
       el("div", { class: "sp-head" },
         el("b", { style: { color: symbolColor(p.symbol) } }, p.symbol),
-        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
+        venueTag(p.venue),
         el("span", { class: `sp-status c-${tone}` }, label),
         el("span", { class: "sp-adl", title: adl.note || "" },
-          adl.supported ? [adlLights(adl.lights || 0), el("span", { class: adl.warn ? "c-critical" : "faint" }, ` ${adl.lights}/5`)] : el("span", { class: "faint" }, "ADL n/a (Hyperliquid)")),
+          adl.supported ? [adlLights(adl.lights || 0), el("span", { class: adl.warn ? "c-critical" : "faint" }, ` ${adl.lights}/5`)] : el("span", { class: "faint" }, L("adl_na_hl"))),
       ),
       s ? el("div", { class: "sp-line" },
-        s.stop_price ? `stop ${price(s.stop_price)} · ` : "",
-        `liq ${price(s.liquidation_price)}`,
-        s.gap_pct != null ? ` · gap ${s.gap_pct >= 0 ? "" : "−"}${Math.abs(s.gap_pct).toFixed(2)}% (need ≥ ${s.required_gap_pct.toFixed(2)}%)` : ` · need ≥ ${s.required_gap_pct.toFixed(2)}% gap`,
+        s.stop_price ? `${L("stop_at", { price: price(s.stop_price) })} · ` : "",
+        L("liq_at", { price: price(s.liquidation_price) }), ` · ${gap}`,
       ) : null,
       fixes.length ? el("div", { class: "sp-fixes" }, ...fixes.map((f) => el("span", {
         class: `sp-fix${muse?.suggested_fix === f.kind ? " best" : ""}`,
-      }, `${FIX_ICON[f.kind] || "•"} ${f.title}`, muse?.suggested_fix === f.kind ? el("span", { class: "star" }, " ★ Muse") : null))) : null,
+      }, `${FIX_ICON[f.kind] || "•"} ${f.title}`, muse?.suggested_fix === f.kind ? el("span", { class: "star" }, ` ★ ${L("muse_pick")}`) : null))) : null,
       muse && s?.needs_warning ? el("div", { class: "sp-muse" }, el("span", { class: "muse-glyph" }, "✦ "), muse.explanation) : null,
     );
   }));
 }
 
+/* ---------------- Muse advice & audit ---------------- */
+
+function updateHistoryCounts() {
+  setTag("adviceCount", String(S.adviceCount));
+  setTag("auditCount", String(S.auditCount));
+}
+
 function addAdvice(c) {
   const box = $("advice");
   clearEmpty(box);
+  S.adviceBySym[c.symbol] = c;
+  S.adviceCount += 1;
+  updateHistoryCounts();
   const actions = [];
   if (c.margin_to_add_usd > 0) {
     actions.push(el("div", { class: "adv-act" },
-      el("div", { class: "adv-act-label" }, "Add margin"),
+      el("div", { class: "adv-act-label" }, L("opt_add_margin")),
       el("div", { class: "adv-act-value c-safe" }, money(c.margin_to_add_usd, { dp: 2 })),
-      el("div", { class: "adv-act-sub" }, `new liq ${price(c.new_liquidation_price)} · ${c.target_distance_pct}% buffer`),
+      el("div", { class: "adv-act-sub" }, L("adv_new_liq", { price: price(c.new_liquidation_price), target: c.target_distance_pct })),
     ));
   }
   if (c.reduce_size_pct > 0) {
     actions.push(el("div", { class: "adv-act" },
-      el("div", { class: "adv-act-label" }, "Or reduce size"),
+      el("div", { class: "adv-act-label" }, L("adv_or_reduce")),
       el("div", { class: "adv-act-value c-warning" }, `${c.reduce_size_pct.toFixed(1)}%`),
-      el("div", { class: "adv-act-sub" }, `close ${c.reduce_size_by} ${c.symbol.replace(/USDT$/, "")}`),
+      el("div", { class: "adv-act-sub" }, L("adv_close", { size: c.reduce_size_by, coin: c.symbol.replace(/USDT$/, "") })),
     ));
   }
   box.prepend(el("div", { class: `adv adv-${c.level}` },
     el("div", { class: "adv-head" },
       el("span", { class: "adv-sym", style: { color: symbolColor(c.symbol) } }, c.symbol),
-      el("span", { class: `lvl lvl-${c.level}-b` }, c.level.toUpperCase()),
-      el("span", { class: "tag" }, c.mock ? "MUSE · MOCK" : "MUSE"),
+      el("span", { class: `lvl lvl-${c.level}-b` }, tierLabel(c.level)),
+      el("span", { class: "tag" }, c.mock ? L("muse_mock_tag") : "Muse"),
     ),
     c.summary ? el("div", { class: "adv-summary" }, c.summary) : null,
     el("div", { class: "adv-text" }, c.explanation),
     actions.length ? el("div", { class: "adv-actions" }, ...actions) : null,
     c.rescue ? rescueMini(c) : null,
     c.ack_id ? el("div", { class: "chips" }, ackButton(c.ack_id, c.symbol)) : null,
-    el("div", { class: "adv-foot" }, "Suggestion only · confirm in Telegram · testnet execution"),
+    el("div", { class: "adv-foot" }, L("adv_foot")),
   ));
   if (c.rescue && (!S.rescue || S.rescue.auto)) showRescue(c.symbol, { plan: c.rescue, explanation: c.rescue_explanation }, { auto: true });
 }
@@ -1064,25 +1222,31 @@ function addAdvice(c) {
 function rescueMini(c) {
   const plan = c.rescue;
   return el("div", { class: "adv-rescue" },
-    el("div", { class: "adv-act-label" }, "Rescue options · cost incl. fees + 24h funding"),
+    el("div", { class: "adv-act-label" }, L("rescue_mini_title")),
     ...plan.options.map((o) => el("div", { class: `rm-row${o.kind === plan.recommended ? " best" : ""}` },
-      el("span", {}, `${OPTION_META[o.kind].icon} ${OPTION_META[o.kind].label}`),
+      el("span", {}, optionLabel(o.kind)),
       el("span", {}, distText(o.new_distance_pct, o.no_liquidation)),
       el("span", {}, money(o.costs.total_cost_usd, { dp: 2 })),
       o.kind === plan.recommended ? el("span", { class: "star" }, "★") : el("span", {}),
     )),
-    el("button", { class: "mini-btn", type: "button", onclick: () => showRescue(c.symbol, { plan, explanation: c.rescue_explanation }) }, "Open in rescue simulator"),
+    el("button", { class: "mini-btn", type: "button", onclick: () => { showRescue(c.symbol, { plan, explanation: c.rescue_explanation }); openFold("rescueCard"); } }, L("open_in_simulator")),
   );
+}
+
+function auditEventLabel(event) {
+  return hasL(`ev_${event}`) ? L(`ev_${event}`) : event.replace(/_/g, " ");
 }
 
 function addAudit(e) {
   const box = $("audit");
   clearEmpty(box);
+  S.auditCount += 1;
+  updateHistoryCounts();
   box.prepend(el("div", { class: "au" },
     el("div", { class: "au-time" }, clock(e.timestamp)),
     el("div", {},
-      el("div", { class: `au-event ev-${e.event}` }, e.event.replace(/_/g, " "),
-        e.symbol ? ` · ${e.symbol}` : "", el("span", { class: "src" }, e.source)),
+      el("div", { class: `au-event ev-${e.event}` }, auditEventLabel(e.event),
+        e.symbol ? ` · ${e.symbol}` : "", el("span", { class: "src" }, sourceName(e.source))),
       el("div", { class: "au-detail" }, e.detail),
     ),
   ));
@@ -1091,19 +1255,20 @@ function addAudit(e) {
 
 function triageToastText(order, focus) {
   const [first, ...rest] = order;
-  const why = focus && focus.symbol === first && focus.basis && focus.basis !== "closest to liquidation" ? ` (${focus.basis})` : "";
-  return [`${order.length} positions at risk`, `Handle ${first} first${why}${rest.length ? ` — then ${rest.join(", ")}` : ""}`];
+  const why = focus && focus.symbol === first && focus.basis && focus.basis_code !== "closest" ? ` (${focus.basis})` : "";
+  const body = L("triage_toast", { first, why }) + (rest.length ? ` ${L("triage_toast_then", { rest: rest.join(", ") })}` : "");
+  return [L("triage_toast_title", { n: order.length }), body];
 }
 
 function accountLiqMove() {
   const w = S.insights?.worst_account;
   if (!w || w.first_liquidation_move_pct == null) return null;
-  return { pct: Math.abs(w.first_liquidation_move_pct), dir: w.first_liquidation_move_pct < 0 ? "drop" : "rise", venue: w.venue };
+  return { pct: Math.abs(w.first_liquidation_move_pct), down: w.first_liquidation_move_pct < 0, venue: w.venue };
 }
 
 function stressToastText() {
   const m = accountLiqMove();
-  return m ? `A ${pct(m.pct)} correlated market ${m.dir} liquidates the ${venueLabel(m.venue)} account` : null;
+  return m ? L(m.down ? "move_drop_liquidates" : "move_rise_liquidates", { move: pct(m.pct), venue: venueLabel(m.venue) }) : null;
 }
 
 function refreshLiveToasts() {
@@ -1139,8 +1304,8 @@ function renderFunding() {
   const wallets = $("wallets");
   const entries = Object.entries(S.wallets || {});
   wallets.replaceChildren(...entries.map(([venue, w]) => el("div", { class: "wallet" },
-    el("span", { class: `venue venue-${venue}` }, venueLabel(venue)),
-    el("span", { class: "wallet-label" }, "cross wallet"),
+    venueTag(venue),
+    el("span", { class: "wallet-label" }, L("cross_wallet")),
     el("b", {}, money(w, { dp: 2 })),
   )));
   wallets.hidden = !entries.length;
@@ -1148,37 +1313,36 @@ function renderFunding() {
   const box = $("funding");
   const positions = (S.overview?.positions || []).filter((p) => p.funding);
   const sources = new Set(positions.map((p) => p.funding.source));
-  $("fundingTag").textContent = sources.has("live") ? "LIVE RATES" : "DEMO RATES";
-  $("fundingTag").className = `tag${sources.has("live") ? " tag-ro" : ""}`;
+  setTag("fundingTag", positions.length ? L(sources.has("live") ? "tag_live_rates" : "tag_demo_rates") : "", sources.has("live") ? "tag-ro" : "");
   const rows = positions.map((p) => {
     const f = p.funding, pays = f.next_payment_usd > 0;
     return el("div", { class: "fund-row" },
       el("div", { class: "fund-top" },
         el("b", { style: { color: symbolColor(p.symbol) } }, p.symbol),
-        el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
-        el("span", { class: "fund-rate" }, `${f.rate_pct >= 0 ? "+" : ""}${f.rate_pct.toFixed(4)}% / ${f.interval_hours}h`),
+        venueTag(p.venue),
+        el("span", { class: "fund-rate" }, signedRate(f)),
         el("span", { class: "fund-apr" }, `${f.annualized_pct.toFixed(1)}% APR`),
       ),
       el("div", { class: "fund-meta" },
-        `next settlement in ${duration(f.minutes_to_settlement)} · `,
-        el("span", { class: pays ? "neg" : "pos" }, `${pays ? "pays" : "receives"} ${money(Math.abs(f.next_payment_usd), { dp: 2 })}`),
+        `${L("next_settlement", { when: duration(f.minutes_to_settlement) })} · `,
+        el("span", { class: pays ? "neg" : "pos" }, L(pays ? "funding_pays" : "funding_receives", { amount: money(Math.abs(f.next_payment_usd), { dp: 2 }) })),
       ),
       el("div", { class: "fund-drift" },
-        el("span", {}, "liq distance now ", el("b", {}, pct(p.distance_to_liquidation_pct))),
+        el("span", {}, `${L("liq_distance_now")} `, el("b", {}, pct(p.distance_to_liquidation_pct))),
         ...(f.drift || []).map((d) => el("span", {}, `${d.horizon_hours}h `, el("b", {}, distText(d.distance_pct, d.liquidation_price == null)),
-          ` (${d.settlements}× · pool ${money(d.pool_payment_usd, { signed: true })})`)),
+          ` ${L("drift_detail", { n: d.settlements, pool: money(d.pool_payment_usd, { signed: true }) })}`)),
         el("i", {}, f.label),
       ),
     );
   });
   const events = S.fundingEvents.slice(-6).reverse().map((e) => el("div", { class: "fund-ev" },
     el("span", { class: "fund-ev-sym", style: { color: symbolColor(e.symbol) } }, `▲ ${e.symbol}`),
-    el("span", {}, `${e.payment_usd > 0 ? "paid" : "received"} ${money(Math.abs(e.payment_usd), { dp: 2 })}`),
-    el("span", { class: "fund-ev-liq" }, `liq ${price(e.liquidation_before)} → ${price(e.liquidation_after)}`),
+    el("span", {}, L(e.payment_usd > 0 ? "funding_paid" : "funding_received", { amount: money(Math.abs(e.payment_usd), { dp: 2 }) })),
+    el("span", { class: "fund-ev-liq" }, L("liq_moved", { before: price(e.liquidation_before), after: price(e.liquidation_after) })),
   ));
   box.replaceChildren(...rows);
-  if (!rows.length) box.append(empty("💸", "No funding data", "Funding rates appear once positions have a rate."));
-  if (events.length) box.append(el("div", { class: "account-label fund-ev-head" }, "Recent settlements"), ...events);
+  if (!rows.length) box.append(empty("💸", L("funding_empty"), L("funding_empty_hint")));
+  if (events.length) box.append(el("div", { class: "account-label fund-ev-head" }, L("recent_settlements")), ...events);
 }
 
 /* ---------------- rescue simulator ---------------- */
@@ -1187,22 +1351,23 @@ function buildRescueTabs() {
   const tabs = $("rescueTabs");
   const active = S.rescue?.symbol;
   tabs.replaceChildren(...S.order.map((sym) => el("button", {
-    class: `tab${active === sym && !S.rescue?.live ? " active" : ""}`, type: "button", role: "tab", onclick: () => loadRescue(sym),
+    class: `tab${active === sym && !S.rescue?.live ? " active" : ""}`, type: "button", role: "tab", onclick: () => loadRescue(sym, { scroll: false }),
   }, sym)));
+  setTag("rescueTag", active || "");
 }
 
-async function loadRescue(symbol) {
+async function loadRescue(symbol, opts = {}) {
   S.rescue = { symbol, loading: true };
   buildRescueTabs();
   renderRescue();
-  $("rescueCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  openFold("rescueCard", opts.scroll !== false);
   try {
-    const r = await fetch(`${API}/rescue?symbol=${encodeURIComponent(symbol)}`, { credentials: "same-origin" });
+    const r = await fetch(api("/rescue", { symbol }), { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (!r.ok) throw new Error(`${r.status}`);
     showRescue(symbol, await r.json());
   } catch (err) {
-    S.rescue = { symbol, error: "Could not load rescue options. Try again in a moment." };
+    S.rescue = { symbol, error: L("rescue_failed") };
     renderRescue();
   }
 }
@@ -1210,14 +1375,14 @@ async function loadRescue(symbol) {
 async function loadLiveRescue(symbol, venue) {
   S.rescue = { symbol, loading: true, live: true };
   renderRescue();
-  $("rescueCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  openFold("rescueCard");
   try {
     const r = await fetch(`/api/me/rescue/live?symbol=${encodeURIComponent(symbol)}&venue=${encodeURIComponent(venue)}`, { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (!r.ok) throw new Error(`${r.status}`);
     showRescue(symbol, await r.json(), { live: true });
   } catch (err) {
-    S.rescue = { symbol, live: true, error: "Could not load rescue options for this position." };
+    S.rescue = { symbol, live: true, error: L("rescue_live_failed") };
     renderRescue();
   }
 }
@@ -1232,23 +1397,23 @@ function renderRescue() {
   const body = $("rescueBody");
   const r = S.rescue;
   if (!r) {
-    body.replaceChildren(empty("🛟", "Pick a position", "Choose a symbol above, tap 🛟 on a position, or wait for the first alert — its rescue plan opens here."));
+    body.replaceChildren(empty("🛟", L("rescue_pick"), L("rescue_pick_hint")));
     return;
   }
-  if (r.loading) { body.replaceChildren(empty("⏳", `Simulating ${r.symbol}…`, "Computing add margin, reduce and hedge.")); return; }
-  if (r.error) { body.replaceChildren(empty("⚠️", "Rescue unavailable", r.error)); return; }
+  if (r.loading) { body.replaceChildren(empty("⏳", L("rescue_loading", { symbol: r.symbol }), L("rescue_loading_hint"))); return; }
+  if (r.error) { body.replaceChildren(empty("⚠️", L("rescue_unavailable"), r.error)); return; }
 
   const plan = r.plan, cur = plan.current, ex = r.explanation;
-  $("rescueSub").textContent = `${r.live ? "Your account · live data" : "Demo position"} · target ${plan.target_distance_pct}% from liquidation · funding ${plan.funding_label}`;
+  $("rescueSub").textContent = L("rescue_sub_plan", { scope: L(r.live ? "rescue_scope_live" : "rescue_scope_demo"), target: plan.target_distance_pct, label: plan.funding_label });
   const trade = Object.fromEntries((ex?.trade_offs || []).map((t) => [t.option, t]));
 
   const head = el("div", { class: "rs-head" },
     el("span", { class: "pos-sym", style: { color: symbolColor(plan.symbol) } }, plan.symbol),
-    el("span", { class: `venue venue-${plan.venue}` }, venueLabel(plan.venue)),
-    el("span", { class: `side side-${plan.side}` }, plan.side.toUpperCase()),
-    el("span", { class: `mode mode-${plan.margin_mode}` }, plan.margin_mode.toUpperCase()),
-    el("span", { class: "rs-now" }, `mark ${price(plan.mark_price)} · liq ${price(cur.price)} · `,
-      el("b", { class: `c-${tierFor(cur.distance_pct)}` }, distText(cur.distance_pct, cur.price == null)), " away"),
+    venueTag(plan.venue),
+    sideTag(plan.side),
+    el("span", { class: `mode mode-${plan.margin_mode}` }, modeLabel(plan.margin_mode)),
+    el("span", { class: "rs-now" }, `${L("mark_at", { price: price(plan.mark_price) })} · ${L("liq_at", { price: price(cur.price) })} · `,
+      el("b", { class: `c-${tierFor(cur.distance_pct)}` }, distText(cur.distance_pct, cur.price == null)), ` ${L("away")}`),
   );
 
   const cols = plan.options.map((o) => {
@@ -1256,21 +1421,21 @@ function renderRescue() {
     const c = o.costs, t = trade[o.kind];
     return el("div", { class: `rs-opt${best ? " best" : ""}${o.protects_liquidation ? "" : " weak"}` },
       el("div", { class: "rs-opt-head" },
-        el("span", { class: "rs-kind" }, `${OPTION_META[o.kind].icon} ${OPTION_META[o.kind].label}`),
-        best ? el("span", { class: "tag tag-best" }, "RECOMMENDED") : null,
-        !o.protects_liquidation ? el("span", { class: "tag" }, "DOESN'T MOVE LIQ") : null,
+        el("span", { class: "rs-kind" }, optionLabel(o.kind)),
+        best ? el("span", { class: "tag tag-best" }, L("recommended")) : null,
+        !o.protects_liquidation ? el("span", { class: "tag" }, L("no_liq_move")) : null,
       ),
       el("div", { class: "rs-title" }, o.title),
       el("div", { class: "rs-liq" },
-        el("div", {}, el("div", { class: "adv-act-label" }, "New liquidation"), el("div", { class: "rs-big" }, o.new_liquidation_price ? price(o.new_liquidation_price) : "none")),
-        el("div", {}, el("div", { class: "adv-act-label" }, "Distance"), el("div", { class: `rs-big c-${o.reaches_target ? "safe" : tierFor(o.new_distance_pct)}` }, distText(o.new_distance_pct, o.no_liquidation))),
+        el("div", {}, el("div", { class: "adv-act-label" }, L("new_liq")), el("div", { class: "rs-big" }, o.new_liquidation_price ? price(o.new_liquidation_price) : L("none"))),
+        el("div", {}, el("div", { class: "adv-act-label" }, L("distance")), el("div", { class: `rs-big c-${o.reaches_target ? "safe" : tierFor(o.new_distance_pct)}` }, distText(o.new_distance_pct, o.no_liquidation))),
       ),
       el("dl", { class: "rs-costs" },
-        el("dt", {}, "Fees"), el("dd", {}, money(c.fees_usd, { dp: 2 })),
-        el("dt", {}, "Realized loss"), el("dd", {}, money(c.realized_loss_usd, { dp: 2 })),
-        el("dt", {}, "Funding 24h"), el("dd", {}, money(c.funding_24h_usd, { dp: 2, signed: true })),
-        el("dt", { class: "total" }, "Total cost"), el("dd", { class: "total" }, money(c.total_cost_usd, { dp: 2 })),
-        el("dt", {}, "Capital needed"), el("dd", {}, money(c.capital_required_usd, { dp: 2 })),
+        el("dt", {}, L("cost_fees")), el("dd", {}, money(c.fees_usd, { dp: 2 })),
+        el("dt", {}, L("cost_realized")), el("dd", {}, money(c.realized_loss_usd, { dp: 2 })),
+        el("dt", {}, L("cost_funding")), el("dd", {}, money(c.funding_24h_usd, { dp: 2, signed: true })),
+        el("dt", { class: "total" }, L("cost_total")), el("dd", { class: "total" }, money(c.total_cost_usd, { dp: 2 })),
+        el("dt", {}, L("cost_capital")), el("dd", {}, money(c.capital_required_usd, { dp: 2 })),
       ),
       t ? el("ul", { class: "rs-pc" },
         ...t.pros.map((x) => el("li", { class: "pro" }, x)),
@@ -1285,12 +1450,12 @@ function renderRescue() {
     ex ? el("div", { class: "rs-muse" },
       el("span", { class: "muse-glyph" }, "✦"),
       el("div", {}, el("b", {}, ex.headline), el("div", { class: "rs-caveat" }, ex.caveat)),
-      el("span", { class: "tag" }, ex.mock ? "MUSE · MOCK" : "MUSE"),
+      el("span", { class: "tag" }, ex.mock ? L("muse_mock_tag") : "Muse"),
     ) : null,
     plan.already_safe
-      ? empty("✅", `Already beyond the ${plan.target_distance_pct}% target`, "No rescue needed right now. Run the simulation to see the options once this position is at risk.")
+      ? empty("✅", L("rescue_safe", { target: plan.target_distance_pct }), L("rescue_safe_hint"))
       : el("div", { class: "rs-grid" }, ...cols),
-    el("div", { class: "adv-foot" }, "Simulation only · costs use taker fees and funding at the current rate · nothing is executed from the dashboard"),
+    el("div", { class: "adv-foot" }, L("rescue_foot")),
   );
 }
 
@@ -1314,6 +1479,10 @@ function setProgress() {
 
 function toLogin() { location.assign("/login?error=session"); }
 
+function requestFailed(path) {
+  toast("⚠️", L("request_failed"), L("request_failed_body", { path: path.split("?")[0] }), COLORS.critical);
+}
+
 async function post(path) {
   try {
     const r = await fetch(path, { method: "POST", headers: CSRF_HEADERS, credentials: "same-origin" });
@@ -1321,7 +1490,7 @@ async function post(path) {
     if (!r.ok) throw new Error(`${r.status}`);
     return await r.json();
   } catch (err) {
-    toast("⚠️", "Request failed", `Could not reach ${path}. Is the server running?`, COLORS.critical);
+    requestFailed(path);
     console.error(path, err);
     return null;
   }
@@ -1334,11 +1503,11 @@ async function postJson(path, body) {
       headers: { ...CSRF_HEADERS, "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     if (r.status === 401) { toLogin(); return null; }
-    if (r.status === 404) { toast("ℹ️", "Already handled", "That reminder was already acknowledged or has expired.", COLORS.text); return null; }
+    if (r.status === 404) { toast("ℹ️", L("already_handled"), L("already_handled_body"), COLORS.text); return null; }
     if (!r.ok) throw new Error(`${r.status}`);
     return await r.json();
   } catch (err) {
-    toast("⚠️", "Request failed", `Could not reach ${path}. Is the server running?`, COLORS.critical);
+    requestFailed(path);
     return null;
   }
 }
@@ -1351,9 +1520,10 @@ const tierBands = {
     if (S.view !== "distance") return;
     const { ctx, chartArea: a, scales: { y } } = c;
     const t = chartTiers();
-    const bands = [[0, t.emergency, COLORS.emergency, 0.12], [t.emergency, t.critical, COLORS.critical, 0.08], [t.critical, t.warning, COLORS.warning, 0.05]];
+    const bands = [[0, "emergency", 0.12], [t.emergency, "critical", 0.08], [t.critical, "warning", 0.05]];
     ctx.save();
-    for (const [lo, hi, col, al] of bands) {
+    for (const [lo, tier, al] of bands) {
+      const hi = t[tier], col = COLORS[tier];
       const top = y.getPixelForValue(hi), bot = y.getPixelForValue(lo);
       ctx.fillStyle = alpha(col, al);
       ctx.fillRect(a.left, top, a.right - a.left, bot - top);
@@ -1364,7 +1534,7 @@ const tierBands = {
       ctx.fillStyle = alpha(col, 0.9);
       ctx.font = "600 10px Inter, ui-sans-serif, sans-serif";
       ctx.textAlign = "right";
-      ctx.fillText(`${Object.keys(t).find((k) => t[k] === hi).toUpperCase()} ${+hi.toFixed(1)}%`, a.right - 6, top - 4);
+      ctx.fillText(`${tierLabel(tier)} ${+hi.toFixed(1)}%`, a.right - 6, top - 4);
     }
     ctx.restore();
   },
@@ -1375,7 +1545,7 @@ function buildTabs() {
   const mk = (id, label) => el("button", {
     class: `tab${S.view === id ? " active" : ""}`, type: "button", role: "tab", onclick: () => setView(id),
   }, label);
-  tabs.replaceChildren(mk("distance", "Distance"), ...S.order.map((s) => mk(s, s)));
+  tabs.replaceChildren(mk("distance", L("tab_distance")), ...S.order.map((s) => mk(s, s)));
 }
 
 function setView(v) {
@@ -1405,7 +1575,8 @@ function series(sym, key) {
 
 function buildChart() {
   if (typeof Chart === "undefined") { $("chartEmpty").hidden = false; return; }
-  if (chart) chart.destroy();
+  if (chart) { chart.destroy(); chart = null; }
+  if (!$("foldChart").open) return;
   const legend = $("chartLegend");
   const common = {
     responsive: true, maintainAspectRatio: false, animation: false,
@@ -1426,10 +1597,8 @@ function buildChart() {
 
   if (S.view === "distance") {
     $("chartTitle").textContent = L("chart_title");
-    $("chartSub").textContent = S.minutesPerStep
-      ? `All positions · tier bands · ▲ funding settlement · simulated clock (${S.minutesPerStep} min per step)`
-      : "All positions · shaded bands are the warning / critical / emergency tiers";
-    if (S.session?.reasons?.length) $("chartSub").textContent += ` · tiers widened (${S.session.reasons.join(", ")})`;
+    $("chartSub").textContent = S.minutesPerStep ? L("chart_sub_clock", { minutes: S.minutesPerStep }) : L("chart_sub");
+    if (S.session?.reasons?.length) $("chartSub").textContent += ` · ${L("chart_widened", { reasons: S.session.reasons.join(", ") })}`;
     const datasets = S.order.map((sym) => ({
       label: sym, data: series(sym, "distance_pct"), borderColor: symbolColor(sym),
       backgroundColor: symbolColor(sym), borderWidth: 2.5, tension: 0.35, spanGaps: true,
@@ -1443,7 +1612,7 @@ function buildChart() {
     chart = new Chart($("chart"), { type: "line", data: { labels: labels(), datasets }, options: common, plugins: [tierBands] });
     legend.replaceChildren(
       ...S.order.map((s) => el("span", {}, el("i", { style: { background: symbolColor(s) } }), s)),
-      el("span", { style: { color: COLORS.funding } }, "▲ funding paid"),
+      el("span", { style: { color: COLORS.funding } }, `▲ ${L("legend_funding")}`),
     );
     return;
   }
@@ -1455,8 +1624,8 @@ function buildChart() {
   const liq = last ? last.liquidation_price : null;
   const tp = S.tierPrices[sym] || {};
   const flat = (v) => new Array(S.totalSteps + 1).fill(v);
-  $("chartTitle").textContent = `${sym} · price vs liquidation`;
-  $("chartSub").textContent = last ? `True liquidation now ${price(liq)} (moves with the shared wallet and funding) · ▲ settlement` : "";
+  $("chartTitle").textContent = L("chart_symbol_title", { symbol: sym });
+  $("chartSub").textContent = last ? L("chart_symbol_sub", { price: price(liq) }) : "";
 
   const ctx = $("chart").getContext("2d");
   const grad = ctx.createLinearGradient(0, 0, 0, 380);
@@ -1464,10 +1633,10 @@ function buildChart() {
   grad.addColorStop(1, alpha(col, 0.02));
 
   const datasets = [
-    { label: "Mark price", data: series(sym, "mark_price"), borderColor: col, backgroundColor: grad, fill: { target: 1 }, borderWidth: 2.5, pointRadius: 0, tension: 0.35, spanGaps: true },
-    { label: "True liquidation", data: series(sym, "liquidation_price"), borderColor: COLORS.emergency, borderWidth: 2, borderDash: [6, 5], fill: false, spanGaps: true, stepped: true,
+    { label: L("legend_mark"), data: series(sym, "mark_price"), borderColor: col, backgroundColor: grad, fill: { target: 1 }, borderWidth: 2.5, pointRadius: 0, tension: 0.35, spanGaps: true },
+    { label: L("legend_true_liq"), data: series(sym, "liquidation_price"), borderColor: COLORS.emergency, borderWidth: 2, borderDash: [6, 5], fill: false, spanGaps: true, stepped: true,
       pointRadius: fundingPoint(sym, 6), pointStyle: "triangle", pointBackgroundColor: COLORS.funding, pointBorderColor: COLORS.funding },
-    ...TIERS.map((t) => ({ label: `${t[0].toUpperCase() + t.slice(1)} (${+tiersOf(sym)[t].toFixed(1)}%)`, data: flat(tp[t]), borderColor: alpha(COLORS[t], 0.55), borderWidth: 1, borderDash: [3, 4], pointRadius: 0, fill: false })),
+    ...TIERS.map((t) => ({ label: `${tierLabel(t)} (${+tiersOf(sym)[t].toFixed(1)}%)`, data: flat(tp[t]), borderColor: alpha(COLORS[t], 0.55), borderWidth: 1, borderDash: [3, 4], pointRadius: 0, fill: false })),
   ];
   const vals = [...h.map((p) => p.mark_price), ...h.map((p) => p.liquidation_price)].filter((v) => v != null);
   const lo = Math.min(...vals), hi = Math.max(...vals), pad = (hi - lo) * 0.08 || hi * 0.02;
@@ -1477,10 +1646,10 @@ function buildChart() {
   common.plugins.tooltip.callbacks = { label: (i) => ` ${i.dataset.label}: ${price(i.raw)}` };
   chart = new Chart($("chart"), { type: "line", data: { labels: labels(), datasets }, options: common });
   legend.replaceChildren(
-    el("span", {}, el("i", { style: { background: col } }), "Mark price"),
-    el("span", { style: { color: COLORS.emergency } }, el("i", { class: "dashed" }), "True liquidation"),
-    el("span", { style: { color: COLORS.funding } }, "▲ funding paid"),
-    ...TIERS.map((t) => el("span", { style: { color: COLORS[t] } }, el("i", { class: "dashed" }), `${t} tier`)),
+    el("span", {}, el("i", { style: { background: col } }), L("legend_mark")),
+    el("span", { style: { color: COLORS.emergency } }, el("i", { class: "dashed" }), L("legend_true_liq")),
+    el("span", { style: { color: COLORS.funding } }, `▲ ${L("legend_funding")}`),
+    ...TIERS.map((t) => el("span", { style: { color: COLORS[t] } }, el("i", { class: "dashed" }), L("legend_tier", { tier: tierLabel(t) }))),
   );
 }
 
@@ -1507,7 +1676,8 @@ function updateChart(tick) {
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${proto}//${location.host}/ws/${MODE}`);
+  const q = MODE === "demo" ? `?lang=${encodeURIComponent(I18N.lang)}` : "";
+  ws = new WebSocket(`${proto}//${location.host}/ws/${MODE}${q}`);
   ws.onopen = () => {
     retry = 0;
     $("connPill").classList.add("connected");
@@ -1539,7 +1709,7 @@ async function setupScope() {
   $("ribbonLink").hidden = true;
   const pill = $("scopePill");
   pill.textContent = L("scope_private", { who });
-  pill.className = "pill pill-private";
+  pill.className = "pill pill-sm pill-private";
   pill.title = L("scope_private_title");
   $("signInBtn").hidden = true;
   $("signOutBtn").hidden = false;
@@ -1553,6 +1723,15 @@ async function setupScope() {
 
 function venueTitle(b) {
   return `${venueLabel(b.venue)}${b.network === "testnet" ? L("testnet") : ""}`;
+}
+
+function actionTypeLabel(type) {
+  const key = `action_type_${type}`;
+  return hasL(key) ? L(key) : (type || "").replace(/_/g, " ");
+}
+function actionStatusLabel(status) {
+  const key = `action_status_${status}`;
+  return hasL(key) ? L(key) : status;
 }
 
 async function refreshAccount() {
@@ -1570,7 +1749,7 @@ async function refreshAccount() {
   const binds = $("accountBindings");
   binds.replaceChildren(...(data.bindings || []).map((b) => el("div", { class: "binding" },
     el("span", { class: `venue venue-${b.venue}` }, venueTitle(b)),
-    el("span", {}, b.binding_type === "wallet" ? "wallet" : (b.permissions || []).join(" · ") || "api key"),
+    el("span", {}, b.binding_type === "wallet" ? L("binding_wallet") : L("binding_readonly")),
     el("span", { class: "hint" }, b.api_key || b.wallet_address || ""),
   )));
   if (!data.bindings?.length) binds.append(empty("🔌", L("no_exchanges"), L("no_exchanges_hint")));
@@ -1579,26 +1758,23 @@ async function refreshAccount() {
   const box = $("accountPositions");
   const positions = data.positions?.positions || [];
   box.replaceChildren(...positions.map((p) => el("div", { class: "acct-pos" },
-    el("span", {}, el("b", {}, p.symbol), " ", el("span", { class: `side side-${p.side}` }, p.side.toUpperCase()), " ",
-      el("span", { class: `venue venue-${p.venue}` }, venueLabel(p.venue)),
-      p.margin_mode ? el("span", { class: `mode mode-${p.margin_mode}` }, p.margin_mode.toUpperCase()) : null),
-    el("span", {}, `mark ${price(p.mark_price)} · liq ${price(p.liquidation_price)}`,
+    el("span", {}, el("b", {}, p.symbol), " ", sideTag(p.side), " ", venueTag(p.venue),
+      p.margin_mode ? el("span", { class: `mode mode-${p.margin_mode}` }, modeLabel(p.margin_mode)) : null),
+    el("span", {}, `${L("mark_at", { price: price(p.mark_price) })} · ${L("liq_at", { price: price(p.liquidation_price) })}`,
       p.true_liquidation?.price && Math.abs(p.true_liquidation.price - p.liquidation_price) / (p.liquidation_price || 1) > 0.0005
-        ? ` · true ${price(p.true_liquidation.price)}` : ""),
+        ? ` · ${L("true_liq", { price: price(p.true_liquidation.price) })}` : ""),
     el("span", { class: `d c-${tierFor(p.distance_to_liquidation_pct)}` }, pct(p.distance_to_liquidation_pct)),
     el("button", { class: "mini-btn", type: "button", title: L("rescue_sim"), onclick: () => loadLiveRescue(p.symbol, p.venue) }, "🛟"),
     toolButtons(p.symbol, p.venue, true),
     protectionChips((data.protection || []).find((x) => x.symbol === p.symbol && x.venue === p.venue)),
     p.funding ? el("span", { class: "acct-fund" },
-      `funding ${p.funding.rate_pct >= 0 ? "+" : ""}${p.funding.rate_pct.toFixed(4)}%/${p.funding.interval_hours}h · next ${duration(p.funding.minutes_to_settlement)} · `
-      + (p.funding.drift || []).map((d) => `${d.horizon_hours}h → ${distText(d.distance_pct, d.liquidation_price == null)}`).join(" · ")
-      + ` (${p.funding.label})`) : null,
+      `${L("funding_rate_line", { rate: signedRate(p.funding), next: duration(p.funding.minutes_to_settlement) })} · ${driftText(p.funding)} (${p.funding.label})`) : null,
   )));
   if (!positions.length) box.append(empty("📭", L("no_positions"), L(data.label ? "no_positions_open" : "no_positions_hint")));
   const live = accountInsights(data.insights);
   if (live) box.append(live);
   for (const a of data.escalations || []) {
-    box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${a.severity.toUpperCase()} · ${L("reminders", { sent: a.reminders_sent, max: a.max_reminders })} `,
+    box.prepend(el("div", { class: `acct-wake c-${a.severity}` }, `⏰ ${a.symbol} ${tierLabel(a.severity)} · ${L("reminders", { sent: a.reminders_sent, max: a.max_reminders })} `,
       el("button", { class: "mini-btn ack-btn", type: "button", onclick: async () => {
         if (await postJson("/api/me/live/ack", { ack_id: a.id })) refreshAccount();
       } }, L("awake")),
@@ -1612,7 +1788,7 @@ async function refreshAccount() {
   acts.replaceChildren(...(data.actions || []).slice().reverse().map((a) => el("div", { class: "au" },
     el("div", { class: "au-time" }, clock(a.timestamp)),
     el("div", {},
-      el("div", { class: "au-event" }, `${(a.action_type || "").replace(/_/g, " ")} · ${a.symbol}`, el("span", { class: "src" }, a.status)),
+      el("div", { class: "au-event" }, `${actionTypeLabel(a.action_type)} · ${a.symbol}`, el("span", { class: "src" }, actionStatusLabel(a.status))),
       el("div", { class: "au-detail" }, [a.amount_usd ? money(a.amount_usd, { dp: 2 }) : null, a.details?.reason || a.details?.result].filter(Boolean).join(" · ")),
     ),
   )));
@@ -1624,23 +1800,28 @@ function accountInsights(ins) {
   const parts = [];
   const atRisk = (ins.triage || []).filter((t) => t.at_risk);
   if (atRisk.length) {
-    parts.push(el("div", { class: "acct-ins" }, el("b", {}, "🎯 Handle in order: "),
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `🎯 ${L("ins_handle_order")} `),
       atRisk.map((t, i) => el("span", { class: `c-${t.severity}` }, `${i ? " → " : ""}${t.symbol} ${pct(t.distance_pct)}`))));
   }
   for (const st of ins.stress || []) {
     if (st.liq_move_down_pct == null && st.symbols.length < 2) continue;
-    const shocks = st.shocks.filter((x) => x.market_move_pct < 0).map((x) => `${x.market_move_pct}%: ${x.liquidated ? "LIQUIDATED" : "ok"}`).join(" · ");
-    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `📉 ${venueLabel(st.venue)} cross: `),
-      st.liq_move_down_pct != null ? `a ${pct(st.liq_move_down_pct)} correlated drop liquidates the account · ` : "", shocks));
+    const shocks = st.shocks.filter((x) => x.market_move_pct < 0)
+      .map((x) => `${x.market_move_pct}%: ${L(x.liquidated ? "shock_liquidated" : "shock_ok")}`).join(" · ");
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `📉 ${L("ins_cross", { venue: venueLabel(st.venue) })} `),
+      st.liq_move_down_pct != null ? `${L("ins_drop_liquidates", { pct: pct(st.liq_move_down_pct) })} · ` : "", shocks));
   }
   for (const c of (ins.comparisons || []).filter((x) => x.gap_pct >= 1)) {
     parts.push(el("div", { class: "acct-ins" }, el("b", {}, `🧲 ${c.symbol}: `),
-      `platform liq ${price(c.platform_price)} (${pct(c.platform_distance_pct)}) vs LiqGuard ${price(c.correlated_price)} (${pct(c.correlated_distance_pct)}) — `,
-      el("b", { class: "c-critical" }, `${c.gap_pct.toFixed(1)} pts closer`)));
+      `${L("ins_liq_compare", {
+        platform: price(c.platform_price), platform_pct: pct(c.platform_distance_pct),
+        ours: price(c.correlated_price), ours_pct: pct(c.correlated_distance_pct),
+      })} — `,
+      el("b", { class: "c-critical" }, L("ins_pts_closer", { pts: c.gap_pct.toFixed(1) }))));
   }
   if (ins.concentration?.flagged) parts.push(el("div", { class: "acct-ins c-warning" }, `🧲 ${ins.concentration.message}`));
   for (const z of (ins.sizing || []).filter((x) => x.status === "oversized")) {
-    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `📏 ${z.symbol}: `), `${pct(z.risk_pct)} of equity at its ${z.exit_kind} → suggested ${fmtSize(z.suggested_size)}`));
+    parts.push(el("div", { class: "acct-ins" }, el("b", {}, `📏 ${z.symbol}: `),
+      L("ins_oversized", { pct: pct(z.risk_pct), exit: z.exit_label || z.exit_kind, size: fmtSize(z.suggested_size) })));
   }
   return parts.length ? el("div", { class: "acct-insights" }, ...parts) : null;
 }
@@ -1672,8 +1853,9 @@ async function openTool(tool, symbol, venue, live) {
   }, toolLabel(t))));
   $("toolBody").replaceChildren(el("div", { class: "tool-line muted" }, L("tool_loading")));
   if (!dlg.open) dlg.showModal();
-  const q = `symbol=${encodeURIComponent(symbol)}&tool=${tool}`;
-  const url = live ? `/api/me/position-tool/live?${q}&venue=${encodeURIComponent(venue)}` : `${API}/position-tool?${q}&lang=${I18N.lang}`;
+  const url = live
+    ? `/api/me/position-tool/live?${new URLSearchParams({ symbol, tool, venue })}`
+    : api("/position-tool", { symbol, tool });
   try {
     const r = await fetch(url, { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
@@ -1847,7 +2029,9 @@ async function switchLanguage() {
   const next = I18N.lang === "zh-Hant" ? "en" : "zh-Hant";
   localStorage.setItem(LANG_KEY, next);
   if (MODE === "me") await sendJson("/api/me/language", { language: next });
-  location.reload();
+  const url = new URL(location.href);
+  if (url.searchParams.has("lang")) url.searchParams.set("lang", next);
+  location.assign(url.toString());
 }
 
 async function bootstrap() {
@@ -1856,7 +2040,7 @@ async function bootstrap() {
   } catch (err) { /* keep the built-in English text */ }
   if (!(await setupScope())) return;
   try {
-    const r = await fetch(`${API}/snapshot`, { credentials: "same-origin" });
+    const r = await fetch(api("/snapshot"), { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (r.ok) applySnapshot(await r.json());
   } catch (err) {
@@ -1868,12 +2052,13 @@ async function bootstrap() {
 document.addEventListener("DOMContentLoaded", () => {
   $("simulateBtn").addEventListener("click", async () => {
     $("simulateBtn").disabled = true;
-    const res = await post(`${API}/simulate`);
+    const res = await post(api("/simulate"));
     if (!res) $("simulateBtn").disabled = false;
   });
-  $("stopBtn").addEventListener("click", () => post(`${API}/simulate/stop`));
+  $("stopBtn").addEventListener("click", () => post(api("/simulate/stop")));
   $("scenarioSelect").addEventListener("change", (ev) => switchScenario(ev.target.value));
-  $("resetBtn").addEventListener("click", () => post(`${API}/simulate/reset`));
+  $("resetBtn").addEventListener("click", () => post(api("/simulate/reset")));
+  $("foldChart").addEventListener("toggle", () => { if ($("foldChart").open) { buildTabs(); buildChart(); } });
   $("signOutBtn").addEventListener("click", async () => {
     await fetch("/auth/logout", { method: "POST", headers: CSRF_HEADERS, credentials: "same-origin" });
     location.assign("/");

@@ -1,0 +1,108 @@
+"""
+Render the real dashboard in Chromium and read it like a user would.
+
+The zh-Hant page, after a full demo run with every section unfolded, a
+position expanded and a quick-action report open, must show no English
+apart from tickers, exchange names and units. Skipped when Playwright or
+its Chromium build is not installed (`pip install playwright && playwright
+install chromium`).
+"""
+
+import socket
+import threading
+import time
+
+import pytest
+import uvicorn
+
+from liqguard.ai import MetaLLMClient
+from liqguard.simulation import MarketSimulation
+from liqguard.web import create_app
+
+from .zh_scan import english_words
+
+sync_api = pytest.importorskip("playwright.sync_api")
+
+LANG_TOGGLE = "langBtn"
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def server():
+    sim = MarketSimulation(MetaLLMClient(use_mock=True), tick_interval=0.03, escalation_seconds_per_minute=0.01)
+    port = _free_port()
+    srv = uvicorn.Server(uvicorn.Config(create_app(demo_simulation=sim), host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=srv.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 15
+    while not srv.started and time.time() < deadline:
+        time.sleep(0.05)
+    if not srv.started:
+        pytest.skip("dashboard server did not start")
+    yield f"http://127.0.0.1:{port}"
+    srv.should_exit = True
+    thread.join(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def browser():
+    with sync_api.sync_playwright() as p:
+        try:
+            b = p.chromium.launch()
+        except Exception as exc:
+            pytest.skip(f"Chromium unavailable: {exc}")
+        yield b
+        b.close()
+
+
+def _visible_english(page) -> list[tuple[str, list[str]]]:
+    text = page.evaluate("() => document.body.innerText")
+    attrs = page.evaluate(
+        f"""() => [...document.querySelectorAll('[title],[placeholder],[aria-label]')]
+        .filter((n) => n.id !== '{LANG_TOGGLE}')
+        .flatMap((n) => [n.title, n.placeholder, n.getAttribute('aria-label')]).filter(Boolean)"""
+    )
+    return [(line.strip(), english_words(line)) for line in [*text.splitlines(), *attrs] if english_words(line)]
+
+
+def _run_demo(page, base: str, lang: str) -> None:
+    page.goto(f"{base}/?lang={lang}")
+    page.wait_for_function("() => document.querySelectorAll('#positions .prow').length > 0", timeout=15000)
+    page.click("#simulateBtn")
+    page.wait_for_function("() => S.state === 'finished'", timeout=60000)
+    page.evaluate("() => document.querySelectorAll('details.fold').forEach((d) => { d.open = true; })")
+    page.click("#positions .prow")
+    page.wait_for_selector(".pdetail")
+    page.click("#heroRescueBtn")
+    page.wait_for_selector("#rescueBody .rs-grid", timeout=15000)
+
+
+def test_zh_dashboard_shows_no_english(server, browser):
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    _run_demo(page, server, "zh-Hant")
+    assert page.evaluate("() => document.documentElement.lang") == "zh-Hant-TW"
+    assert page.locator("#timeline .tl-item").count() > 5 and page.locator("#audit .au").count() > 5
+    leftovers = _visible_english(page)
+
+    page.click(".pdetail .tool-btn[data-tool='wick']")
+    page.wait_for_selector("#toolBody .tool-line:not(.muted)")
+    leftovers += _visible_english(page)
+    page.click("#toolClose")
+
+    assert not errors, errors
+    assert not leftovers, leftovers[:15]
+
+
+def test_en_dashboard_keeps_english(server, browser):
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    _run_demo(page, server, "en")
+    assert page.inner_text("#riskLevel") in {"SAFE", "WARNING", "DANGER"}
+    assert page.inner_text("#positions .prow-risk") in {"Safe", "Warning", "Critical", "Emergency"}
+    assert "Total cost" in page.inner_text("#rescueBody")

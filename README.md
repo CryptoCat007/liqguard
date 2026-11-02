@@ -131,9 +131,38 @@ Handlers, keyboards, alerts and the dashboard contain no hard-coded user-facing 
 - **`setMyCommands`** is registered for the default (English) and for `language_code=zh`.
 - **Dashboard.** The EN / 中文 button in the top bar switches the page (English by default;
   `?lang=zh-Hant` also works). Signed in, the choice is saved to your account and shared with
-  Telegram. Numbers-heavy card bodies are rendered in English.
+  Telegram. Every heading, card body, badge, toast, chart legend and server payload (rescue
+  options, wick stress, stop checks, funding lines, audit log, Muse text) is localized; the public
+  demo runs one simulation per language so a Chinese visitor never receives English events.
 - `test_i18n.py` checks that every key exists in both locales with the same placeholders, that no
   string is left untranslated, and that every dashboard key exists.
+- `test_dashboard_zh.py` runs every demo scenario in zh-Hant and fails if any API or WebSocket
+  payload still contains English words. Only tickers, units (all-caps or single letters),
+  Binance, Hyperliquid, Muse, LiqGuard, Telegram and `/commands` are allowed. It also checks that
+  `app.js` and `index.html` contain no hard-coded English text.
+- `test_dashboard_browser.py` opens the real page in Chromium, runs the demo, unfolds every
+  section, expands a position, opens the rescue simulator and a quick-action report, and scans
+  what is on screen with the same rule. It is skipped when Playwright is not installed
+  (`pip install -e ".[browser]" && playwright install chromium`).
+
+### Dashboard layout
+
+The page is built for a first look:
+
+1. **Hero:** the overall status (SAFE / WARNING / DANGER, taken from the position tiers), the
+   riskiest position (triage #1) with its distance to liquidation, and one recommended action
+   (the cheapest rescue option when a position is at risk), with buttons to compare rescue options
+   or open that position.
+2. **Four numbers:** closest distance, margin needed to reach the safety target, unrealized PnL and
+   total notional.
+3. **Positions:** one row each (symbol, exchange, side, distance, risk). Tap a row for its gauge,
+   true liquidation, funding, protection chips and the same four quick actions as Telegram
+   (🛟 Rescue, 🕯 Wick, 🛑 Stop, 💸 Funding).
+4. **Detailed tools, folded:** chart, triage, portfolio stress, platform vs real liquidation,
+   sizing, rescue simulator, wick stress, stop-loss and ADL, funding, alert timeline, Muse advice
+   and the audit log.
+
+The demo controls (scenario, simulate, stop, reset) sit in a small bar above the hero.
 
 ## Telegram menu
 

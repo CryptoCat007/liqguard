@@ -1,5 +1,9 @@
 """The dashboard in zh-Hant: every payload the page renders is Chinese apart from tickers, names and units."""
 
+import re
+from html.parser import HTMLParser
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -94,3 +98,54 @@ def _public_sims(c: TestClient) -> list[MarketSimulation]:
     hubs = c.app.state.hubs._hubs.values()
     return [h.simulation for h in hubs if h.simulation.owner_id is None]
 
+
+STATIC = Path(__file__).resolve().parents[1] / "web" / "static"
+# Machine strings in app.js that never reach the page as text.
+TECHNICAL = {"use strict", "Content-Type", "Enter", "600 10px Inter, ui-sans-serif, sans-serif"}
+CSS_LIKE = re.compile(r"^[a-z0-9 _-]*$")
+PROSE = re.compile(r"[A-Za-z]{2,} [A-Za-z]{2,}|^[A-Z][a-z]")
+
+
+def _js_literals(js: str) -> list[str]:
+    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+    js = re.sub(r"^\s*//.*$", "", js, flags=re.M)
+    out = re.findall(r'"((?:[^"\\\n]|\\.)*)"', js)
+    for body in re.findall(r"`((?:[^`\\]|\\.)*)`", js):
+        out += [part for part in re.split(r"\$\{(?:[^{}]|\{[^{}]*\})*\}", body) if "${" not in part and "L(" not in part]
+    return out
+
+
+def test_app_js_has_no_hardcoded_english_text():
+    literals = _js_literals((STATIC / "app.js").read_text())
+    assert len(literals) > 500
+    leftovers = sorted({s for s in literals if PROSE.search(s) and s not in TECHNICAL and not CSS_LIKE.match(s) and english_words(s)})
+    assert not leftovers, leftovers
+
+
+class _Texts(HTMLParser):
+    """Text nodes of index.html that no data-i18n attribute replaces at load time."""
+
+    VOID = {"meta", "link", "input", "br", "img", "path", "stop"}
+
+    def __init__(self):
+        super().__init__()
+        self.stack: list[bool] = []
+        self.loose: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.VOID:
+            self.stack.append(any(name == "data-i18n" for name, _ in attrs))
+
+    def handle_endtag(self, tag):
+        if tag not in self.VOID and self.stack:
+            self.stack.pop()
+
+    def handle_data(self, data):
+        if data.strip() and not (self.stack and self.stack[-1]) and english_words(data):
+            self.loose.append(data.strip())
+
+
+def test_every_english_text_in_the_page_has_a_locale_key():
+    parser = _Texts()
+    parser.feed((STATIC / "index.html").read_text())
+    assert not parser.loose, parser.loose
