@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from liqguard.ai import MetaLLMClient
 from liqguard.config import Settings
 from liqguard.core import AppContext
-from liqguard.logsafe import install_log_redaction
+from liqguard.logsafe import install_audit_log, install_log_redaction
 
 from .server import create_app
 
@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 async def _serve(args: argparse.Namespace) -> None:
     settings = Settings.from_env()
-    settings = dataclasses.replace(settings, dashboard_host=args.host, dashboard_port=args.port)
-    install_log_redaction(settings.telegram_token, settings.meta_api_key, settings.session_secret)
+    settings = dataclasses.replace(settings, dashboard_host=args.host or settings.dashboard_host,
+                                   dashboard_port=args.port or settings.dashboard_port)
+    redaction = install_log_redaction(settings.telegram_token, settings.meta_api_key, settings.session_secret)
+    install_audit_log(settings.audit_log_path, redaction)
 
     if args.public_only:
         app = create_app(llm_client=MetaLLMClient(api_key=settings.meta_api_key))
@@ -43,15 +45,17 @@ async def _serve(args: argparse.Namespace) -> None:
         app = create_app(ctx)
         logger.info("Muse: %s · master key source: %s", "mock" if ctx.llm.is_mock else "live", ctx.storage.key_source)
 
-    logger.info("Dashboard: http://%s:%s (public demo at /, sign-in at /login)", args.host, args.port)
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning", access_log=False)
+    host, port = settings.dashboard_host, settings.dashboard_port
+    logger.info("Dashboard: http://%s:%s (public demo at /, sign-in at /login)", host, port)
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
     await uvicorn.Server(config).serve()
 
 
 def run_dashboard() -> None:
     parser = argparse.ArgumentParser(description="LiqGuard web dashboard")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
+    parser.add_argument("--host", default=None, help="Bind address (default: LIQGUARD_DASHBOARD_HOST, else 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port (default: LIQGUARD_DASHBOARD_PORT, else $PORT, else 8765)")
     parser.add_argument("--public-only", action="store_true", help="Serve only the public demo page")
     args = parser.parse_args()
 

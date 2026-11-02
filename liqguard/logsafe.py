@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Iterable, Optional
 
 REDACTED = "[REDACTED]"
@@ -56,3 +57,27 @@ def install_log_redaction(*literals: Optional[str]) -> RedactingFilter:
     for handler in root.handlers:
         handler.addFilter(flt)
     return flt
+
+
+AUDIT_LOGGER = "liqguard.protect.audit"
+
+
+def install_audit_log(path: Optional[Path], redaction: Optional[logging.Filter] = None) -> Optional[logging.Handler]:
+    """Append every protective-action audit line to `path` (mode 600), redacted like the console."""
+    if path is None:
+        return None
+    path = Path(path)
+    logger = logging.getLogger(AUDIT_LOGGER)
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == path.resolve():
+            return handler
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(mode=0o600, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    if redaction is not None:
+        handler.addFilter(redaction)
+    logger.addHandler(handler)
+    if logger.getEffectiveLevel() > logging.INFO:
+        logger.setLevel(logging.INFO)
+    return handler

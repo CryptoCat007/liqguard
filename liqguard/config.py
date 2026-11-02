@@ -31,6 +31,10 @@ def _hours(value: Optional[str]) -> tuple[int, int]:
         return 21, 1
 
 
+def _path(value: Optional[str]) -> Optional[Path]:
+    return Path(value).expanduser() if value else None
+
+
 def _int(value: Optional[str], default: int) -> int:
     try:
         return int(value) if value not in (None, "") else default
@@ -44,8 +48,10 @@ class Settings:
     meta_api_key: Optional[str] = field(default=None, repr=False)
     session_secret: Optional[str] = field(default=None, repr=False)
 
+    data_dir: Optional[Path] = None
     key_file: Optional[Path] = None
     db_path: str = "liqguard.db"
+    audit_log_path: Optional[Path] = None
     poll_interval: int = 30
 
     dashboard_enabled: bool = False
@@ -74,17 +80,22 @@ class Settings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
-        key_file = env.get("LIQGUARD_KEY_FILE")
+        data_dir = _path(env.get("LIQGUARD_DATA_DIR"))
+        key_file = _path(env.get("LIQGUARD_KEY_FILE")) or (data_dir / "encryption.key" if data_dir else None)
+        db_path = env.get("LIQGUARD_DB_PATH") or str(data_dir / "liqguard.db" if data_dir else "liqguard.db")
+        audit_log = _path(env.get("LIQGUARD_AUDIT_LOG")) or (data_dir / "audit.log" if data_dir else None)
         return cls(
             telegram_token=env.get("TELEGRAM_BOT_TOKEN") or None,
             meta_api_key=env.get("META_API_KEY") or None,
             session_secret=env.get("LIQGUARD_SESSION_SECRET") or None,
-            key_file=Path(key_file).expanduser() if key_file else None,
-            db_path=env.get("LIQGUARD_DB_PATH", "liqguard.db"),
+            data_dir=data_dir,
+            key_file=key_file,
+            db_path=str(Path(db_path).expanduser()),
+            audit_log_path=audit_log,
             poll_interval=_int(env.get("LIQGUARD_POLL_INTERVAL"), 30),
             dashboard_enabled=_bool(env.get("LIQGUARD_DASHBOARD")),
             dashboard_host=env.get("LIQGUARD_DASHBOARD_HOST", "127.0.0.1"),
-            dashboard_port=_int(env.get("LIQGUARD_DASHBOARD_PORT"), 8765),
+            dashboard_port=_int(env.get("LIQGUARD_DASHBOARD_PORT") or env.get("PORT"), 8765),
             public_url=(env.get("LIQGUARD_PUBLIC_URL") or "").rstrip("/") or None,
             bot_username=(env.get("LIQGUARD_BOT_USERNAME") or "").lstrip("@") or None,
             session_ttl=_int(env.get("LIQGUARD_SESSION_TTL"), 12 * 3600),
@@ -112,6 +123,13 @@ class Settings:
             risk_per_trade_pct=self.risk_per_trade_pct,
             max_margin_pct=self.max_margin_pct,
         )
+
+    def ensure_data_dirs(self) -> None:
+        """Create the data directory and the parents of every data file (DB, master key, audit log)."""
+        dirs = [self.data_dir] if self.data_dir else []
+        dirs += [Path(p).parent for p in (self.db_path, self.key_file, self.audit_log_path) if p]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
 
     @property
     def taker_fees(self) -> dict[str, float]:

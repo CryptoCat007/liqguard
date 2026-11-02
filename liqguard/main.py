@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from liqguard.config import Settings
 from liqguard.core import AppContext
-from liqguard.logsafe import install_log_redaction
+from liqguard.logsafe import install_audit_log, install_log_redaction
 from liqguard.storage import EncryptedStorage, EncryptionKeyError
 from liqguard.telegram.app import wire_bot
 from liqguard.telegram.polling import make_session, polling_kwargs
@@ -66,7 +66,8 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
         settings = dataclasses.replace(settings, dashboard_enabled=True)
     if dashboard_port:
         settings = dataclasses.replace(settings, dashboard_port=dashboard_port)
-    install_log_redaction(settings.telegram_token, settings.meta_api_key, settings.session_secret)
+    redaction = install_log_redaction(settings.telegram_token, settings.meta_api_key, settings.session_secret)
+    install_audit_log(settings.audit_log_path, redaction)
 
     logger.info("Starting LiqGuard...")
     try:
@@ -82,15 +83,7 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
         session=make_session(),
         default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
     )
-    if not settings.bot_username:
-        try:
-            me = await bot.get_me()
-            ctx.settings = dataclasses.replace(ctx.settings, bot_username=me.username)
-        except Exception as e:
-            logger.warning("Could not read bot username (Telegram Login Widget disabled): %s", type(e).__name__)
-
     app = wire_bot(ctx, bot)
-    await app.ui.set_commands(bot)
     dp, escalation, monitor = app.dispatcher, app.escalation, app.monitor
 
     dashboard_server = None
@@ -112,10 +105,19 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
         logger.info("Dashboard disabled: /dashboard will tell users it is not available.")
 
     logger.info("Muse: %s", "mock mode" if ctx.llm.is_mock else "live API")
-    logger.info("Database: %s · poll interval %ss · protective actions %s",
-                settings.db_path, settings.poll_interval, "enabled (testnet)" if ctx.actions.is_enabled() else "disabled")
+    logger.info("Database: %s · audit log: %s · poll interval %ss · protective actions %s",
+                settings.db_path, settings.audit_log_path or "database only", settings.poll_interval,
+                "enabled (testnet)" if ctx.actions.is_enabled() else "disabled")
 
     try:
+        # After the dashboard is up, so a slow Telegram API never delays /healthz.
+        if not settings.bot_username:
+            try:
+                me = await bot.get_me()
+                ctx.settings = dataclasses.replace(ctx.settings, bot_username=me.username)
+            except Exception as e:
+                logger.warning("Could not read bot username (Telegram Login Widget disabled): %s", type(e).__name__)
+        await app.ui.set_commands(bot)
         ctx.market.start()
         await monitor.start()
         escalation.start()
@@ -132,7 +134,7 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
 def main_sync() -> None:
     parser = argparse.ArgumentParser(description="LiqGuard Telegram bot")
     parser.add_argument("--dashboard", action="store_true", help="Also serve the web dashboard")
-    parser.add_argument("--dashboard-port", type=int, default=None, help="Dashboard port (default: 8765)")
+    parser.add_argument("--dashboard-port", type=int, default=None, help="Dashboard port (default: LIQGUARD_DASHBOARD_PORT, else $PORT, else 8765)")
     args = parser.parse_args()
     try:
         asyncio.run(main(dashboard=args.dashboard, dashboard_port=args.dashboard_port))

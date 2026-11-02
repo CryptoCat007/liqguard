@@ -217,6 +217,18 @@ def create_app(
         code = normalize(lang)
         return {"lang": code, "strings": web_catalog(code)}
 
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz():
+        """Liveness for Docker / reverse proxies: no secrets, no user data; 503 if the database is unreachable."""
+        if ctx is not None:
+            try:
+                async with ctx.storage.db.connect() as db:
+                    await db.execute("SELECT 1")
+            except Exception as e:
+                logger.warning("Health check: database unreachable (%s)", type(e).__name__)
+                return JSONResponse({"status": "error", "database": "unreachable"}, status_code=503)
+        return {"status": "ok"}
+
     @app.get("/api/health")
     async def health():
         body = {

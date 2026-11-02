@@ -53,7 +53,9 @@ class AppContext:
         market: Optional[MarketDataService] = None,
         wicks: Optional[WickService] = None,
     ) -> "AppContext":
-        storage = storage or EncryptedStorage(db_path=settings.db_path, key_file_path=settings.key_file)
+        if storage is None:
+            settings.ensure_data_dirs()
+            storage = EncryptedStorage(db_path=settings.db_path, key_file_path=settings.key_file)
         await storage.initialize()
         llm = llm or MetaLLMClient(api_key=settings.meta_api_key)
 
