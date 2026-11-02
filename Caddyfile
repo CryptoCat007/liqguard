@@ -1,0 +1,6 @@
+# Automatic https (Let's Encrypt) for the LiqGuard dashboard.
+# LIQGUARD_DOMAIN comes from .env, e.g. liqguard.example.com (its DNS A record must point here).
+{$LIQGUARD_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy liqguard:8765
+}

@@ -1,0 +1,55 @@
+# One LiqGuard instance per Telegram bot token: never scale this service above 1.
+#
+#   cp .env.example .env        # set TELEGRAM_BOT_TOKEN, LIQGUARD_PUBLIC_URL, LIQGUARD_DOMAIN
+#   docker compose up -d --build                      # app only, on 127.0.0.1:8765
+#   docker compose --profile https up -d --build      # app + Caddy with automatic https
+#
+# See DEPLOY.md.
+name: liqguard
+
+services:
+  liqguard:
+    build: .
+    image: liqguard:latest
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    env_file: .env
+    environment:
+      # Pinned so a .env copied from .env.example can't move state out of the volume
+      # or the dashboard off 0.0.0.0. Empty means "derive from LIQGUARD_DATA_DIR / PORT".
+      LIQGUARD_DATA_DIR: /data
+      LIQGUARD_DB_PATH: ""
+      LIQGUARD_KEY_FILE: ""
+      LIQGUARD_AUDIT_LOG: ""
+      LIQGUARD_DASHBOARD: "true"
+      LIQGUARD_DASHBOARD_HOST: 0.0.0.0
+      LIQGUARD_DASHBOARD_PORT: ""
+      PORT: "8765"
+    ports:
+      # Loopback only: the public entry point is Caddy (or your own reverse proxy).
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - liqguard-data:/data
+
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on:
+      - liqguard
+    environment:
+      LIQGUARD_DOMAIN: ${LIQGUARD_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  liqguard-data:
+  caddy-data:
+  caddy-config:

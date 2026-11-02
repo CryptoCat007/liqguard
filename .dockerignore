@@ -1,0 +1,25 @@
+# Only the package and its metadata go into the image: never secrets or local state.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.venv
+venv
+env
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.log
+/data/
+uploads/
+liqguard.db
+Dockerfile
+docker-compose.yml
+Caddyfile
