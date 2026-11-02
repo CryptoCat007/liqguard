@@ -48,25 +48,25 @@ def mock_stop_explanation(check: StopCheck, language: str = "en") -> dict:
     fix = _preferred(check)
     liq = _usd(check.liquidation_price)
     if check.status == NO_STOP:
-        headline = (f"{check.symbol} 沒有止損單；價格觸及 {liq} 會被強平。" if zh else
+        headline = (f"{check.symbol} 沒有停損單；價格觸及 {liq} 會被強平。" if zh else
                     f"{check.symbol} has no stop-loss; at {liq} the exchange liquidates it.")
     elif check.status == BEYOND_LIQUIDATION:
-        headline = (f"{check.symbol} 的止損 {_usd(check.stop_price)} 在清算價 {liq} 之後，永遠不會觸發。" if zh else
+        headline = (f"{check.symbol} 的停損 {_usd(check.stop_price)} 在清算價 {liq} 之後，永遠不會觸發。" if zh else
                     f"{check.symbol}'s stop at {_usd(check.stop_price)} sits beyond the liquidation price {liq}: "
                     f"the exchange liquidates first and the stop never fires.")
     elif check.status == TOO_CLOSE:
-        headline = (f"{check.symbol} 的止損 {_usd(check.stop_price)} 離清算價 {liq} 只有 {check.gap_pct:.2f}%。" if zh else
+        headline = (f"{check.symbol} 的停損 {_usd(check.stop_price)} 離清算價 {liq} 只有 {check.gap_pct:.2f}%。" if zh else
                     f"{check.symbol}'s stop at {_usd(check.stop_price)} is only {check.gap_pct:.2f}% in front of "
                     f"liquidation at {liq}; a stop-market fill can slip past it in a wick.")
     else:
-        headline = f"{check.symbol} 的止損設定沒有問題。" if zh else f"{check.symbol}'s stop-loss is fine."
+        headline = f"{check.symbol} 的停損設定沒有問題。" if zh else f"{check.symbol}'s stop-loss is fine."
 
     if fix is None:
         explanation = ("目前沒有可計算的修正。" if zh else "No computed fix is available.")
         kind = "none"
     elif fix.kind == "move_stop":
         explanation = (
-            f"把止損設在 {_usd(fix.stop_price)}（清算前保留 {check.required_gap_pct:.2f}% 緩衝，"
+            f"把停損設在 {_usd(fix.stop_price)}（清算前保留 {check.required_gap_pct:.2f}% 緩衝，"
             f"至少一根典型 5 分鐘影線）；觸發時已實現損益約 {_usd(fix.pnl_at_stop_usd)}（含手續費）。" if zh else
             f"Place the stop at {_usd(fix.stop_price)}: that leaves {check.required_gap_pct:.2f}% before liquidation "
             f"(at least a typical 5m wick), and closing there realizes {_usd(fix.pnl_at_stop_usd)} including fees."
@@ -74,8 +74,8 @@ def mock_stop_explanation(check: StopCheck, language: str = "en") -> dict:
         kind = fix.kind
     elif fix.kind == "reduce":
         explanation = (
-            f"保留止損 {_usd(fix.stop_price)}，把倉位減少 {fix.reduce_pct:.1f}%（剩 {fix.new_size:.4f}），"
-            f"清算價移到 {_usd(fix.new_liquidation_price)}，止損會先觸發；手續費 {_usd(fix.fees_usd)}。" if zh else
+            f"保留停損 {_usd(fix.stop_price)}，把倉位減少 {fix.reduce_pct:.1f}%（剩 {fix.new_size:.4f}），"
+            f"清算價移到 {_usd(fix.new_liquidation_price)}，停損會先觸發；手續費 {_usd(fix.fees_usd)}。" if zh else
             f"Keep your stop at {_usd(fix.stop_price)} and cut the position {fix.reduce_pct:.1f}% "
             f"(to {fix.new_size:.4f}): liquidation moves to {_usd(fix.new_liquidation_price)}, so the stop fires first. "
             f"Fees {_usd(fix.fees_usd)}."
@@ -83,7 +83,7 @@ def mock_stop_explanation(check: StopCheck, language: str = "en") -> dict:
         kind = fix.kind
     else:
         explanation = (
-            f"保留止損 {_usd(fix.stop_price)}，追加 {_usd(fix.add_margin_usd)} 保證金，清算價移到 "
+            f"保留停損 {_usd(fix.stop_price)}，追加 {_usd(fix.add_margin_usd)} 保證金，清算價移到 "
             f"{_usd(fix.new_liquidation_price)}。" if zh else
             f"Keep your stop at {_usd(fix.stop_price)} and add {_usd(fix.add_margin_usd)} margin: liquidation moves to "
             f"{_usd(fix.new_liquidation_price)}, behind the stop."

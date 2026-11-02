@@ -125,14 +125,14 @@ class MuseService:
     def tool_note(self, tool: str, language: str, plan: Optional[RescuePlan] = None,
                   check: Optional[StopCheck] = None) -> Optional[Instant]:
         """
-        Muse's line under a quick report: the rescue recommendation or the
-        stop-loss fix ({"text", "mock"}). Wick stress and funding reports are
-        pure numbers with no Muse text.
+        The recommendation a quick report leads with: the rescue or the
+        stop-loss fix in one sentence ({"text", "mock"}). Wick stress and
+        funding reports are pure numbers with no Muse text.
         """
         if tool == "rescue" and plan is not None and not plan.already_safe:
             return self.rescue(plan, language).map(lambda e: _note(language, e, ("headline",)))
         if tool == "stop" and check is not None and check.needs_warning:
-            return self.explain_stop_fix_now(check, language).map(lambda e: _note(language, e, ("headline", "explanation")))
+            return self.explain_stop_fix_now(check, language).map(lambda e: _note(language, e, ("headline",)))
         return None
 
     # ------------------------------------------------------------------ chat

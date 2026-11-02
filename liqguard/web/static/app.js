@@ -408,7 +408,8 @@ function renderSummary(summary) {
     return;
   }
   $("headline").textContent = summary.headline;
-  $("summaryTag").hidden = !summary.mock;
+  $("summaryTag").textContent = L(summary.mock ? "muse_mark_mock" : "muse_mark");
+  $("summaryTag").hidden = false;
   renderHero();
 }
 
@@ -1254,16 +1255,24 @@ function updateAdvice(c) {
   }
 }
 
+/** The one recommendation a card or panel leads with: Muse's wording once it answered, else the rule-based text. */
+function recLine(text, live, attrs = {}) {
+  return el("div", { class: `rec-line${live ? " live" : ""}`, "data-live": String(!!live), ...attrs },
+    el("span", { class: "rec-text" }, `💡 ${text}`), " ",
+    el("span", { class: "muse-mark" }, L(live ? "muse_mark" : "muse_mark_mock")));
+}
+
 function adviceNode(c) {
   const actions = [];
-  if (c.margin_to_add_usd > 0) {
+  const rescueLed = c.rescue && !c.rescue.already_safe;
+  if (!rescueLed && c.margin_to_add_usd > 0) {
     actions.push(el("div", { class: "adv-act" },
       el("div", { class: "adv-act-label" }, L("opt_add_margin")),
       el("div", { class: "adv-act-value c-safe" }, money(c.margin_to_add_usd, { dp: 2 })),
       el("div", { class: "adv-act-sub" }, L("adv_new_liq", { price: price(c.new_liquidation_price), target: c.target_distance_pct })),
     ));
   }
-  if (c.reduce_size_pct > 0) {
+  if (!rescueLed && c.reduce_size_pct > 0) {
     actions.push(el("div", { class: "adv-act" },
       el("div", { class: "adv-act-label" }, L("adv_or_reduce")),
       el("div", { class: "adv-act-value c-warning" }, `${c.reduce_size_pct.toFixed(1)}%`),
@@ -1274,10 +1283,8 @@ function adviceNode(c) {
     el("div", { class: "adv-head" },
       el("span", { class: "adv-sym", style: { color: symbolColor(c.symbol) } }, c.symbol),
       el("span", { class: `lvl lvl-${c.level}-b` }, tierLabel(c.level)),
-      el("span", { class: "tag" }, c.mock ? L("muse_mock_tag") : "Muse"),
     ),
-    c.summary ? el("div", { class: "adv-summary" }, c.summary) : null,
-    el("div", { class: "adv-text" }, c.explanation),
+    recLine(c.recommendation?.text ?? c.explanation, !!c.recommendation?.live, { "data-rec": "advice" }),
     actions.length ? el("div", { class: "adv-actions" }, ...actions) : null,
     c.rescue ? rescueMini(c) : null,
     c.ack_id ? el("div", { class: "chips" }, ackButton(c.ack_id, c.symbol)) : null,
@@ -1540,14 +1547,11 @@ function renderRescue() {
 
   body.replaceChildren(
     head,
-    ex ? el("div", { class: "rs-muse" },
-      el("span", { class: "muse-glyph" }, "✦"),
-      el("div", {}, el("b", {}, ex.headline), el("div", { class: "rs-caveat" }, ex.caveat)),
-      el("span", { class: "tag" }, ex.mock ? L("muse_mock_tag") : "Muse"),
-    ) : null,
+    ex ? recLine(ex.headline, !ex.mock, { "data-rec": "rescue" }) : null,
     plan.already_safe
       ? empty("✅", L("rescue_safe", { target: plan.target_distance_pct }), L("rescue_safe_hint"))
       : el("div", { class: "rs-grid" }, ...cols),
+    ex?.caveat ? el("div", { class: "rs-caveat" }, ex.caveat) : null,
     el("div", { class: "adv-foot" }, L("rescue_foot")),
   );
 }
@@ -1891,19 +1895,12 @@ async function refreshAccount() {
   if (!data.actions?.length) acts.append(empty("📋", L("no_actions"), L(data.protect_enabled ? "no_actions_hint" : "actions_disabled")));
 }
 
-/** Muse's summary and suggestion for the signed-in book: same service, inputs and cache as Telegram /risk. */
+/** Muse's one recommendation for the signed-in book: same service, inputs and cache as Telegram /risk. */
 function accountMuseBlock(m) {
   if (!m || (!m.summary && !m.suggestion)) return null;
-  const mockTag = (mock) => (mock ? el("span", { class: "tag" }, L("muse_mock_tag")) : null);
   const s = m.summary, g = m.suggestion;
-  return el("div", { class: "acct-muse", id: "accountMuse", "data-view": m.view },
-    el("div", { class: "acct-muse-head" }, el("b", {}, `🧠 ${L("acct_muse_title")}`),
-      m.summary_pending || m.suggestion_pending ? el("span", { class: "hint" }, L("acct_muse_waiting")) : null),
-    s ? el("div", { class: "acct-muse-line", "data-muse": "summary", "data-mock": String(!!s.mock) }, mockTag(s.mock), s.headline) : null,
-    g ? el("div", { class: "acct-muse-line", "data-muse": "suggestion", "data-mock": String(!!g.mock) },
-      el("b", { class: g.severity ? `c-${g.severity}` : "" }, `💡 ${L("acct_muse_suggest", { symbol: g.symbol })}`), " ",
-      mockTag(g.mock), g.explanation) : null,
-  );
+  const [text, mock, kind] = s ? [s.headline, s.mock, "summary"] : [g.explanation, g.mock, "suggestion"];
+  return recLine(text, !mock, { id: "accountMuse", class: `rec-line acct-muse${mock ? "" : " live"}`, "data-view": m.view, "data-muse": kind, "data-mock": String(!!mock) });
 }
 
 function updateAccountMuse(data) {
@@ -1958,8 +1955,16 @@ function toolButtons(symbol, venue, live) {
   }, toolLabel(tool))));
 }
 
+const MUSE_TAIL = / · (✦ Muse.*)$/;
+
+function toolLine(line) {
+  const tail = line.match(MUSE_TAIL);
+  if (!tail) return el("div", { class: toolLineClass(line) }, line);
+  return el("div", { class: "tool-line muse rec-line" },
+    el("span", { class: "rec-text" }, line.slice(0, tail.index)), " ", el("span", { class: "muse-mark" }, tail[1]));
+}
+
 function toolLineClass(line) {
-  if (line.startsWith("✦")) return "tool-line muse";
   if (/^(⚠️|🛑|⛔)/.test(line)) return "tool-line warn";
   if (/^(✅|💡)/.test(line)) return "tool-line good";
   if (/^\s{2,}/.test(line)) return "tool-line indent";
@@ -1997,7 +2002,7 @@ async function openTool(tool, symbol, venue, live) {
 
 function renderToolReport(data, tool, symbol, venue, live) {
   $("toolTitle").textContent = data.title;
-  const body = data.lines.map((line) => line ? el("div", { class: toolLineClass(line) }, line) : el("div", { class: "tool-gap" }));
+  const body = data.lines.map((line) => line ? toolLine(line) : el("div", { class: "tool-gap" }));
   if (tool === "rescue") {
     body.push(el("button", { class: "btn btn-ghost tool-more", type: "button", onclick: () => {
       $("toolDialog").close();

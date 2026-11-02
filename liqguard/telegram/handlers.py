@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from liqguard.ai import get_news_stub
 from liqguard.alerts import ACK_PREFIX, DEMO_VENUE
+from liqguard.alerts.messages import recommendation_line
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.positions import LABEL_SIMULATION
 from liqguard.core.user_settings import apply_setting as apply_user_setting
@@ -167,7 +168,7 @@ class BotHandlers:
                 "🛡️ **LiqGuard 指令**\n\n"
                 "**連接交易所**\n/bind - 連接交易所\n/unbind - 移除連接\n\n"
                 "**監控倉位**\n/positions - 倉位與風險\n/risk - 投資組合風險總覽\n/status - 帳戶狀態\n\n"
-                "**設定**\n/threshold - 警報閾值\n/settings - 喚醒提醒、自適應閾值、止損檢查、倉位大小\n/language - 切換語言\n/demo - 演示模式\n\n"
+                "**設定**\n/threshold - 警報閾值\n/settings - 喚醒提醒、自適應閾值、停損檢查、倉位大小\n/language - 切換語言\n/demo - 演示模式\n\n"
                 "**AI 功能**\n/ask <問題> - 詢問倉位\n📸 發送截圖 - 解析倉位\n\n"
                 "**網頁儀表板**\n/dashboard - 取得一次性登入連結\n/dashboard revoke - 登出所有裝置\n\n"
                 "**保護操作（僅測試網）**\n/actions - 待處理操作\n/killswitch - 緊急停止\n\n"
@@ -435,13 +436,12 @@ class BotHandlers:
         task.add_done_callback(self._muse_followups.discard)
 
     @staticmethod
-    def _summary_line(summary: dict) -> str:
-        tag = "Muse (mock)" if summary.get("mock") else "Muse"
-        return f"🧠 _{tag}:_ {summary['headline']}\n\n"
+    def _summary_line(summary: dict, language: str) -> str:
+        return recommendation_line(language, summary["headline"], not summary.get("mock", True)) + "\n\n"
 
     async def _risk_overview_text(self, overview, language: str, focus: Optional[dict] = None) -> str:
         summary = self.muse.llm.summarize_portfolio_now(overview, language, focus).result
-        return self._summary_line(summary) + format_portfolio_overview_text(overview, language)
+        return self._summary_line(summary, language) + format_portfolio_overview_text(overview, language)
 
     async def _risk_reply(self, user: User) -> Optional["RiskReply"]:
         snapshot = await self._snapshot(user)
@@ -489,7 +489,7 @@ class BotHandlers:
         ])
 
         def compose(summary: dict) -> str:
-            full = self._summary_line(summary) + text
+            full = self._summary_line(summary, user.language) + text
             return full if len(full) <= 4000 else full[:3900] + "\n\n... (truncated — see /dashboard for everything)"
 
         return RiskReply(compose(headline.result), InlineKeyboardMarkup(inline_keyboard=buttons), headline.pending, compose)

@@ -36,6 +36,7 @@ from .messages import (
     format_stop_message,
     format_triage_message,
     priority_line,
+    recommendation_line,
     side_upper,
     sizing_line,
     thresholds_line,
@@ -79,13 +80,25 @@ def rescue_action(position: Position, lang: str = EN) -> Action:
 
 def format_alert_message(position: Position, assessment: RiskAssessment, explanation: str,
                          protection: Optional[dict] = None, insights: Optional[PortfolioInsights] = None,
-                         lang: str = EN) -> str:
+                         lang: str = EN, live: bool = True) -> str:
+    """
+    Tier alert. One recommendation line follows the distance: Muse's
+    `explanation` when `live`, else the computed add-margin amount.
+    """
     emoji = SEVERITY_EMOJI.get(assessment.risk_level_str, "❓")
     level = assessment.risk_level_str.lower()
+    if live and explanation:
+        recommendation = recommendation_line(lang, explanation, True)
+    elif assessment.margin_to_safety > 0:
+        recommendation = recommendation_line(lang, t(lang, "alert.tier.rule_add_margin",
+                                                     amount=f"{assessment.margin_to_safety:,.2f}"), False)
+    else:
+        recommendation = recommendation_line(lang, explanation or "", False)
     message = (
         t(lang, "alert.tier.head", emoji=emoji, level=t(lang, f"common.severity_upper.{level}")) + "\n\n"
         + f"**{position.symbol}** {side_upper(lang, position.side.value)}\n"
         + t(lang, "alert.tier.distance", dist=f"{assessment.distance_to_liquidation_pct:.1f}") + "\n"
+        + recommendation + "\n"
     )
     extra: list[Optional[str]] = []
     if insights is not None:
@@ -99,10 +112,7 @@ def format_alert_message(position: Position, assessment: RiskAssessment, explana
     for line in (*extra, wick_line((protection or {}).get("wicks"), lang), thresholds_line((protection or {}).get("thresholds"), lang)):
         if line:
             message += f"{line}\n"
-    message += f"\n{explanation}\n\n"
-    if assessment.margin_to_safety > 0:
-        message += t(lang, "alert.tier.add_margin", amount=f"{assessment.margin_to_safety:,.2f}")
-    return message
+    return message.rstrip("\n")
 
 
 def format_prefunding_message(warning: dict, demo: bool = False, lang: str = EN) -> str:
@@ -169,14 +179,14 @@ class PositionMonitor:
         return await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language,
                                           demo=user.is_demo_mode)
 
-    async def _explain(self, method: str, fallback_method: str, *args) -> tuple[Any, Optional[Awaitable[Any]]]:
-        """(text to send now, Muse's answer still on its way). Alerts never wait for Muse."""
+    async def _explain(self, method: str, fallback_method: str, *args) -> tuple[Any, Optional[Awaitable[Any]], bool]:
+        """(text to send now, Muse's answer still on its way, whether the text now is Muse's). Alerts never wait for Muse."""
         now = getattr(self.explainer, method, None)
         if now is not None:
             instant = now(*args)
-            return instant.result, instant.pending
+            return instant.result, instant.pending, bool(getattr(instant, "live", False))
         later = getattr(self.explainer, fallback_method, None)
-        return (await later(*args) if later is not None else None), None
+        return (await later(*args) if later is not None else None), None, True
 
     def _muse_followup(self, sent: Any, pending: Optional[Awaitable[Any]], render: Callable[[Any], str]) -> None:
         edit = getattr(sent, "edit_text", None)
@@ -297,11 +307,11 @@ class PositionMonitor:
     async def _send_tier_alert(self, user: User, position: Position, assessment: RiskAssessment, info: dict,
                                insights: PortfolioInsights) -> int:
         lang = user.language
-        explanation, pending = await self._explain(
+        explanation, pending, live = await self._explain(
             "explain_risk_now", "explain_risk", position, assessment.distance_to_liquidation_pct,
             assessment.margin_to_safety, assessment.severity, lang,
         )
-        text = format_alert_message(position, assessment, explanation, info, insights, lang)
+        text = format_alert_message(position, assessment, explanation, info, insights, lang, live=live)
         actions = [rescue_action(position, lang)]
         severity = assessment.severity.value if assessment.severity else None
         self._open_escalation(user, position, severity, text, assessment.distance_to_liquidation_pct, actions)
@@ -364,7 +374,7 @@ class PositionMonitor:
         lang = user.language
         explanation, pending = None, None
         try:
-            explanation, pending = await self._explain("explain_stop_fix_now", "explain_stop_fix", check, lang)
+            explanation, pending, _ = await self._explain("explain_stop_fix_now", "explain_stop_fix", check, lang)
         except Exception as e:
             logger.error("Stop-loss explanation failed: %s", type(e).__name__)
         sent = await self._notify(user, format_stop_message(check.to_dict(), explanation, lang=lang), [rescue_action(position, lang)])

@@ -26,7 +26,12 @@ from liqguard.alerts import (
     priority_line,
     wick_line,
 )
-from liqguard.alerts.messages import muse_tag, side_upper, venue_name
+from liqguard.alerts.messages import (
+    advice_recommendation,
+    recommendation_line,
+    side_upper,
+    venue_name,
+)
 from liqguard.i18n import EN, join, t, tr
 from liqguard.simulation import SCENARIOS, MarketSimulation
 
@@ -49,6 +54,8 @@ def format_advice_message(card: dict, lang: str = EN) -> str:
         + (t(lang, "sim.tier", tier=f"{card['threshold_pct']:.1f}") if card.get("threshold_pct") else ""),
         t(lang, "sim.mark_liq", mark=f"{card['mark_price']:,.2f}", liq=f"{card['liquidation_price']:,.2f}"),
     ]
+    rec = advice_recommendation(card)
+    lines.append(recommendation_line(lang, rec["text"], rec["live"]))
     for line in (priority_line(card.get("priority"), card.get("handle_first"), lang),
                  comparison_line(card["liq_comparison"], lang) if card.get("liq_comparison") else None,
                  wick_line(card.get("wicks"), lang)):
@@ -56,21 +63,15 @@ def format_advice_message(card: dict, lang: str = EN) -> str:
             lines.append(line)
     if card.get("adaptive_reasons"):
         lines.append(t(lang, "sim.widened", reasons=join(lang, card["adaptive_reasons"], "; ")))
-    lines += ["", f"🧠 _{muse_tag(lang, card.get('mock'))}:_ {tr(lang, card['explanation'])}"]
-    if card.get("margin_to_add_usd"):
+    rescue = card.get("rescue")
+    leads_with_rescue = bool(rescue and not rescue.get("already_safe"))
+    if card.get("margin_to_add_usd") and leads_with_rescue:
         where = t(lang, "sim.where_cross" if card.get("margin_mode") == "cross" else "sim.where_margin")
         lines += [
             "",
             t(lang, "sim.add", amount=f"{card['margin_to_add_usd']:,.2f}", where=where, target=f"{card['target_distance_pct']:.0f}"),
             t(lang, "sim.reduce", pct=f"{card['reduce_size_pct']:.1f}"),
         ]
-    rescue, explanation = card.get("rescue"), card.get("rescue_explanation")
-    if rescue:
-        best = next((o for o in rescue["options"] if o["kind"] == rescue["recommended"]), None)
-        if best:
-            lines += ["", t(lang, "sim.cheapest", title=tr(lang, best["title"]), cost=f"{best['costs']['total_cost_usd']:,.2f}")]
-        if explanation and explanation.get("headline"):
-            lines.append(f"_{tr(lang, explanation['headline'])}_")
     return "\n".join(lines)
 
 

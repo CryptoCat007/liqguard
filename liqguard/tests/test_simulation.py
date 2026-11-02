@@ -302,5 +302,5 @@ class TestTelegramHandlersIntegration:
 
     async def test_risk_text_has_muse_headline(self, handlers, sim):
         text = await handlers._risk_overview_text(sim.overview, "en")
-        assert text.startswith("🧠 _Muse (mock):_")
+        assert text.startswith("💡 ") and text.splitlines()[0].endswith("· ✦ Muse (mock)")
         assert sim.overview.riskiest_position.symbol in text.splitlines()[0]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from liqguard.alerts.messages import recommendation_line
 from liqguard.i18n import EN, Translator
 from liqguard.models import Position
 from liqguard.risk import RiskContext, project_funding
@@ -144,7 +145,7 @@ def close_fee_line(T: Translator, position: Position, context: RiskContext) -> s
 
 
 def muse_line(T: Translator, note: dict) -> str:
-    return f"✦ {T('alert.muse_mock' if note.get('mock') else 'alert.muse')}: {note['text']}"
+    return recommendation_line(T.lang, note["text"], not note.get("mock", True))
 
 
 def report(tool: str, position: Position, context: RiskContext, protection: dict,
@@ -152,7 +153,7 @@ def report(tool: str, position: Position, context: RiskContext, protection: dict
     """
     {tool, title, lines, muse} for one quick action on one position, in `lang`.
     `muse` is `MuseService.tool_note` output ({"text", "mock"}): the rescue
-    recommendation or stop-loss fix in words, shown as the last line.
+    recommendation or stop-loss fix in words, the report's first line.
     """
     if tool not in TOOLS:
         raise ValueError(f"unknown tool {tool!r}")
@@ -168,6 +169,6 @@ def report(tool: str, position: Position, context: RiskContext, protection: dict
     else:
         lines = (funding_lines(T, position, context) or [T("tools.funding.no_data")]) + [close_fee_line(T, position, context)]
     if muse:
-        lines = [*lines, "", muse_line(T, muse)]
+        lines = [muse_line(T, muse), "", *lines]
     return {"tool": tool, "symbol": position.symbol, "venue": position.venue.value, "title": title, "lines": lines,
             "lang": T.lang, "muse": muse}

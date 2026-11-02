@@ -24,6 +24,7 @@ from .messages import (
     format_stop_message,
     format_triage_message,
     priority_line,
+    recommendation_line,
     sizing_line,
     stress_lines,
     thresholds_line,
@@ -39,6 +40,7 @@ from .monitor import (
 )
 
 __all__ = [
+    "recommendation_line",
     "ACK_PREFIX",
     "DEMO_ALERT_WINDOW_SECONDS",
     "DEMO_VENUE",

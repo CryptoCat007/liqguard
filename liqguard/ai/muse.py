@@ -66,11 +66,13 @@ class Instant:
 
     result: Any
     pending: Optional["asyncio.Future[Any]"] = None
+    live: bool = False
+    """Whether `result` is Muse's own answer (cached) rather than the deterministic text."""
 
     def map(self, fn: Callable[[Any], Any]) -> "Instant":
         """The same answer shaped by `fn` (now, and when Muse's arrives; None stays None)."""
         if self.pending is None:
-            return Instant(fn(self.result))
+            return Instant(fn(self.result), live=self.live)
         source = self.pending
 
         async def later() -> Any:
@@ -410,7 +412,7 @@ class MetaLLMClient:
             return Instant(job.fallback())
         hit = self._cached(job.key)
         if hit is not None:
-            return Instant(hit)
+            return Instant(hit, live=True)
         # Shielded: a caller that gives up (e.g. a stopped demo) must not cancel the shared request.
         return Instant(job.fallback(), asyncio.shield(self._start(job)))
 

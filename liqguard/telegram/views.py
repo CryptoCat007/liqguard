@@ -11,6 +11,7 @@ from liqguard.alerts import (
     comparison_line,
     format_price,
     priority_line,
+    recommendation_line,
     sizing_line,
     stress_lines,
     triage_lines,
@@ -75,8 +76,11 @@ def format_rescue_text(plan: dict, explanation: Optional[dict], demo: bool = Fal
         f"🛟 **Rescue simulator**{' · demo' if demo else ''}",
         f"**{plan['symbol']}** {plan['side'].upper()} on {plan['venue'].title()} ({plan['margin_mode']})",
         f"Mark {_money(plan['mark_price'])} · Liq {_money(current['price'])} · {dist} away · target {plan['target_distance_pct']:.0f}%",
-        "",
     ]
+    if explanation:
+        lines.append(recommendation_line("en", explanation["headline"], not explanation.get("mock", True)))
+    lines.append("")
+    trades = {t.get("option"): t for t in (explanation or {}).get("trade_offs", [])}
     if plan.get("already_safe"):
         lines.append(f"✅ Already beyond the {plan['target_distance_pct']:.0f}% target; no rescue needed now.")
     for o in ([] if plan.get("already_safe") else plan["options"]):
@@ -90,16 +94,15 @@ def format_rescue_text(plan: dict, explanation: Optional[dict], demo: bool = Fal
             f"24h funding {_money(c['funding_24h_usd'])}"
             + (f" · capital {_money(c['capital_required_usd'])}" if c["capital_required_usd"] else "")
         )
+        trade = trades.get(o["kind"])
+        if trade:
+            if trade.get("pros"):
+                lines.append(f"   + {'; '.join(trade['pros'])}")
+            if trade.get("cons"):
+                lines.append(f"   − {'; '.join(trade['cons'])}")
     lines.append(f"\n_Funding {plan['funding_label']}; fees at taker rate._")
-    if explanation:
-        tag = "Muse (mock)" if explanation.get("mock") else "Muse"
-        lines += ["", f"🧠 _{tag}:_ {explanation['headline']}"]
-        for t in ([] if plan.get("already_safe") else explanation.get("trade_offs", [])):
-            pros = "; ".join(t.get("pros", []))
-            cons = "; ".join(t.get("cons", []))
-            lines.append(f"{OPTION_EMOJI.get(t['option'], '•')} + {pros}\n   − {cons}")
-        if explanation.get("caveat"):
-            lines.append(f"_{explanation['caveat']}_")
+    if explanation and explanation.get("caveat"):
+        lines.append(f"_{explanation['caveat']}_")
     text = "\n".join(lines)
     return text if len(text) < 4000 else text[:3900] + "\n…"
 
@@ -142,7 +145,7 @@ def format_option_detail(plan: dict, kind: str, explanation: Optional[dict]) -> 
     lines += [f"• {n}" for n in option["notes"]]
     trade = next((t for t in (explanation or {}).get("trade_offs", []) if t.get("option") == kind), None)
     if trade:
-        lines.append(f"\n🧠 {trade['summary']}")
+        lines.append(f"\n💡 {trade['summary']}")
     lines.append("\n_Simulation only; nothing has been executed._")
     return "\n".join(lines)
 

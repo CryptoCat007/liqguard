@@ -151,8 +151,13 @@ def test_muse_badge_is_honest_and_cards_update_in_place(live_server, browser):
     page.click("#simulateBtn")
     page.wait_for_function("() => S.state === 'finished'", timeout=60000)
     page.wait_for_function(
-        "() => [...document.querySelectorAll('#advice .adv-text')].some((n) => n.textContent === 'Muse explanation.')",
+        "() => [...document.querySelectorAll('#advice [data-rec=advice]')].some((n) => n.dataset.live === 'true')",
         timeout=15000)
+    live = page.locator("#advice [data-rec=advice][data-live=true]").first
+    assert live.locator(".muse-mark").text_content() == "✦ Muse"
+    assert page.locator("#advice .adv-text, #advice .adv-summary").count() == 0
+    for card in page.locator("#advice [data-advice]").all():
+        assert card.locator(".rec-line").count() == 1
     cards = page.locator("#advice [data-advice]")
     ids = cards.evaluate_all("(nodes) => nodes.map((n) => n.dataset.advice)")
     assert len(ids) == len(set(ids)) > 0
@@ -171,14 +176,20 @@ def test_quick_report_and_rescue_take_muse_text_from_the_socket(live_server, bro
 
     page.evaluate("() => openTool('stop', 'ETH', 'hyperliquid', false)")
     page.wait_for_selector("#toolBody .tool-line.muse")
-    assert page.inner_text("#toolBody .tool-line.muse").startswith("✦ Muse (mock):")
+    first = page.locator("#toolBody > *").first
+    assert "muse" in first.get_attribute("class") and first.locator(".muse-mark").inner_text() == "✦ Muse (mock)"
     page.wait_for_function(
-        "() => document.querySelector('#toolBody .tool-line.muse')?.textContent.startsWith('✦ Muse: Muse reviewed the stop.')",
+        "() => document.querySelector('#toolBody .tool-line.muse .rec-text')?.textContent === '💡 Muse reviewed the stop.'",
         timeout=15000)
+    assert page.inner_text("#toolBody .tool-line.muse .muse-mark") == "✦ Muse"
+    assert page.locator("#toolBody .tool-line.muse").count() == 1
     page.click("#toolClose")
 
     page.evaluate("() => loadRescue('BTCUSDT', { scroll: false })")
     page.wait_for_function("() => S.rescue?.explanation?.headline === 'Muse compares the rescue options.'", timeout=15000)
-    assert "Muse compares the rescue options." in page.inner_text("#rescueBody")
+    page.wait_for_selector("#rescueBody [data-rec=rescue][data-live=true]")
+    assert page.inner_text("#rescueBody [data-rec=rescue] .rec-text") == "💡 Muse compares the rescue options."
+    assert page.inner_text("#rescueBody").count("Muse compares the rescue options.") == 1
+    assert page.locator("#rescueBody .rs-muse").count() == 0
     assert not refetches, refetches
     assert not errors, errors

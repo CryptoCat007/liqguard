@@ -62,6 +62,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from liqguard.alerts.escalation import ESCALATING, EscalationTracker, reminder_text, urgency
+from liqguard.alerts.messages import advice_recommendation
 from liqguard.i18n import Msg, has, normalize
 from liqguard.models import (
     CROSS,
@@ -1438,6 +1439,7 @@ class MarketSimulation:
             "rescue_explanation": rescue_explanation,
             "mock": mock,
         }
+        card["recommendation"] = advice_recommendation(card)
         self.advice.append(card)
         await self._emit("advice", card)
         await self._add_audit(
@@ -1460,4 +1462,5 @@ class MarketSimulation:
                         mock=False)
         if live_rescue is not None:
             card["rescue_explanation"] = live_rescue
+        card["recommendation"] = advice_recommendation(card)
         await self._emit("advice_update", card)

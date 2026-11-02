@@ -128,7 +128,7 @@ class TestOneService:
             async with signed_in(web_client(create_app(ctx)), ctx, ALICE) as web:
                 first = (await web.get("/api/me/account")).json()["muse"]
                 assert first["summary"]["mock"] is True and first["summary_pending"] is True
-                assert reply.text.startswith("🧠 _Muse (mock):_ " + first["summary"]["headline"])
+                assert reply.text.startswith(f"💡 {first['summary']['headline']} · ✦ Muse (mock)")
 
                 gate.set()
                 live = await reply.pending
@@ -137,7 +137,7 @@ class TestOneService:
             assert summaries(muse) == 1
             assert again["summary"]["mock"] is False and again["summary_pending"] is False
             assert again["summary"]["headline"] == live["headline"]
-            assert reply.compose(live).startswith(f"🧠 _Muse:_ {again['summary']['headline']}")
+            assert reply.compose(live).startswith(f"💡 {again['summary']['headline']} · ✦ Muse\n")
         finally:
             await ctx.close()
 
@@ -151,7 +151,7 @@ class TestOneService:
                 assert await until(lambda: summaries(muse) == 1)
                 await asyncio.sleep(0.05)
                 reply = await BotHandlers(ctx)._risk_reply(user)
-            assert reply.pending is None and reply.text.startswith("🧠 _Muse:_ Muse:")
+            assert reply.pending is None and reply.text.startswith("💡 Muse:") and reply.text.split("\n")[0].endswith("· ✦ Muse")
             assert summaries(muse) == 1
         finally:
             await ctx.close()
@@ -202,15 +202,16 @@ class TestWebSocketFollowUps:
     async def test_quick_reports_carry_muse_line_and_follow_over_the_socket(self, live):
         report = (await live.web.get("/api/me/position-tool/live?symbol=BTCUSDT&venue=demo&tool=rescue")).json()
         assert report["muse_pending"] is True
-        assert report["muse"]["mock"] is True and any(line.startswith("✦ Muse (mock):") for line in report["lines"])
+        assert report["muse"]["mock"] is True and report["lines"][0].startswith("💡 ") and report["lines"][0].endswith(" · ✦ Muse (mock)")
         wick = (await live.web.get("/api/me/position-tool/live?symbol=BTCUSDT&venue=demo&tool=wick")).json()
-        assert wick["muse_pending"] is False and not any(line.startswith("✦") for line in wick["lines"])
+        assert wick["muse_pending"] is False and not any("✦ Muse" in line for line in wick["lines"])
 
         live.gate.set()
         assert await until(lambda: any(e["type"] == "report_muse" for e in live.events))
         pushed = next(e["data"] for e in live.events if e["type"] == "report_muse")
         assert (pushed["scope"], pushed["tool"], pushed["symbol"], pushed["venue"]) == ("live", "rescue", "BTCUSDT", "demo")
-        assert "✦ Muse: Muse compares the rescue options." in pushed["report"]["lines"]
+        assert pushed["report"]["lines"][0] == "💡 Muse compares the rescue options. · ✦ Muse"
+        assert sum("Muse compares" in line for line in pushed["report"]["lines"]) == 1
         assert pushed["report"]["title"] == report["title"]
 
         cached = (await live.web.get("/api/me/position-tool/live?symbol=BTCUSDT&venue=demo&tool=rescue")).json()
@@ -232,7 +233,7 @@ class TestWebSocketFollowUps:
             web_report = (await mine.get("/api/me/position-tool?symbol=BTCUSDT&tool=rescue")).json()
         assert web_report["muse_pending"] is False
         assert screen.text == web_report["title"] + "\n\n" + "\n".join(web_report["lines"]).strip()
-        assert "✦ Muse: Muse compares the rescue options." in screen.text
+        assert "💡 Muse compares the rescue options. · ✦ Muse" in screen.text
 
     async def test_telegram_quick_report_tap_is_edited_when_muse_answers(self, live):
         ui = TelegramUI(live.ctx)
@@ -243,11 +244,11 @@ class TestWebSocketFollowUps:
         cb.data = ui.codec.encode(ALICE, "pr", "demo", "BTCUSDT")
         await asyncio.wait_for(ui.router.handle(cb), 5)
         first = cb.message.edit_text.await_args
-        assert "✦ Muse (mock):" in first.args[0]
+        assert "· ✦ Muse (mock)" in first.args[0]
         live.gate.set()
         assert await until(lambda: cb.message.edit_text.await_count == 2)
         edited = cb.message.edit_text.await_args
-        assert "✦ Muse: Muse compares the rescue options." in edited.args[0]
+        assert "💡 Muse compares the rescue options. · ✦ Muse" in edited.args[0] and "✦ Muse (mock)" not in edited.args[0]
         assert edited.kwargs["reply_markup"] is first.kwargs["reply_markup"]
 
     async def test_other_users_never_see_the_follow_up(self, live):
@@ -300,7 +301,7 @@ async def test_zh_follow_ups_reach_the_browser_in_chinese(settings):
                 seen = _receive_until(ws, expected)
             assert expected <= seen.keys(), seen.keys()
             assert account["muse"]["summary"]["headline"] and rescue["explanation"]
-            assert any(line.startswith("✦ Muse") for line in report["lines"])
+            assert report["lines"][0].startswith("💡 ") and "· ✦ Muse" in report["lines"][0]
             leftovers = [hit for part in (account, rescue, report, *seen.values()) for hit in english_in(part)]
             assert not leftovers, leftovers[:10]
             assert any(e["data"].get("summary", {}).get("headline", "").startswith("Muse：") for e in seen.values()

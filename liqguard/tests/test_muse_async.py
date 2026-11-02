@@ -176,13 +176,13 @@ class TestTelegram:
         message = fake_message(ALICE, "/risk")
         await asyncio.wait_for(handlers.cmd_risk(message), 2)
         text = message.answer.call_args.args[0]
-        assert text.startswith("🧠 _Muse (mock):_")
+        assert text.startswith("💡 ") and text.split("\n")[0].endswith("· ✦ Muse (mock)")
         sent = message.answer.return_value
         sent.edit_text.assert_not_called()
         gate.set()
         assert await until(lambda: sent.edit_text.await_count == 1)
         edited = sent.edit_text.call_args.args[0]
-        assert edited.startswith("🧠 _Muse:_ Muse:") and edited.split("\n", 2)[2] == text.split("\n", 2)[2]
+        assert edited.startswith("💡 Muse:") and edited.split("\n")[0].endswith("· ✦ Muse") and edited.split("\n", 2)[2] == text.split("\n", 2)[2]
         assert sent.edit_text.call_args.kwargs["reply_markup"] is message.answer.call_args.kwargs["reply_markup"]
 
     async def test_rescue_button_replies_at_once_then_edits(self, ctx, handlers, gate):
