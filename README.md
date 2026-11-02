@@ -714,7 +714,30 @@ Per-user isolation and per-user encryption are hard requirements. Details are in
 4. Keep `LIQGUARD_PROTECT_ENABLED=false` unless you want testnet protective actions.
 5. Generate a master key with
    `python3 -c "from liqguard.storage import generate_key; print(generate_key())"`.
-   If none is set, one is created once at `~/.liqguard/encryption.key` (mode 600) and reused across restarts.
+   If none is set, one is created once at `$LIQGUARD_DATA_DIR/encryption.key` (else
+   `~/.liqguard/encryption.key`), mode 600, and reused across restarts.
+6. Run **exactly one** instance per bot token (see below), and point health checks at `/healthz`.
+
+### Deploying (Docker on a VPS)
+
+`Dockerfile` + `docker-compose.yml` run the bot and the dashboard in **one process** with all
+state on a named volume, and an optional Caddy service for automatic https. Step by step:
+[DEPLOY.md](DEPLOY.md).
+
+```bash
+cp .env.example .env    # TELEGRAM_BOT_TOKEN, LIQGUARD_DOMAIN, LIQGUARD_PUBLIC_URL=https://<domain>
+docker compose --profile https up -d --build
+```
+
+`GET /healthz` returns `{"status": "ok"}` (503 if the database is unreachable). It carries no
+user data and is what the image's `HEALTHCHECK` calls.
+
+**One poller per bot token.** Telegram delivers each update to exactly one `getUpdates` caller.
+If two processes poll the same token (a second container, `docker compose up --scale`, a laptop
+running `liqguard` with the production `.env`, a test script), each one receives only *some* of
+the button presses and messages, and the others vanish silently; Telegram may also answer
+`409 Conflict: terminated by other getUpdates request`. Never scale the service above one
+replica, and use a separate BotFather token for development.
 
 ## Web Dashboard
 
@@ -857,9 +880,10 @@ python3 -m pytest liqguard/tests/ -q
 | `test_polling.py` | Short Telegram request timeout and fast backoff |
 | `test_dashboard_account_tools.py` | Web quick actions (same text as Telegram), settings panel, binding panel (no echo, CSRF, confirm), live snooze, quiet hours in the monitor |
 
+| `test_deploy_config.py` | `LIQGUARD_DATA_DIR` / per-file path overrides (empty values, `~`), `$PORT` fallback, first-boot master key in the data dir (mode 600, reused, env key wins), redacted audit-log file, `/healthz` (ok / 503), Dockerfile, `.dockerignore` and compose invariants |
 | `test_prerelease.py` | Every pre-release scenario below in both languages, plus a mutation check (a demo that ignores ✅ / 😴 / ⏹ must fail) and callback logging without payloads |
 
-787 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
+809 tests at the time of writing, including a cross-panel consistency check over every tick of both demo scenarios (`tests/test_consistency.py`).
 
 ### Pre-release check (required for every release)
 
@@ -900,11 +924,14 @@ process: look for a second bot instance polling the same token.
 | `META_API_KEY` | No | Meta AI API key (Muse runs in deterministic mock mode if unset) |
 | `META_MODEL` | No | Model name (default: muse-spark) |
 | `LIQGUARD_MASTER_KEY` | Recommended | Master key(s), comma-separated for rotation. Legacy name `LIQGUARD_ENCRYPTION_KEY` still works |
-| `LIQGUARD_KEY_FILE` | No | Key file used when no env key is set (default `~/.liqguard/encryption.key`, created mode 600) |
-| `LIQGUARD_DB_PATH` | No | SQLite database path (default: liqguard.db) |
+| `LIQGUARD_DATA_DIR` | No | One directory for all state; the three paths below default into it (`liqguard.db`, `encryption.key`, `audit.log`). The Docker image sets `/data` |
+| `LIQGUARD_KEY_FILE` | No | Key file used when no env key is set (default `$LIQGUARD_DATA_DIR/encryption.key`, else `~/.liqguard/encryption.key`; created mode 600 on first boot) |
+| `LIQGUARD_DB_PATH` | No | SQLite database path (default `$LIQGUARD_DATA_DIR/liqguard.db`, else `liqguard.db`) |
+| `LIQGUARD_AUDIT_LOG` | No | Append-only file of protective-action audit lines, mode 600, redacted (default `$LIQGUARD_DATA_DIR/audit.log`, else none; the database audit table is always written) |
 | `LIQGUARD_POLL_INTERVAL` | No | Position check interval in seconds (default: 30) |
 | `LIQGUARD_DASHBOARD` | No | Start the dashboard with the bot (default: false) |
-| `LIQGUARD_DASHBOARD_HOST` / `_PORT` | No | Dashboard bind address and port (default: 127.0.0.1:8765) |
+| `LIQGUARD_DASHBOARD_HOST` / `_PORT` | No | Dashboard bind address and port (default: 127.0.0.1:8765; the port falls back to `$PORT`). The Docker image binds `0.0.0.0:$PORT` |
+| `LIQGUARD_DOMAIN` | Docker + Caddy | Domain Caddy gets a certificate for (`docker compose --profile https`) |
 | `LIQGUARD_PUBLIC_URL` | Production | Dashboard URL used in login links; https enables `Secure` cookies. If unset and the dashboard is off, `/dashboard` says it is unavailable |
 | `LIQGUARD_BOT_USERNAME` | No | Enables the Telegram Login Widget (auto-detected when the bot starts) |
 | `LIQGUARD_SESSION_SECRET` | No | Session signing secret, at least 32 chars (default: derived from the master key) |
