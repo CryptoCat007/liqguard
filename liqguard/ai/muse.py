@@ -65,7 +65,7 @@ class Instant:
     """
 
     result: Any
-    pending: Optional["asyncio.Task[Any]"] = None
+    pending: Optional["asyncio.Future[Any]"] = None
 
 
 @dataclass
@@ -226,6 +226,13 @@ class MetaLLMClient:
             # The SDK's own retries would blow the time budget; failures fall back instead.
             self.client = AsyncOpenAI(api_key=api_key, base_url=self.base_url, timeout=self.timeout, max_retries=0,
                                       http_client=http_client)
+
+    def describe(self) -> str:
+        """One log line about the setup; never includes the key."""
+        if self._use_mock:
+            return "mock mode (no META_API_KEY)"
+        return (f"live API · model {self.model} at {self.base_url} · max_tokens {self.max_tokens} · "
+                f"timeout {self.timeout:g}s · reasoning_effort {self.reasoning_effort or 'off'}")
 
     def __repr__(self) -> str:
         return f"MetaLLMClient(model={self.model!r}, mock={self._use_mock})"
@@ -392,7 +399,8 @@ class MetaLLMClient:
         hit = self._cached(job.key)
         if hit is not None:
             return Instant(hit)
-        return Instant(job.fallback(), self._start(job))
+        # Shielded: a caller that gives up (e.g. a stopped demo) must not cancel the shared request.
+        return Instant(job.fallback(), asyncio.shield(self._start(job)))
 
     def _rejected(self, kind: str, problem: str) -> None:
         self._failed(kind, f"rejected: {problem}")

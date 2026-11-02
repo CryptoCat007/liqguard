@@ -232,8 +232,7 @@ function applySnapshot(snap) {
   renderScenarios();
   if (S.view !== "distance" && !S.order.includes(S.view)) S.view = "distance";
 
-  $("musePill").textContent = L(snap.muse_mode === "live" ? "muse_live" : "muse_mock");
-  $("musePill").classList.toggle("live", snap.muse_mode === "live");
+  renderMuse(snap.muse_mode);
   renderChannels(snap.channels || []);
 
   $("timeline").replaceChildren();
@@ -264,6 +263,17 @@ function applySnapshot(snap) {
   setStatus({ state: snap.state, step: snap.step, total_steps: snap.total_steps });
 }
 
+/** The badge says "live" only after Muse really answered; otherwise the rule-based text is what users see. */
+function renderMuse(mode) {
+  const known = ["live", "pending", "fallback", "mock"].includes(mode) ? mode : "mock";
+  const pill = $("musePill");
+  pill.textContent = L(`muse_${known}`);
+  pill.title = L(`muse_title_${known}`);
+  pill.classList.toggle("live", known === "live");
+  pill.classList.toggle("degraded", known === "fallback");
+  pill.dataset.mode = known;
+}
+
 function handle(msg) {
   const { type, data } = msg;
   switch (type) {
@@ -280,6 +290,16 @@ function handle(msg) {
     case "advice":
       addAdvice(data);
       renderHero();
+      break;
+    case "advice_update":
+      updateAdvice(data);
+      renderHero();
+      break;
+    case "alert_update":
+      if (data.level === "stop") updateStopAlert(data);
+      break;
+    case "muse":
+      renderMuse(data.mode);
       break;
     case "summary":
       if (data && data.step != null && S.step != null && data.step !== S.step) break;
@@ -682,10 +702,23 @@ function updateCounts() {
 }
 
 function addStopAlert(a, opts) {
-  const s = a.stop, m = a.explanation;
+  const m = a.explanation;
   S.stopMuse[a.symbol] = m;
+  $("timeline").prepend(stopAlertNode(a));
+  if (!opts.quiet) toast("🛑", `${L("lvl_stop")} · ${a.symbol}`, m?.headline || stopLabel(a.stop.status), COLORS.emergency);
+  renderStops();
+}
+
+function updateStopAlert(a) {
+  S.stopMuse[a.symbol] = a.explanation;
+  document.querySelector(`#timeline [data-alert="${CSS.escape(a.id)}"]`)?.replaceWith(stopAlertNode(a));
+  renderStops();
+}
+
+function stopAlertNode(a) {
+  const s = a.stop, m = a.explanation;
   const label = stopLabel(s.status);
-  $("timeline").prepend(el("li", { class: "tl-item tl-stop" },
+  return el("li", { class: "tl-item tl-stop", "data-alert": a.id },
     el("span", { class: "tl-node" }),
     tlHead(L("lvl_stop"), "lvl-stop-b", a),
     el("div", { class: "tl-body" },
@@ -693,9 +726,7 @@ function addStopAlert(a, opts) {
       m ? el("div", { class: "tl-muse" }, el("span", { class: "muse-glyph" }, "✦ "), m.explanation) : null,
     ),
     el("div", { class: "chips" }, ...(a.channels || []).map(channelChip), rescueButton(a.symbol)),
-  ));
-  if (!opts.quiet) toast("🛑", `${L("lvl_stop")} · ${a.symbol}`, m?.headline || label, COLORS.emergency);
-  renderStops();
+  );
 }
 
 function addAdlAlert(a, opts) {
@@ -1199,6 +1230,22 @@ function addAdvice(c) {
   S.adviceBySym[c.symbol] = c;
   S.adviceCount += 1;
   updateHistoryCounts();
+  box.prepend(adviceNode(c));
+  if (c.rescue && (!S.rescue || S.rescue.auto)) showRescue(c.symbol, { plan: c.rescue, explanation: c.rescue_explanation }, { auto: true });
+}
+
+/** Muse's text arrived for a card already shown with the rule-based text: swap it in place. */
+function updateAdvice(c) {
+  const old = document.querySelector(`#advice [data-advice="${CSS.escape(c.id)}"]`);
+  if (!old) return;
+  old.replaceWith(adviceNode(c));
+  if (S.adviceBySym[c.symbol]?.id === c.id) S.adviceBySym[c.symbol] = c;
+  if (c.rescue && S.rescue?.auto && S.rescue.symbol === c.symbol) {
+    showRescue(c.symbol, { plan: c.rescue, explanation: c.rescue_explanation }, { auto: true });
+  }
+}
+
+function adviceNode(c) {
   const actions = [];
   if (c.margin_to_add_usd > 0) {
     actions.push(el("div", { class: "adv-act" },
@@ -1214,7 +1261,7 @@ function addAdvice(c) {
       el("div", { class: "adv-act-sub" }, L("adv_close", { size: c.reduce_size_by, coin: c.symbol.replace(/USDT$/, "") })),
     ));
   }
-  box.prepend(el("div", { class: `adv adv-${c.level}` },
+  return el("div", { class: `adv adv-${c.level}`, "data-advice": c.id },
     el("div", { class: "adv-head" },
       el("span", { class: "adv-sym", style: { color: symbolColor(c.symbol) } }, c.symbol),
       el("span", { class: `lvl lvl-${c.level}-b` }, tierLabel(c.level)),
@@ -1226,8 +1273,7 @@ function addAdvice(c) {
     c.rescue ? rescueMini(c) : null,
     c.ack_id ? el("div", { class: "chips" }, ackButton(c.ack_id, c.symbol)) : null,
     el("div", { class: "adv-foot" }, L("adv_foot")),
-  ));
-  if (c.rescue && (!S.rescue || S.rescue.auto)) showRescue(c.symbol, { plan: c.rescue, explanation: c.rescue_explanation }, { auto: true });
+  );
 }
 
 function rescueMini(c) {
@@ -1376,7 +1422,9 @@ async function loadRescue(symbol, opts = {}) {
     const r = await fetch(api("/rescue", { symbol }), { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (!r.ok) throw new Error(`${r.status}`);
-    showRescue(symbol, await r.json());
+    const data = await r.json();
+    showRescue(symbol, data);
+    if (data.muse_pending) awaitMuseRescue(api("/rescue", { symbol, wait: 1 }), symbol, {});
   } catch (err) {
     S.rescue = { symbol, error: L("rescue_failed") };
     renderRescue();
@@ -1388,14 +1436,29 @@ async function loadLiveRescue(symbol, venue) {
   renderRescue();
   openFold("rescueCard");
   try {
-    const r = await fetch(`/api/me/rescue/live?symbol=${encodeURIComponent(symbol)}&venue=${encodeURIComponent(venue)}`, { credentials: "same-origin" });
+    const url = `/api/me/rescue/live?${new URLSearchParams({ symbol, venue })}`;
+    const r = await fetch(url, { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
     if (!r.ok) throw new Error(`${r.status}`);
-    showRescue(symbol, await r.json(), { live: true });
+    const data = await r.json();
+    showRescue(symbol, data, { live: true });
+    if (data.muse_pending) awaitMuseRescue(`${url}&wait=1`, symbol, { live: true });
   } catch (err) {
     S.rescue = { symbol, live: true, error: L("rescue_live_failed") };
     renderRescue();
   }
+}
+
+/** The rule-based comparison is already on screen; replace it with Muse's once it answers (if still open). */
+async function awaitMuseRescue(url, symbol, opts) {
+  try {
+    const r = await fetch(url, { credentials: "same-origin" });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (S.rescue?.symbol === symbol && !S.rescue.loading && !!S.rescue.live === !!opts.live && data.explanation && !data.explanation.mock) {
+      showRescue(symbol, data, opts);
+    }
+  } catch (err) { /* keep the rule-based text */ }
 }
 
 function showRescue(symbol, data, opts = {}) {

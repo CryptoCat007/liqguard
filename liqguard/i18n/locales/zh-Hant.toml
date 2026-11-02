@@ -1103,6 +1103,12 @@ shock_ok = "安全"
 ins_liq_compare = "平台強平價 {platform}（{platform_pct}）對比 LiqGuard {ours}（{ours_pct}）"
 ins_pts_closer = "近了 {pts} 個百分點"
 ins_oversized = "{exit}時虧損權益的 {pct} → 建議 {size}"
+muse_pending = "Muse · 連線中"
+muse_fallback = "Muse · 離線"
+muse_title_live = "Muse 已回應最近一次請求；數字仍由程式計算"
+muse_title_pending = "等待 Muse 回應；在那之前顯示規則產生的文字"
+muse_title_fallback = "Muse 未回應最近一次請求；目前顯示規則產生的文字"
+muse_title_mock = "未設定 API 金鑰：只顯示規則產生的文字"
 
 [common.weekday]
 monday = "星期一"

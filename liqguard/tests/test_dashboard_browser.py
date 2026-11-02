@@ -32,9 +32,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="module")
-def server():
-    sim = MarketSimulation(MetaLLMClient(use_mock=True), tick_interval=0.03, escalation_seconds_per_minute=0.01)
+def _serve(sim):
     port = _free_port()
     srv = uvicorn.Server(uvicorn.Config(create_app(demo_simulation=sim), host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=srv.run, daemon=True)
@@ -47,6 +45,18 @@ def server():
     yield f"http://127.0.0.1:{port}"
     srv.should_exit = True
     thread.join(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def server():
+    yield from _serve(MarketSimulation(MetaLLMClient(use_mock=True), tick_interval=0.03, escalation_seconds_per_minute=0.01))
+
+
+@pytest.fixture(scope="module")
+def live_server():
+    from .test_muse_async import SmartMuse, live_llm
+
+    yield from _serve(MarketSimulation(live_llm(SmartMuse(delay=0.4)), tick_interval=0.03, escalation_seconds_per_minute=0.01))
 
 
 @pytest.fixture(scope="module")
@@ -128,3 +138,22 @@ def test_language_follows_the_user_between_dashboard_and_login(server, browser):
     page.goto(f"{server}/")
     page.wait_for_function("() => document.documentElement.lang === 'en'", timeout=15000)
     context.close()
+
+
+def test_muse_badge_is_honest_and_cards_update_in_place(live_server, browser):
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(f"{live_server}/?lang=zh-Hant")
+    page.wait_for_function("() => document.querySelectorAll('#positions .prow').length > 0", timeout=15000)
+    page.wait_for_function("() => document.getElementById('musePill').dataset.mode === 'live'", timeout=15000)
+    assert page.inner_text("#musePill") == "Muse · 線上"
+    page.click("#simulateBtn")
+    page.wait_for_function("() => S.state === 'finished'", timeout=60000)
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('#advice .adv-text')].some((n) => n.textContent === 'Muse explanation.')",
+        timeout=15000)
+    cards = page.locator("#advice [data-advice]")
+    ids = cards.evaluate_all("(nodes) => nodes.map((n) => n.dataset.advice)")
+    assert len(ids) == len(set(ids)) > 0
+    assert not errors, errors

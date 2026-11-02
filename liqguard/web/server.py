@@ -150,8 +150,7 @@ def _localized(sim: MarketSimulation, data) -> JSONResponse:
 
 
 async def _ensure_summary(sim: MarketSimulation) -> None:
-    if sim.summary is None:
-        await sim.refresh_summary()
+    sim.ensure_summary()
 
 
 def create_app(
@@ -289,8 +288,10 @@ def create_app(
             return _localized(sim, sim.audit)
 
         @app.get(f"{prefix}/rescue")
-        async def rescue(symbol: str = Query(..., max_length=32), sim: MarketSimulation = Depends(resolve)):
-            result = await sim.rescue_plan(symbol)
+        async def rescue(symbol: str = Query(..., max_length=32), wait: bool = False,
+                         sim: MarketSimulation = Depends(resolve)):
+            """Deterministic (or cached) explanation at once; `muse_pending` means `wait=1` will bring Muse's."""
+            result = await sim.rescue_plan(symbol, wait=wait)
             if result is None:
                 raise HTTPException(404, "No such position in this simulation")
             return _localized(sim, result)
@@ -504,6 +505,7 @@ def create_app(
         async def my_live_rescue(
             symbol: str = Query(..., max_length=32),
             venue: str = Query(..., max_length=16),
+            wait: bool = False,
             claims: SessionClaims = Depends(auth.required),
         ):
             """Rescue options for one of the signed-in user's own positions (their demo book or exchange bindings)."""
@@ -518,8 +520,13 @@ def create_app(
             plan = RescueSimulator(context.fees, user.threshold.safety_target_pct).simulate(
                 position, context.account_for(position), context.funding_for(position), context.now
             )
-            explanation = await ctx.llm.explain_rescue(plan, user.language)
-            return JSONResponse(localize(user.language, {"plan": plan.to_dict(), "explanation": explanation}))
+            if wait:
+                explanation, pending = await ctx.llm.explain_rescue(plan, user.language), False
+            else:
+                instant = ctx.llm.explain_rescue_now(plan, user.language)
+                explanation, pending = instant.result, instant.pending is not None
+            return JSONResponse(localize(user.language, {"plan": plan.to_dict(), "explanation": explanation,
+                                                         "muse_pending": pending}))
 
     # ---------------------------------------------------------------- websockets
 

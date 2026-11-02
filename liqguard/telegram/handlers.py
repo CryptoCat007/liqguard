@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
-from typing import Optional
+from typing import Any, Awaitable, Callable, NamedTuple, Optional
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatType
@@ -64,11 +65,21 @@ class ThresholdStates(StatesGroup):
     waiting_for_value = State()
 
 
+class RiskReply(NamedTuple):
+    """The /risk message now, plus Muse's headline when it is still on its way."""
+
+    text: str
+    keyboard: InlineKeyboardMarkup
+    pending: Optional[Awaitable[Optional[dict]]]
+    compose: Callable[[dict], str]
+
+
 class BotHandlers:
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
         self.storage = ctx.storage
         self.llm = ctx.llm
+        self._muse_followups: set[asyncio.Task] = set()
         self.actions_manager = ctx.actions
         self.positions = ctx.positions
         self.simulations = ctx.simulations
@@ -407,19 +418,41 @@ class BotHandlers:
         source = "sim" if snapshot.label == LABEL_SIMULATION else position.venue.value
         return f"rescue:{source}:{position.symbol}" + (f":{kind}" if kind else "")
 
-    async def _risk_overview_text(self, overview, language: str, focus: Optional[dict] = None) -> str:
-        summary = await self.llm.summarize_portfolio(overview, language, focus)
-        tag = "Muse (mock)" if summary.get("mock") else "Muse"
-        return f"🧠 _{tag}:_ {summary['headline']}\n\n" + format_portfolio_overview_text(overview, language)
+    def _muse_followup(self, pending: Optional[Awaitable[Any]], update: Callable[[Any], Awaitable[Any]]) -> None:
+        """When Muse answers after the deterministic text was sent, `update` swaps its text in."""
+        if pending is None:
+            return
 
-    async def _risk_reply(self, user: User) -> Optional[tuple[str, InlineKeyboardMarkup]]:
+        async def run() -> None:
+            try:
+                live = await pending
+                if live is not None:
+                    await update(live)
+            except Exception as e:
+                logger.info("Muse follow-up not applied: %s", type(e).__name__)
+
+        task = asyncio.create_task(run())
+        self._muse_followups.add(task)
+        task.add_done_callback(self._muse_followups.discard)
+
+    @staticmethod
+    def _summary_line(summary: dict) -> str:
+        tag = "Muse (mock)" if summary.get("mock") else "Muse"
+        return f"🧠 _{tag}:_ {summary['headline']}\n\n"
+
+    async def _risk_overview_text(self, overview, language: str, focus: Optional[dict] = None) -> str:
+        summary = self.llm.summarize_portfolio_now(overview, language, focus).result
+        return self._summary_line(summary) + format_portfolio_overview_text(overview, language)
+
+    async def _risk_reply(self, user: User) -> Optional["RiskReply"]:
         snapshot = await self._snapshot(user)
         if not snapshot.positions:
             return None
         overview = PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(snapshot.positions)
         insights = portfolio_insights(snapshot.positions, snapshot.context, user.threshold)
         focus = insights.focus
-        text = await self._risk_overview_text(overview, user.language, focus)
+        headline = self.llm.summarize_portfolio_now(overview, user.language, focus)
+        text = format_portfolio_overview_text(overview, user.language)
         buttons = []
         riskiest = next((p for p in overview.position_summaries
                          if focus and p.symbol == focus["symbol"] and p.venue == focus["venue"]), overview.riskiest_position)
@@ -456,9 +489,12 @@ class BotHandlers:
             InlineKeyboardButton(text=t(user.language, "kb.risk_details"), callback_data="risk:positions"),
             InlineKeyboardButton(text=t(user.language, "kb.risk_refresh"), callback_data="risk:refresh"),
         ])
-        if len(text) > 4000:
-            text = text[:3900] + "\n\n... (truncated — see /dashboard for everything)"
-        return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+        def compose(summary: dict) -> str:
+            full = self._summary_line(summary) + text
+            return full if len(full) <= 4000 else full[:3900] + "\n\n... (truncated — see /dashboard for everything)"
+
+        return RiskReply(compose(headline.result), InlineKeyboardMarkup(inline_keyboard=buttons), headline.pending, compose)
 
     async def _rescue_plan_for(self, user: User, source: str, symbol: str) -> Optional[RescuePlan]:
         """The caller's own position only: their simulation, demo book or exchange bindings."""
@@ -487,20 +523,24 @@ class BotHandlers:
         if plan is None:
             await callback.answer("Position not found")
             return
-        explanation = await self.llm.explain_rescue(plan, user.language)
+        instant = self.llm.explain_rescue_now(plan, user.language)
         data = plan.to_dict()
         if kind:
-            text = format_option_detail(data, kind, explanation)
+            text = format_option_detail(data, kind, instant.result)
             if text is None:
                 await callback.answer("Unknown option")
                 return
-            await callback.message.answer(text, parse_mode="Markdown")
+            sent = await callback.message.answer(text, parse_mode="Markdown")
+            self._muse_followup(instant.pending, lambda live: sent.edit_text(
+                format_option_detail(data, kind, live), parse_mode="Markdown"))
         else:
-            await callback.message.answer(
-                format_rescue_text(data, explanation, demo=source in ("sim", "demo")),
-                parse_mode="Markdown",
-                reply_markup=rescue_keyboard(source, data, self.actions_manager.is_enabled() and source not in ("sim", "demo")),
+            demo = source in ("sim", "demo")
+            keyboard = rescue_keyboard(source, data, self.actions_manager.is_enabled() and not demo)
+            sent = await callback.message.answer(
+                format_rescue_text(data, instant.result, demo=demo), parse_mode="Markdown", reply_markup=keyboard,
             )
+            self._muse_followup(instant.pending, lambda live: sent.edit_text(
+                format_rescue_text(data, live, demo=demo), parse_mode="Markdown", reply_markup=keyboard))
         await callback.answer()
 
     async def cmd_risk(self, message: Message) -> None:
@@ -513,7 +553,9 @@ class BotHandlers:
         if reply is None:
             await message.answer(f"{label}\n\nNo open positions found.")
             return
-        await message.answer(reply[0], parse_mode="Markdown", reply_markup=reply[1])
+        sent = await message.answer(reply.text, parse_mode="Markdown", reply_markup=reply.keyboard)
+        self._muse_followup(reply.pending, lambda live: sent.edit_text(
+            reply.compose(live), parse_mode="Markdown", reply_markup=reply.keyboard))
 
     async def callback_risk(self, callback: CallbackQuery) -> None:
         action = callback.data.split(":")[1]
@@ -526,8 +568,10 @@ class BotHandlers:
             if reply is None:
                 await callback.answer("No positions found")
                 return
-            await callback.message.edit_text(reply[0], parse_mode="Markdown", reply_markup=reply[1])
+            await callback.message.edit_text(reply.text, parse_mode="Markdown", reply_markup=reply.keyboard)
             await callback.answer("Refreshed")
+            self._muse_followup(reply.pending, lambda live: callback.message.edit_text(
+                reply.compose(live), parse_mode="Markdown", reply_markup=reply.keyboard))
         elif action == "positions":
             snapshot = await self._snapshot(user)
             if not snapshot.positions:
@@ -852,8 +896,9 @@ class BotHandlers:
         news = None
         if any(s in question.lower() for s in ["news", "market", "sentiment", "新聞", "市場"]):
             news = get_news_stub(positions[0].symbol)
-        answer = await self.llm.answer_portfolio_question(positions, question, user.language, news)
-        await status_msg.edit_text(answer)
+        instant = self.llm.answer_portfolio_question_now(positions, question, user.language, news)
+        await status_msg.edit_text(instant.result)
+        self._muse_followup(instant.pending, status_msg.edit_text)
 
     async def handle_photo(self, message: Message, state: FSMContext) -> None:
         await self.get_or_create_user(message)

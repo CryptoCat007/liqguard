@@ -104,7 +104,7 @@ async def main(dashboard: bool = False, dashboard_port: Optional[int] = None) ->
     elif not settings.public_url:
         logger.info("Dashboard disabled: /dashboard will tell users it is not available.")
 
-    logger.info("Muse: %s", "mock mode" if ctx.llm.is_mock else "live API")
+    logger.info("Muse: %s", ctx.llm.describe())
     logger.info("Database: %s · audit log: %s · poll interval %ss · protective actions %s",
                 settings.db_path, settings.audit_log_path or "database only", settings.poll_interval,
                 "enabled (testnet)" if ctx.actions.is_enabled() else "disabled")

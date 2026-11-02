@@ -8,6 +8,7 @@ match; every message carries ⏹ Stop demo.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 from aiogram import Bot
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 LEVEL_EMOJI = {"warning": "⚠️", "critical": "🚨", "emergency": "🆘"}
 STOP_DEMO = "democtl:stop"
+SENT_MEMORY = 64
 
 
 def format_advice_message(card: dict, lang: str = EN) -> str:
@@ -124,6 +126,7 @@ class TelegramSimulationBridge:
         self.simulation = simulation
         self.chat_id: int = simulation.owner_id
         self.alert_markup = alert_markup
+        self._sent: "OrderedDict[str, tuple[int, Optional[InlineKeyboardMarkup]]]" = OrderedDict()
         self.unsubscribe: Callable[[], None] = simulation.subscribe("telegram", self.on_event)
 
     @property
@@ -143,15 +146,34 @@ class TelegramSimulationBridge:
         rest = [row for row in rows if not any(b.callback_data in legacy for b in row)]
         return InlineKeyboardMarkup(inline_keyboard=list(top.inline_keyboard) + rest)
 
-    async def _send(self, text: str, keyboard: Optional[InlineKeyboardMarkup] = None, stop_button: bool = True) -> None:
+    async def _send(self, text: str, keyboard: Optional[InlineKeyboardMarkup] = None, stop_button: bool = True,
+                    ref: Optional[str] = None) -> None:
+        """`ref` (an advice or alert id) remembers the message so Muse's later text can replace it in place."""
         if self.simulation.muted:
             return
         if keyboard is None and stop_button:
             keyboard = self.keyboard()
         try:
-            await self.bot.send_message(self.chat_id, text, parse_mode="Markdown", reply_markup=keyboard)
+            sent = await self.bot.send_message(self.chat_id, text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             logger.error("Failed to send simulation event to %s: %s", self.chat_id, type(e).__name__)
+            return
+        message_id = getattr(sent, "message_id", None)
+        if ref and isinstance(message_id, int):
+            self._sent[ref] = (message_id, keyboard)
+            while len(self._sent) > SENT_MEMORY:
+                self._sent.popitem(last=False)
+
+    async def _edit(self, ref: str, text: str) -> None:
+        """Muse's text arrived after the deterministic one was sent: update that message, keep its buttons."""
+        if self.simulation.muted or ref not in self._sent:
+            return
+        message_id, keyboard = self._sent[ref]
+        try:
+            await self.bot.edit_message_text(text, chat_id=self.chat_id, message_id=message_id,
+                                             parse_mode="Markdown", reply_markup=keyboard)
+        except Exception as e:
+            logger.info("Could not update simulation message for %s: %s", self.chat_id, type(e).__name__)
 
     def _rescue_rows(self, symbol: str) -> list[list[InlineKeyboardButton]]:
         return [[InlineKeyboardButton(text=t(self.lang, "alert.rescue_button"), callback_data=f"rescue:sim:{symbol}")]]
@@ -161,7 +183,14 @@ class TelegramSimulationBridge:
 
         if kind == "advice":
             rows = advice_keyboard(data, lang).inline_keyboard
-            await self._send(format_advice_message(data, lang), self.keyboard(rows, data["symbol"], data.get("ack_id")))
+            await self._send(format_advice_message(data, lang), self.keyboard(rows, data["symbol"], data.get("ack_id")),
+                             ref=data["id"])
+
+        elif kind == "advice_update":
+            await self._edit(data["id"], format_advice_message(data, lang))
+
+        elif kind == "alert_update" and data["level"] == "stop":
+            await self._edit(data["id"], format_stop_message(data["stop"], data.get("explanation"), demo=True, lang=lang))
 
         elif kind == "alert" and data["level"] == "funding":
             await self._send(format_prefunding_message(data["funding"], demo=True, lang=lang),
@@ -169,7 +198,7 @@ class TelegramSimulationBridge:
 
         elif kind == "alert" and data["level"] == "stop":
             await self._send(format_stop_message(data["stop"], data.get("explanation"), demo=True, lang=lang),
-                             self.keyboard(self._rescue_rows(data["symbol"]), data["symbol"]))
+                             self.keyboard(self._rescue_rows(data["symbol"]), data["symbol"]), ref=data["id"])
 
         elif kind == "alert" and data["level"] == "triage":
             rows = [ack_row(data["ack_id"], lang)] if data.get("ack_id") else []
@@ -245,8 +274,8 @@ class TelegramNotifier:
         self.alert_markup = alert_markup
 
     async def notify(self, user_id: int, text: str, actions: Optional[list[tuple[str, str]]] = None, lang: str = EN,
-                     demo: bool = False) -> None:
-        """Every demo message (alerts, info warnings and reminders alike) carries ⏹ Stop demo."""
+                     demo: bool = False) -> Optional[Any]:
+        """Every demo message (alerts, info warnings and reminders alike) carries ⏹ Stop demo. Returns the sent message."""
         actions = list(actions or [])
         keyboard = None
         if (actions or demo) and self.alert_markup is not None:
@@ -257,6 +286,7 @@ class TelegramNotifier:
                 rows.append([InlineKeyboardButton(text=t(lang, "kb.sim_stop"), callback_data=STOP_DEMO)])
             keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
         try:
-            await self.bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=keyboard)
+            return await self.bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             logger.error("Failed to deliver alert to %s: %s", user_id, type(e).__name__)
+            return None

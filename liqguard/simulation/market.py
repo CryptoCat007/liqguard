@@ -246,6 +246,10 @@ def _source(source: str) -> object:
     return _label("sim.source", source)
 
 
+async def _none() -> None:
+    return None
+
+
 def _join_labels(sources: list[str]) -> object:
     out = _source(sources[0])
     for source in sources[1:]:
@@ -322,6 +326,8 @@ class MarketSimulation:
         self._subscribers: dict[str, EventCallback] = {}
         self._task: Optional[asyncio.Task] = None
         self._side_tasks: set[asyncio.Task] = set()
+        self._muse_tasks: set[asyncio.Task] = set()
+        self._muse_reported = self.muse_mode
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self.reset()
@@ -567,12 +573,19 @@ class MarketSimulation:
         simulator = RescueSimulator(self.fees, self.threshold.safety_target_pct)
         return simulator.simulate(position, ctx.account_for(position), ctx.funding_for(position), ctx.now)
 
-    async def rescue_plan(self, symbol: str) -> Optional[dict]:
-        """Rescue options for one demo position plus Muse's explanation of the trade-offs."""
+    async def rescue_plan(self, symbol: str, wait: bool = True) -> Optional[dict]:
+        """
+        Rescue options for one demo position plus Muse's explanation of the trade-offs.
+        With `wait=False` the explanation is the cached or deterministic one and
+        `muse_pending` says whether asking again (with `wait`) will bring Muse's.
+        """
         plan = self.build_rescue_plan(symbol)
         if plan is None:
             return None
-        return {"plan": plan.to_dict(), "explanation": await self._explain_rescue(plan)}
+        if wait or self.llm is None:
+            return {"plan": plan.to_dict(), "explanation": await self._explain_rescue(plan), "muse_pending": False}
+        instant = self.llm.explain_rescue_now(plan, self.language)
+        return {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
 
     async def _explain_rescue(self, plan: RescuePlan) -> Optional[dict]:
         if self.llm is None:
@@ -679,7 +692,7 @@ class MarketSimulation:
             "scenario": self.scenario,
             "scenarios": [sc.to_dict() for sc in SCENARIOS.values()],
             "channels": sorted(self._subscribers),
-            "muse_mode": "mock" if (self.llm is None or self.llm.is_mock) else "live",
+            "muse_mode": self.muse_mode,
             "demo": True,
             "scope": "public" if self.is_public else "private",
         }
@@ -734,10 +747,44 @@ class MarketSimulation:
         else:
             coro.close()
 
+    @property
+    def muse_mode(self) -> str:
+        return "mock" if self.llm is None else self.llm.mode
+
+    async def _muse_settled(self) -> None:
+        """Tell viewers when Muse's status changed, so the badge only says live after a real answer."""
+        mode = self.muse_mode
+        if mode != self._muse_reported:
+            self._muse_reported = mode
+            await self._emit("muse", {"mode": mode})
+
+    def ensure_summary(self) -> None:
+        """A summary to show right away (rule-based); Muse's phrasing follows as a "summary" event."""
+        if self.summary is None:
+            self.summary = self._tick_summary(self.insights())
+            if self.llm is not None and not self.llm.is_mock:
+                self._spawn_muse(self.refresh_summary())
+
+    async def _summary_soon(self) -> None:
+        """The rule-based summary at once; with live Muse its phrasing follows as another "summary" event."""
+        if self.llm is None or self.llm.is_mock:
+            await self.refresh_summary()
+            return
+        self.summary = self._tick_summary(self.insights())
+        await self._emit("summary", self.summary)
+        self._spawn_muse(self.refresh_summary())
+
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._side_tasks.add(task)
         task.add_done_callback(self._side_tasks.discard)
+        return task
+
+    def _spawn_muse(self, coro) -> asyncio.Task:
+        """Muse follow-ups: a run finishes without waiting for them; `wait()` and `stop()` still cover them."""
+        task = asyncio.create_task(coro)
+        self._muse_tasks.add(task)
+        task.add_done_callback(self._muse_tasks.discard)
         return task
 
     # ------------------------------------------------------------------ control
@@ -751,7 +798,7 @@ class MarketSimulation:
         self.state = "running"
         await self._emit("reset", self.snapshot())
         await self._add_audit("simulation_started", None, Msg("audit.started", source=_source(source)), source)
-        await self.refresh_summary()
+        await self._summary_soon()
         await self._check_protection()
         await self._check_portfolio()
         self._task = asyncio.create_task(self._run())
@@ -797,7 +844,7 @@ class MarketSimulation:
         return ack.symbol if ack else None
 
     async def _cancel_side_tasks(self) -> None:
-        tasks = [t for t in self._side_tasks if not t.done()]
+        tasks = [t for t in (*self._side_tasks, *self._muse_tasks) if not t.done()]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -827,7 +874,7 @@ class MarketSimulation:
             return False
         await self._emit("reset", self.snapshot())
         await self._add_audit("scenario_switched", None, Msg("audit.scenario", title=SCENARIOS[key].title), source)
-        await self.refresh_summary()
+        await self._summary_soon()
         return True
 
     async def reset_and_notify(self) -> None:
@@ -835,7 +882,7 @@ class MarketSimulation:
         await self._stop_escalation()
         self.reset()
         await self._emit("reset", self.snapshot())
-        await self.refresh_summary()
+        await self._summary_soon()
 
     async def wait(self) -> None:
         """Wait for the run and any pending advice generation to finish."""
@@ -844,8 +891,8 @@ class MarketSimulation:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        if self._side_tasks:
-            await asyncio.gather(*list(self._side_tasks), return_exceptions=True)
+        if self._side_tasks or self._muse_tasks:
+            await asyncio.gather(*self._side_tasks, *self._muse_tasks, return_exceptions=True)
 
     def _status(self) -> dict:
         return {"state": self.state, "step": self.step, "total_steps": self.steps, "muted": bool(self.muted)}
@@ -868,8 +915,9 @@ class MarketSimulation:
         try:
             summary = await self.llm.summarize_portfolio(overview, self.language, focus)
         except Exception as e:
-            logger.error(f"Portfolio summary failed: {e}")
+            logger.error("Portfolio summary failed: %s", type(e).__name__)
             return self.summary
+        await self._muse_settled()
         if self.step != step or self.overview is not overview:
             return self.summary
         self.summary = {**summary, "step": step}
@@ -884,7 +932,7 @@ class MarketSimulation:
             await self._advance()
         if self._side_tasks:
             await asyncio.gather(*list(self._side_tasks), return_exceptions=True)
-        await self.refresh_summary()
+        await self._summary_soon()
         await self.silence("finish")
         self.state = "finished"
         await self._add_audit("simulation_finished", None, Msg("audit.finished"))
@@ -1014,7 +1062,7 @@ class MarketSimulation:
         else:
             await self._fire_triage(crossings, insights)
         if self.llm is not None and not self.llm.is_mock:
-            self._spawn(self.refresh_summary())
+            self._spawn_muse(self.refresh_summary())
 
     async def _fire_triage(self, crossings: list, insights: PortfolioInsights) -> None:
         self._alert_seq += 1
@@ -1146,7 +1194,7 @@ class MarketSimulation:
         }
         if level == "stop":
             alert["stop"] = info["stop"]
-            alert["explanation"] = await self._explain_stop(protection.stop)
+            alert["explanation"] = self._explain_stop(alert, protection.stop)
             status = _label("tools.stop.status", protection.stop.status)
             detail = (Msg("audit.stop_prices", status=status, stop=protection.stop.stop_price, liq=pos.liquidation_price)
                       if protection.stop.stop_price is not None else Msg("audit.stop", status=status))
@@ -1157,14 +1205,21 @@ class MarketSimulation:
         await self._emit("alert", alert)
         await self._add_audit(f"{level}_warning", pos.symbol, detail)
 
-    async def _explain_stop(self, check) -> Optional[dict]:
+    def _explain_stop(self, alert: dict, check) -> Optional[dict]:
+        """The deterministic (or cached) explanation now; Muse's follows as an "alert_update"."""
         if self.llm is None or check is None:
             return None
-        try:
-            return await self.llm.explain_stop_fix(check, self.language)
-        except Exception as e:
-            logger.error("Stop-loss explanation failed: %s", type(e).__name__)
-            return None
+        instant = self.llm.explain_stop_fix_now(check, self.language)
+        if instant.pending is not None:
+            self._spawn_muse(self._update_alert(alert, instant.pending))
+        return instant.result
+
+    async def _update_alert(self, alert: dict, pending: asyncio.Task) -> None:
+        explanation = await pending
+        await self._muse_settled()
+        if explanation is not None and alert in self.alerts:
+            alert["explanation"] = explanation
+            await self._emit("alert_update", alert)
 
     # ------------------------------------------------------------------ escalation
 
@@ -1319,18 +1374,21 @@ class MarketSimulation:
         return alert
 
     async def _generate_advice(self, alert: dict, pos: Position, margin, plan: RescuePlan) -> None:
+        """
+        The advice card goes out at once with the deterministic (or cached) text;
+        when Muse answers, the same card is re-sent as an "advice_update".
+        """
         explanation, summary, mock = None, None, True
+        advice_now = rescue_now = None
         if self.llm is not None:
-            try:
-                result = await self.llm.explain_risk_with_advice(pos, margin, self.language)
-                explanation = result.get("explanation")
-                summary = result.get("summary")
-                mock = bool(result.get("mock", self.llm.is_mock))
-            except Exception as e:
-                logger.error(f"Advice generation failed: {e}")
+            advice_now = self.llm.explain_risk_with_advice_now(pos, margin, self.language)
+            rescue_now = self.llm.explain_rescue_now(plan, self.language)
+            explanation = advice_now.result.get("explanation")
+            summary = advice_now.result.get("summary")
+            mock = bool(advice_now.result.get("mock", self.llm.is_mock))
         if not explanation:
             explanation = AdviceCalculator.format_advice_text(margin, self.language)
-        rescue_explanation = await self._explain_rescue(plan)
+        rescue_explanation = rescue_now.result if rescue_now else None
 
         card = {
             "id": f"adv_{alert['id']}",
@@ -1370,3 +1428,19 @@ class MarketSimulation:
             Msg("audit.advice", mock=Msg("audit.mock") if mock else "", amount=card["margin_to_add_usd"],
                 pct=card["reduce_size_pct"]),
         )
+        pending = [i.pending for i in (advice_now, rescue_now) if i is not None and i.pending is not None]
+        if pending:
+            self._spawn_muse(self._update_advice(card, explanation, advice_now, rescue_now))
+
+    async def _update_advice(self, card: dict, explanation: str, advice_now, rescue_now) -> None:
+        live_advice, live_rescue = await asyncio.gather(
+            *(i.pending if i is not None and i.pending is not None else _none() for i in (advice_now, rescue_now)))
+        await self._muse_settled()
+        if live_advice is None and live_rescue is None or card not in self.advice:
+            return
+        if live_advice is not None:
+            card.update(summary=live_advice.get("summary"), explanation=live_advice.get("explanation") or explanation,
+                        mock=False)
+        if live_rescue is not None:
+            card["rescue_explanation"] = live_rescue
+        await self._emit("advice_update", card)

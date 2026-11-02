@@ -1103,6 +1103,12 @@ shock_ok = "ok"
 ins_liq_compare = "platform liq {platform} ({platform_pct}) vs LiqGuard {ours} ({ours_pct})"
 ins_pts_closer = "{pts} pts closer"
 ins_oversized = "{pct} of equity at its {exit} → suggested {size}"
+muse_pending = "Muse · connecting"
+muse_fallback = "Muse · offline"
+muse_title_live = "Muse answered the last request; numbers are still computed in code"
+muse_title_pending = "Waiting for Muse; rule-based text is shown until it answers"
+muse_title_fallback = "Muse did not answer the last request; rule-based text is shown"
+muse_title_mock = "No Meta API key: rule-based text only"
 
 [common.weekday]
 monday = "Monday"

@@ -43,7 +43,7 @@ async def _serve(args: argparse.Namespace) -> None:
         ctx = await AppContext.create(settings)
         ctx.market.start()
         app = create_app(ctx)
-        logger.info("Muse: %s · master key source: %s", "mock" if ctx.llm.is_mock else "live", ctx.storage.key_source)
+        logger.info("Muse: %s · master key source: %s", ctx.llm.describe(), ctx.storage.key_source)
 
     host, port = settings.dashboard_host, settings.dashboard_port
     logger.info("Dashboard: http://%s:%s (public demo at /, sign-in at /login)", host, port)

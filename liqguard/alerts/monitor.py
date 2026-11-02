@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Optional, Protocol, Union
+from typing import Any, Awaitable, Callable, Optional, Protocol, Union
 
 from liqguard.i18n import EN, t
 from liqguard.models import Position, User
@@ -54,9 +54,10 @@ Action = tuple[str, str]
 
 class Notifier(Protocol):
     async def notify(self, user_id: int, text: str, actions: Optional[list[Action]] = None, lang: str = EN,
-                     demo: bool = False) -> None:
+                     demo: bool = False) -> Any:
         """Deliver `text` (and optional action buttons) to exactly one user; `lang` is the language `text` is in,
-        `demo` marks an alert about the user's demo book (it gets a ⏹ Stop demo button)."""
+        `demo` marks an alert about the user's demo book (it gets a ⏹ Stop demo button). May return the sent
+        message; if it has `edit_text`, Muse's explanation replaces the deterministic one when it arrives."""
 
 
 class BookSnapshotLike(Protocol):
@@ -162,9 +163,37 @@ class PositionMonitor:
         self._concentrated: dict[int, bool] = {}
         self.clock = clock
         self.demo_window = demo_window
+        self._muse_followups: set[asyncio.Task] = set()
 
-    async def _notify(self, user: User, text: str, actions: Optional[list[Action]] = None) -> None:
-        await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language, demo=user.is_demo_mode)
+    async def _notify(self, user: User, text: str, actions: Optional[list[Action]] = None) -> Any:
+        return await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language,
+                                          demo=user.is_demo_mode)
+
+    async def _explain(self, method: str, fallback_method: str, *args) -> tuple[Any, Optional[Awaitable[Any]]]:
+        """(text to send now, Muse's answer still on its way). Alerts never wait for Muse."""
+        now = getattr(self.explainer, method, None)
+        if now is not None:
+            instant = now(*args)
+            return instant.result, instant.pending
+        later = getattr(self.explainer, fallback_method, None)
+        return (await later(*args) if later is not None else None), None
+
+    def _muse_followup(self, sent: Any, pending: Optional[Awaitable[Any]], render: Callable[[Any], str]) -> None:
+        edit = getattr(sent, "edit_text", None)
+        if pending is None or edit is None:
+            return
+
+        async def run() -> None:
+            try:
+                live = await pending
+                if live is not None:
+                    await edit(render(live), parse_mode="Markdown", reply_markup=getattr(sent, "reply_markup", None))
+            except Exception as e:
+                logger.info("Muse follow-up not applied: %s", type(e).__name__)
+
+        task = asyncio.create_task(run())
+        self._muse_followups.add(task)
+        task.add_done_callback(self._muse_followups.discard)
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -267,19 +296,17 @@ class PositionMonitor:
 
     async def _send_tier_alert(self, user: User, position: Position, assessment: RiskAssessment, info: dict,
                                insights: PortfolioInsights) -> int:
-        explanation = await self.explainer.explain_risk(
-            position,
-            assessment.distance_to_liquidation_pct,
-            assessment.margin_to_safety,
-            assessment.severity,
-            user.language,
-        )
         lang = user.language
+        explanation, pending = await self._explain(
+            "explain_risk_now", "explain_risk", position, assessment.distance_to_liquidation_pct,
+            assessment.margin_to_safety, assessment.severity, lang,
+        )
         text = format_alert_message(position, assessment, explanation, info, insights, lang)
         actions = [rescue_action(position, lang)]
         severity = assessment.severity.value if assessment.severity else None
         self._open_escalation(user, position, severity, text, assessment.distance_to_liquidation_pct, actions)
-        await self._notify(user, text, actions)
+        sent = await self._notify(user, text, actions)
+        self._muse_followup(sent, pending, lambda live: format_alert_message(position, assessment, live, info, insights, lang))
         return 1
 
     async def _send_triage(self, user: User, due: list, insights: PortfolioInsights) -> int:
@@ -334,15 +361,14 @@ class PositionMonitor:
         if self._stop_state.get(key) == state:
             return 0
         self._stop_state[key] = state
-        explanation = None
-        explain = getattr(self.explainer, "explain_stop_fix", None)
-        if explain is not None:
-            try:
-                explanation = await explain(check, user.language)
-            except Exception as e:
-                logger.error("Stop-loss explanation failed: %s", type(e).__name__)
         lang = user.language
-        await self._notify(user, format_stop_message(check.to_dict(), explanation, lang=lang), [rescue_action(position, lang)])
+        explanation, pending = None, None
+        try:
+            explanation, pending = await self._explain("explain_stop_fix_now", "explain_stop_fix", check, lang)
+        except Exception as e:
+            logger.error("Stop-loss explanation failed: %s", type(e).__name__)
+        sent = await self._notify(user, format_stop_message(check.to_dict(), explanation, lang=lang), [rescue_action(position, lang)])
+        self._muse_followup(sent, pending, lambda live: format_stop_message(check.to_dict(), live, lang=lang))
         return 1
 
     async def _check_adl(self, user: User, position: Position, adl: dict) -> int:
