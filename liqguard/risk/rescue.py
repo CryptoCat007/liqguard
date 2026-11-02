@@ -334,8 +334,7 @@ class RescueSimulator:
             params={"hedge_size": q, "hedge_pct": 100.0, "hedge_venue": other.value},
             notes=(
                 reason,
-                "Protects PnL, but this position is still liquidated at the same price; "
-                "the hedge's gain then offsets the loss. Funding on both legs assumed to cancel.",
+                Msg("risk.rescue.note_hedge_other"),
             ),
         )
 

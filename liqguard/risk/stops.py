@@ -224,17 +224,17 @@ def check_stop_loss(
         in_front = price < position.mark_price if side == Side.LONG else price > position.mark_price
         if not in_front:
             return []
-        return [StopFix("move_stop", f"Stop at ${price:,.2f}", stop_price=price, pnl_at_stop_usd=pnl_at(position, price, fees))]
+        return [StopFix("move_stop", Msg("risk.stop.fix_move", price=price), stop_price=price, pnl_at_stop_usd=pnl_at(position, price, fees))]
 
     if not stops:
-        notes = [] if liq else ["No liquidation price: the position cannot be liquidated at current margin."]
+        notes = [] if liq else [Msg("risk.stop.note_no_liq")]
         return StopCheck(status=NO_STOP if liq else OK, fixes=placement_fix(), loss_if_liquidated_usd=loss_if_liquidated,
                          notes=notes, **base)
 
     stop = _first_trigger(position, stops)
     covered = _coverage(position, stops)
     if stop is None:
-        return StopCheck(status=OK, covered_pct=covered, notes=["Trailing stop: the trigger moves with the price."], **base)
+        return StopCheck(status=OK, covered_pct=covered, notes=[Msg("risk.stop.note_trailing")], **base)
     if liq is None:
         return StopCheck(status=OK, stop_price=stop, covered_pct=covered, pnl_at_stop_usd=pnl_at(position, stop, fees), **base)
 
@@ -278,7 +278,7 @@ def _keep_stop_fixes(position, stop, need, account, fees, funding, now) -> list[
     add = plan.option(ADD_MARGIN)
     if add and add.reaches_target and add.params.get("amount_usd", 0) > 0:
         out.append(StopFix(
-            "add_margin", f"Keep the stop, add ${add.params['amount_usd']:,.2f} margin",
+            "add_margin", Msg("risk.stop.fix_keep_add", amount=add.params["amount_usd"]),
             stop_price=stop, add_margin_usd=add.params["amount_usd"], new_liquidation_price=add.new_liquidation_price,
         ))
     reduce = plan.option(REDUCE)
@@ -286,7 +286,7 @@ def _keep_stop_fixes(position, stop, need, account, fees, funding, now) -> list[
         pct = reduce.params["reduce_pct"]
         size = reduce.params.get("reduce_size", abs(position.size))
         out.append(StopFix(
-            "reduce", f"Keep the stop, reduce the position {pct:.1f}%",
+            "reduce", Msg("risk.stop.fix_keep_reduce", pct=pct),
             stop_price=stop, reduce_pct=pct, reduce_size=size, new_size=abs(position.size) - size,
             new_liquidation_price=reduce.new_liquidation_price, fees_usd=reduce.fees_usd,
         ))

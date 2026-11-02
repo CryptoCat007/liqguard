@@ -78,7 +78,7 @@ class SizingCheck:
     def reasons(self) -> list[str]:
         out = []
         if self.risk_pct is not None and self.risk_pct > self.max_risk_pct:
-            out.append(Msg("risk.sizing.loses", risk=self.risk_pct, exit=Msg(f"risk.exit.{self.exit_kind.replace(' ', '_')}"), limit=self.max_risk_pct))
+            out.append(Msg("risk.sizing.loses", risk=self.risk_pct, exit=Msg(f"risk.exit.{(self.exit_kind or 'none').replace(' ', '_')}"), limit=self.max_risk_pct))
         if self.margin_pct > self.max_margin_pct:
             out.append(Msg("risk.sizing.margin", margin=self.margin_pct, limit=self.max_margin_pct))
         return out
@@ -95,6 +95,7 @@ class SizingCheck:
             "notional_x_equity": _r(self.notional / self.equity if self.equity > 0 else None),
             "exit_price": _r(self.exit_price, 6),
             "exit_kind": self.exit_kind,
+            "exit_label": Msg(f"risk.exit.{(self.exit_kind or 'none').replace(' ', '_')}"),
             "loss_at_exit_usd": _r(self.loss_at_exit_usd),
             "risk_pct": _r(self.risk_pct),
             "margin_pct": _r(self.margin_pct, 1),

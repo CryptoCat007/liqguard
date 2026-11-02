@@ -10,7 +10,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from liqguard.i18n import is_zh, muse_language
+from liqguard.i18n import ZH, is_zh, muse_language, t, tr
 from liqguard.models import Alert, AlertSeverity, Position
 from liqguard.risk.advice import ActionableAdvice, AdviceCalculator
 from liqguard.risk.portfolio import PortfolioRiskOverview
@@ -672,9 +672,11 @@ Question: {question}"""
         target = rp.margin_advice.target_distance_pct if rp.margin_advice else None
         explained = basis and basis not in ("only position", "closest to liquidation")
         if is_zh(language):
-            line = f"最高風險為 {rp.symbol} {rp.side.upper()}（{rp.venue}），距離清算 {dist:.1f}%"
+            side = t(ZH, f"common.side_upper.{getattr(rp.side, 'value', rp.side).lower()}")
+            venue = t(ZH, f"common.venue.{getattr(rp.venue, 'value', rp.venue).lower()}")
+            line = f"最高風險為 {rp.symbol} {side}（{venue}），距離清算 {dist:.1f}%"
             if explained:
-                line += "（以波動調整後最接近）" if basis == "closest in volatility-adjusted terms" else f"（{basis}）"
+                line += f"（{tr(ZH, basis)}）"
             return line + (f"，增加 ${add:,.0f} 保證金可恢復 {target:.0f}% 緩衝。" if add else "。")
         line = f"Riskiest is {rp.symbol} {rp.side.upper()} on {rp.venue.title()} at {dist:.1f}% from liquidation"
         if explained:

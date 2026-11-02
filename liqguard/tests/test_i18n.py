@@ -18,9 +18,9 @@ CSRF = {"X-LiqGuard-CSRF": "1"}
 HAN = re.compile(r"[\u4e00-\u9fff]")
 # Proper nouns, symbols and language names that read the same in both locales.
 SAME_IN_BOTH = {
-    "common.side.None", "common.venue.binance", "common.venue.hyperliquid", "common.venue.demo", "tools.title",
+    "common.side.None", "common.venue.binance", "common.venue.hyperliquid", "tools.title",
     "tools.funding.drift_item", "commands.lang", "kb.demo", "kb.language", "kb.lang_en", "kb.lang_zh",
-    "alert.muse", "web.cnt_adl",
+    "alert.muse", "web.cnt_adl", "audit.action", "sim.source.telegram",
 }
 
 # English strings that deliberately show 中文 (the language picker and its labels).

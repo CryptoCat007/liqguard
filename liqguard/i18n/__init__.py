@@ -133,6 +133,17 @@ def tr(lang: Optional[str], value: Any) -> Any:
     return value
 
 
+def localize(lang: Optional[str], value: Any) -> Any:
+    """`tr` through nested dicts, lists and tuples: a JSON payload with every `Msg` rendered in `lang`."""
+    if isinstance(value, Msg):
+        return t(lang, value.key, **value.params)
+    if isinstance(value, dict):
+        return {k: localize(lang, v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [localize(lang, v) for v in value]
+    return value
+
+
 def join(lang: Optional[str], values: Iterable[Any], sep: Optional[str] = None) -> str:
     sep = sep if sep is not None else t(lang, "common.list_sep")
     return sep.join(str(tr(lang, v)) for v in values)
@@ -168,5 +179,5 @@ def muse_language(lang: Optional[str]) -> str:
 
 __all__ = [
     "DEFAULT", "EN", "LANGUAGES", "LANGUAGE_NAMES", "Msg", "TELEGRAM_CODES", "Translator", "ZH",
-    "catalog", "has", "is_zh", "join", "muse_language", "normalize", "placeholders", "t", "tr",
+    "catalog", "has", "is_zh", "join", "localize", "muse_language", "normalize", "placeholders", "t", "tr",
 ]

@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from liqguard.i18n import Msg
 from liqguard.models import Position, Venue
 
 ADL_WARN_LIGHTS = 4
@@ -52,16 +53,15 @@ class AdlStatus:
 def adl_status(position: Position) -> AdlStatus:
     profitable = position.unrealized_pnl > 0
     if position.venue == Venue.HYPERLIQUID:
-        return AdlStatus(False, None, None, profitable, False, "Hyperliquid does not publish a per-position ADL rank.")
+        return AdlStatus(False, None, None, profitable, False, Msg("risk.adl.not_published"))
     lights = lights_from_quantile(position.adl_quantile)
     if lights is None:
-        return AdlStatus(True, None, None, profitable, False, "ADL rank not reported yet.")
+        return AdlStatus(True, None, None, profitable, False, Msg("risk.adl.not_reported"))
     warn = lights >= ADL_WARN_LIGHTS and profitable
     if warn:
-        note = (f"{lights}/5 ADL lights on a profitable position: if a counterparty is liquidated beyond the "
-                f"insurance fund, this position can be closed automatically.")
+        note = Msg("risk.adl.warn", lights=lights)
     elif lights >= ADL_WARN_LIGHTS:
-        note = f"{lights}/5 ADL lights, but the position is not in profit, so it is not first in line."
+        note = Msg("risk.adl.not_first", lights=lights)
     else:
-        note = f"{lights}/5 ADL lights."
+        note = Msg("risk.adl.lights", lights=lights)
     return AdlStatus(True, lights, position.adl_quantile, profitable, warn, note)

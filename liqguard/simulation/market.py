@@ -62,7 +62,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from liqguard.alerts.escalation import ESCALATING, EscalationTracker, reminder_text, urgency
-from liqguard.i18n import normalize
+from liqguard.i18n import Msg, has, normalize
 from liqguard.models import (
     CROSS,
     ISOLATED,
@@ -225,17 +225,33 @@ class Scenario:
 
 SCENARIOS: dict[str, Scenario] = {
     "mixed": Scenario(
-        "mixed", "Mixed book",
-        "BTC + SOL cross on Binance, an ETH short on Hyperliquid and an isolated TSLA stock perp.",
+        "mixed", Msg("sim.book.mixed_title"), Msg("sim.book.mixed_desc"),
         DEFAULT_SPECS, DEFAULT_WALLETS, DEFAULT_FUNDING, DEMO_SIM_ORDERS,
     ),
     "cross_longs": Scenario(
-        "cross_longs", "5 longs, one wallet",
-        "BTC, ETH, SOL, DOGE and AVAX longs share one Binance cross wallet and fall together.",
+        "cross_longs", Msg("sim.book.cross_longs_title"), Msg("sim.book.cross_longs_desc"),
         CROSS_LONGS_SPECS, {Venue.BINANCE: 9000.0}, CROSS_LONGS_FUNDING, CROSS_LONGS_ORDERS,
     ),
 }
 DEFAULT_SCENARIO = "mixed"
+
+
+def _label(prefix: str, value) -> object:
+    """`prefix.value` as a Msg when the locale has it, else the raw value (e.g. an unknown enum member)."""
+    key = f"{prefix}.{value}"
+    return Msg(key) if has(key) else value
+
+
+def _source(source: str) -> object:
+    return _label("sim.source", source)
+
+
+def _join_labels(sources: list[str]) -> object:
+    out = _source(sources[0])
+    for source in sources[1:]:
+        out = Msg("audit.join", a=out, b=_source(source))
+    return out
+
 
 def price_at_distance(side: Side, liquidation_price: float, distance_pct: float) -> float:
     """Mark price at which a position sits `distance_pct` from liquidation."""
@@ -275,6 +291,7 @@ class MarketSimulation:
         scenario: Optional[str] = None,
         clock: Callable[[], float] = time.monotonic,
     ):
+        self._init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "__class__")}
         self.llm = llm_client
         self.clock = clock
         self.scenario = DEFAULT_SCENARIO if scenario is None else scenario
@@ -363,6 +380,10 @@ class MarketSimulation:
             self.language = normalize(language)
         self.reset()
         return True
+
+    def sibling(self, language: str) -> "MarketSimulation":
+        """The same demo (book, clock, pacing, Muse client) as a separate run narrated in `language`."""
+        return MarketSimulation(**{**self._init_kwargs, "language": language})
 
     def set_language(self, language: str) -> None:
         """Language for the owner's alerts and Muse text from now on; safe while running (nothing is recomputed)."""
@@ -527,7 +548,7 @@ class MarketSimulation:
 
     def _session_dict(self) -> dict:
         info = market_session(self.sim_now, "", self.low_liquidity_hours)
-        return {"sim_time": self.sim_now.isoformat(), "weekday": self.sim_now.strftime("%A"), **info.to_dict()}
+        return {"sim_time": self.sim_now.isoformat(), "weekday": Msg(f"common.weekday.{self.sim_now.strftime('%A').lower()}"), **info.to_dict()}
 
     def _analyze(self):
         return PortfolioAnalyzer(self.threshold, self.risk_context()).analyze_portfolio(self.positions)
@@ -698,7 +719,8 @@ class MarketSimulation:
             return
         reason = entry.details.get("reason") if isinstance(entry.details, dict) else None
         amount = f" ${entry.amount_usd:,.2f}" if entry.amount_usd else ""
-        detail = f"{entry.action_type.value}{amount} → {entry.status.value}" + (f" ({reason})" if reason else "")
+        detail = Msg("audit.action", action=_label("audit.action_type", entry.action_type.value), amount=amount,
+                     status=_label("audit.status", entry.status.value), reason=f" ({reason})" if reason else "")
         coro = self._add_audit(f"action_{entry.status.value}", entry.symbol, detail, source="telegram")
         loop = self._loop
         try:
@@ -728,7 +750,7 @@ class MarketSimulation:
         self.reset()
         self.state = "running"
         await self._emit("reset", self.snapshot())
-        await self._add_audit("simulation_started", None, f"Demo price path started from {source}", source)
+        await self._add_audit("simulation_started", None, Msg("audit.started", source=_source(source)), source)
         await self.refresh_summary()
         await self._check_protection()
         await self._check_portfolio()
@@ -754,7 +776,7 @@ class MarketSimulation:
         for ack in pending:
             self.escalation.acknowledge(self.owner_id, ack.id, now)
         if pending:
-            await self._add_audit("reminders_silenced", None, f"{len(pending)} demo reminder(s) ended from {source}", source)
+            await self._add_audit("reminders_silenced", None, Msg("audit.silenced", n=len(pending), source=_source(source)), source)
         return len(pending)
 
     async def mute(self, source: str = "web") -> bool:
@@ -767,7 +789,7 @@ class MarketSimulation:
             return False
         self.muted = source
         await self.silence(source)
-        await self._add_audit("demo_muted", None, f"No more demo alerts or reminders this run (from {source})", source)
+        await self._add_audit("demo_muted", None, Msg("audit.muted", source=_source(source)), source)
         return True
 
     def pending_symbol(self, ack_id: str) -> Optional[str]:
@@ -795,7 +817,7 @@ class MarketSimulation:
         await self._cancel_side_tasks()
         await self.silence(source)
         self.state = "stopped"
-        await self._add_audit("simulation_stopped", None, f"Stopped from {source}", source)
+        await self._add_audit("simulation_stopped", None, Msg("audit.stopped", source=_source(source)), source)
         await self._emit("status", self._status())
 
     async def switch_scenario(self, key: str, source: str = "web") -> bool:
@@ -804,7 +826,7 @@ class MarketSimulation:
         if not self.set_scenario(key):
             return False
         await self._emit("reset", self.snapshot())
-        await self._add_audit("scenario_switched", None, f"Demo book: {SCENARIOS[key].title}", source)
+        await self._add_audit("scenario_switched", None, Msg("audit.scenario", title=SCENARIOS[key].title), source)
         await self.refresh_summary()
         return True
 
@@ -865,7 +887,7 @@ class MarketSimulation:
         await self.refresh_summary()
         await self.silence("finish")
         self.state = "finished"
-        await self._add_audit("simulation_finished", None, "Price path complete; no execution performed")
+        await self._add_audit("simulation_finished", None, Msg("audit.finished"))
         await self._emit("status", self._status())
 
     async def _advance(self) -> None:
@@ -922,7 +944,7 @@ class MarketSimulation:
             verb = "paid" if payment > 0 else "received"
             await self._add_audit(
                 "funding_settled", symbol,
-                f"{verb} ${abs(payment):,.2f} funding ({info.rate * 100:+.4f}%, demo) → liq ${before:,.2f} → ${after:,.2f}",
+                Msg(f"audit.funding_{verb}", amount=abs(payment), rate=info.rate * 100, before=before, after=after),
             )
 
     async def _check_prefunding(self) -> None:
@@ -960,8 +982,8 @@ class MarketSimulation:
             await self._emit("alert", alert)
             await self._add_audit(
                 "prefunding_warning", pos.symbol,
-                f"pays ${warning.payment_usd:,.2f} in {warning.minutes_to_settlement:.0f} min → "
-                f"distance {warning.distance_before_pct:.1f}% → {warning.distance_after_pct:.1f}%",
+                Msg("audit.prefunding", amount=warning.payment_usd, minutes=warning.minutes_to_settlement,
+                    before=warning.distance_before_pct, after=warning.distance_after_pct),
             )
 
     async def _check_alerts(self) -> None:
@@ -1032,7 +1054,7 @@ class MarketSimulation:
         self.alerts.append(alert)
         await self._emit("alert", alert)
         order = " > ".join(t["symbol"] for t in items)
-        await self._add_audit("alert_triage", top_pos.symbol, f"{len(items)} positions at risk, handle in order: {order}")
+        await self._add_audit("alert_triage", top_pos.symbol, Msg("audit.triage", n=len(items), order=order))
 
     async def _check_portfolio(self) -> None:
         """Sizing and correlation/stress warnings, once per state change (like the live monitor)."""
@@ -1068,18 +1090,19 @@ class MarketSimulation:
             checks = [s for s in data["sizing"] if s["symbol"] in symbols]
             alert.update(symbol=checks[0]["symbol"], venue=checks[0]["venue"], side=checks[0]["side"],
                          symbols=symbols, sizing=checks)
-            detail = "oversized for the account: " + ", ".join(
-                f"{c['symbol']} (risk {c['risk_pct']:.1f}% of equity, suggest {c['suggested_size']:g})" for c in checks)
+            worst_check = max(checks, key=lambda c: c["risk_pct"] or 0)
+            detail = Msg("audit.sizing", symbols=", ".join(c["symbol"] for c in checks), symbol=worst_check["symbol"],
+                         risk=worst_check["risk_pct"] or 0, size=worst_check["suggested_size"] or 0)
         else:
             worst = insights.worst_stress()
             stress = worst.to_dict() if worst else None
             comps = [c for c in data["comparisons"] if worst is None or c["symbol"] in worst.symbols]
             alert.update(symbol=(worst.symbols[0] if worst else None), venue=(worst.venue if worst else None),
                          severity=band, stress=stress, concentration=data["concentration"], comparisons=comps)
-            detail = (f"a {abs(worst.first_liquidation):.1f}% correlated market move liquidates the {worst.venue} account"
-                      if worst and worst.first_liquidation is not None else "concentrated book")
+            detail = (Msg("audit.stress", move=abs(worst.first_liquidation), venue=_label("common.venue", worst.venue))
+                      if worst and worst.first_liquidation is not None else Msg("audit.concentrated"))
             if insights.concentration.flagged:
-                detail += f"; {insights.concentration.message()}"
+                detail = Msg("audit.with_concentration", detail=detail, message=insights.concentration.message())
         self.alerts.append(alert)
         await self._emit("alert", alert)
         await self._add_audit(f"{level}_warning", alert.get("symbol"), detail)
@@ -1124,12 +1147,12 @@ class MarketSimulation:
         if level == "stop":
             alert["stop"] = info["stop"]
             alert["explanation"] = await self._explain_stop(protection.stop)
-            detail = f"stop check: {protection.stop.status.replace('_', ' ')}"
-            if protection.stop.stop_price is not None:
-                detail += f" (stop ${protection.stop.stop_price:,.2f} vs liq ${pos.liquidation_price:,.2f})"
+            status = _label("tools.stop.status", protection.stop.status)
+            detail = (Msg("audit.stop_prices", status=status, stop=protection.stop.stop_price, liq=pos.liquidation_price)
+                      if protection.stop.stop_price is not None else Msg("audit.stop", status=status))
         else:
             alert["adl"] = info["adl"]
-            detail = f"ADL {protection.adl.lights}/5 on a profitable position (+${pos.unrealized_pnl:,.2f})"
+            detail = Msg("audit.adl", lights=protection.adl.lights, pnl=pos.unrealized_pnl)
         self.alerts.append(alert)
         await self._emit("alert", alert)
         await self._add_audit(f"{level}_warning", pos.symbol, detail)
@@ -1211,7 +1234,8 @@ class MarketSimulation:
                 await self._emit("escalation", event)
                 await self._add_audit(
                     "escalation_reminder", ack.symbol,
-                    f"{event['urgency']} {n}/{ack.max_reminders}: {ack.severity} alert unacknowledged for {minutes:.0f} demo min",
+                    Msg("audit.reminder", urgency=_label("audit.urgency", event["urgency"]), n=n, max=ack.max_reminders,
+                        severity=_label("common.severity", ack.severity), minutes=minutes),
                 )
 
     async def snooze(self, ack_id: str, minutes: float = 30, source: str = "web") -> Optional[dict]:
@@ -1219,7 +1243,7 @@ class MarketSimulation:
         ack = self.escalation.snooze(self.owner_id, ack_id, self.clock() + minutes * self.escalation_seconds_per_minute)
         if ack is None:
             return None
-        await self._add_audit("alert_snoozed", ack.symbol, f"reminders paused for {minutes:g} demo min from {source}", source)
+        await self._add_audit("alert_snoozed", ack.symbol, Msg("audit.snoozed", minutes=minutes, source=_source(source)), source)
         await self.mute(source)
         return {"ack_id": ack.id, "symbol": ack.symbol, "minutes": minutes, "source": source}
 
@@ -1240,7 +1264,8 @@ class MarketSimulation:
         await self.mute(source)
         await self._emit("ack", event)
         await self._add_audit("alert_acknowledged", ack.symbol,
-                              f"{ack.severity} alert acknowledged from {source} after {ack.reminders_sent} reminder(s)", source)
+                              Msg("audit.acked", severity=_label("common.severity", ack.severity), source=_source(source),
+                                  n=ack.reminders_sent), source)
         return event
 
     async def _fire_alert(self, level: str, pos: Position, protection: Optional[PositionProtection] = None,
@@ -1285,9 +1310,9 @@ class MarketSimulation:
         await self._emit("alert", alert)
         await self._add_audit(
             f"alert_{level}", pos.symbol,
-            f"{pos.distance_to_liquidation_pct:.1f}% from liquidation"
-            + (f" (#{priority.rank} of {priority.of})" if priority else "")
-            + f" → sent to {', '.join(alert['channels']) or 'no channels'}",
+            Msg("audit.alert", dist=pos.distance_to_liquidation_pct,
+                rank=Msg("audit.rank", rank=priority.rank, of=priority.of) if priority else "",
+                channels=Msg("audit.channels", names=_join_labels(alert["channels"])) if alert["channels"] else Msg("audit.no_channels")),
         )
         if advise:
             self._spawn(self._generate_advice(alert, pos, margin, plan))
@@ -1342,6 +1367,6 @@ class MarketSimulation:
         await self._emit("advice", card)
         await self._add_audit(
             "advice_generated", pos.symbol,
-            f"Muse{' (mock)' if mock else ''}: add ${card['margin_to_add_usd']:,.2f} or reduce {card['reduce_size_pct']:.1f}% "
-            f"— suggestion only, confirmation required in Telegram",
+            Msg("audit.advice", mock=Msg("audit.mock") if mock else "", amount=card["margin_to_add_usd"],
+                pct=card["reduce_size_pct"]),
         )

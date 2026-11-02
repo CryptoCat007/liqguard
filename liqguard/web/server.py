@@ -38,7 +38,7 @@ from liqguard.core import AppContext
 from liqguard.core.binding import BindingService, security_note
 from liqguard.core.position_tools import TOOLS, report
 from liqguard.core.user_settings import apply_setting, settings_dict
-from liqguard.i18n import normalize, t, web_catalog
+from liqguard.i18n import localize, normalize, t, web_catalog
 from liqguard.models import User
 from liqguard.risk import (
     PortfolioAnalyzer,
@@ -112,7 +112,7 @@ class WebSocketHub:
     async def broadcast(self, event: dict) -> None:
         if not self.clients:
             return
-        payload = json.dumps(event)
+        payload = json.dumps(localize(self.simulation.language, event))
         dead = set()
         for ws in list(self.clients):
             try:
@@ -143,6 +143,11 @@ class HubRegistry:
         return hub
 
 
+def _localized(sim: MarketSimulation, data) -> JSONResponse:
+    """Every `Msg` in `data` rendered in the simulation's language (its Muse text is already in it)."""
+    return JSONResponse(localize(sim.language, data))
+
+
 async def _ensure_summary(sim: MarketSimulation) -> None:
     if sim.summary is None:
         await sim.refresh_summary()
@@ -164,6 +169,16 @@ def create_app(
 
     hubs = HubRegistry()
     hubs.attach(public_sim)
+    public_sims: dict[str, MarketSimulation] = {public_sim.language: public_sim}
+
+    def public_for(lang: Optional[str]) -> MarketSimulation:
+        """The public demo narrated in `lang`: one independent run per language, so Muse text matches the page."""
+        code = normalize(lang) if lang else public_sim.language
+        sim = public_sims.get(code)
+        if sim is None:
+            sim = public_sims[code] = public_sim.sibling(code)
+            hubs.attach(sim)
+        return sim
     if ctx is not None:
         ctx.simulations.on_create(hubs.attach)
     auth = SessionAuth(ctx)
@@ -171,7 +186,8 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
-        await public_sim.stop(source="shutdown")
+        for sim in list(public_sims.values()):
+            await sim.stop(source="shutdown")
 
     app = FastAPI(
         title="LiqGuard Dashboard",
@@ -249,31 +265,31 @@ def create_app(
         @app.get(f"{prefix}/snapshot")
         async def snapshot(sim: MarketSimulation = Depends(resolve)):
             await _ensure_summary(sim)
-            return JSONResponse(sim.snapshot())
+            return _localized(sim, sim.snapshot())
 
         @app.get(f"{prefix}/portfolio")
         async def portfolio(sim: MarketSimulation = Depends(resolve)):
             await _ensure_summary(sim)
-            return JSONResponse({"overview": sim.overview.to_dict(), "summary": sim.summary})
+            return _localized(sim, {"overview": sim.overview.to_dict(), "summary": sim.summary})
 
         @app.get(f"{prefix}/alerts")
         async def alerts(sim: MarketSimulation = Depends(resolve)):
-            return JSONResponse(sim.alerts)
+            return _localized(sim, sim.alerts)
 
         @app.get(f"{prefix}/advice")
         async def advice(sim: MarketSimulation = Depends(resolve)):
-            return JSONResponse(sim.advice)
+            return _localized(sim, sim.advice)
 
         @app.get(f"{prefix}/audit")
         async def audit(sim: MarketSimulation = Depends(resolve)):
-            return JSONResponse(sim.audit)
+            return _localized(sim, sim.audit)
 
         @app.get(f"{prefix}/rescue")
         async def rescue(symbol: str = Query(..., max_length=32), sim: MarketSimulation = Depends(resolve)):
             result = await sim.rescue_plan(symbol)
             if result is None:
                 raise HTTPException(404, "No such position in this simulation")
-            return JSONResponse(result)
+            return _localized(sim, result)
 
         @app.get(f"{prefix}/position-tool")
         async def position_tool(symbol: str = Query(..., max_length=32), tool: str = Query(..., pattern=TOOL_PATTERN),
@@ -285,9 +301,9 @@ def create_app(
                 raise HTTPException(404, "No such position in this simulation")
             context = sim.risk_context()
             plan = sim.build_rescue_plan(symbol) if tool == "rescue" else None
-            return JSONResponse(report(tool, position, context, sim.protection(position, context).to_dict(),
-                                       plan.to_dict() if plan else None, demo=True,
-                                       lang=normalize(lang) if lang else sim.language))
+            code = normalize(lang) if lang else sim.language
+            return JSONResponse(localize(code, report(tool, position, context, sim.protection(position, context).to_dict(),
+                                                      plan.to_dict() if plan else None, demo=True, lang=code)))
 
         @app.post(f"{prefix}/simulate", dependencies=[Depends(require_csrf)])
         async def simulate(sim: MarketSimulation = Depends(guard)):
@@ -307,7 +323,7 @@ def create_app(
         @app.get(f"{prefix}/insights")
         async def insights(sim: MarketSimulation = Depends(resolve)):
             """Priority triage, portfolio stress test, platform vs correlated liq, concentration and sizing."""
-            return JSONResponse(sim.insights().to_dict())
+            return _localized(sim, sim.insights().to_dict())
 
         @app.post(f"{prefix}/scenario", dependencies=[Depends(require_csrf)])
         async def scenario(body: ScenarioRequest, sim: MarketSimulation = Depends(guard)):
@@ -325,8 +341,8 @@ def create_app(
                 raise HTTPException(404, "No pending reminder with that id")
             return {"status": "acknowledged", "symbol": event["symbol"]}
 
-    async def public_simulation() -> MarketSimulation:
-        return public_sim
+    async def public_simulation(lang: Optional[str] = Query(None, max_length=16)) -> MarketSimulation:
+        return public_for(lang)
 
     async def my_simulation(claims: SessionClaims = Depends(auth.required)) -> MarketSimulation:
         return ctx.simulations.get_or_create(claims.user_id)
@@ -440,7 +456,8 @@ def create_app(
             if tool == "rescue":
                 plan = RescueSimulator(c.fees, user.threshold.safety_target_pct).simulate(
                     position, c.account_for(position), c.funding_for(position), c.now).to_dict()
-            return JSONResponse(report(tool, position, c, protection, plan, demo=venue == "demo", lang=user.language))
+            return JSONResponse(localize(user.language, report(tool, position, c, protection, plan,
+                                                               demo=venue == "demo", lang=user.language)))
 
         @app.get("/api/me/session")
         async def my_session(claims: SessionClaims = Depends(auth.required)):
@@ -459,7 +476,7 @@ def create_app(
             )
             protection = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in positions]
             insights = portfolio_insights(positions, snapshot.context, user.threshold).to_dict() if positions else None
-            return {
+            return localize(user.language, {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
                 "label": label,
@@ -469,7 +486,7 @@ def create_app(
                 "escalations": [a.to_dict() for a in ctx.escalations.pending_for(claims.user_id) if a.acknowledged_at is None],
                 "actions": await ctx.storage.list_audit(claims.user_id, limit=50),
                 "protect_enabled": ctx.actions.is_enabled(),
-            }
+            })
 
         @app.post("/api/me/live/ack", dependencies=[Depends(require_csrf)])
         async def my_live_ack(body: AckRequest, claims: SessionClaims = Depends(auth.required)):
@@ -498,14 +515,14 @@ def create_app(
                 position, context.account_for(position), context.funding_for(position), context.now
             )
             explanation = await ctx.llm.explain_rescue(plan, user.language)
-            return JSONResponse({"plan": plan.to_dict(), "explanation": explanation})
+            return JSONResponse(localize(user.language, {"plan": plan.to_dict(), "explanation": explanation}))
 
     # ---------------------------------------------------------------- websockets
 
     async def serve_ws(websocket: WebSocket, sim: MarketSimulation) -> None:
         await websocket.accept()
         await _ensure_summary(sim)
-        await websocket.send_json({"type": "snapshot", "data": sim.snapshot()})
+        await websocket.send_json({"type": "snapshot", "data": localize(sim.language, sim.snapshot())})
         hub = hubs.for_simulation(sim)
         hub.clients.add(websocket)
         try:
@@ -519,7 +536,7 @@ def create_app(
 
     @app.websocket("/ws/demo")
     async def ws_demo(websocket: WebSocket):
-        await serve_ws(websocket, public_sim)
+        await serve_ws(websocket, public_for(websocket.query_params.get("lang")))
 
     @app.websocket("/ws/me")
     async def ws_me(websocket: WebSocket):

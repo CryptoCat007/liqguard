@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from liqguard.i18n import is_zh
+from liqguard.i18n import EN, ZH, is_zh, tr
 from liqguard.risk.rescue import ADD_MARGIN, HEDGE, OPTION_ORDER, REDUCE, RescueOption, RescuePlan
 
 RESCUE_EXPLANATION_SCHEMA = {
@@ -45,19 +45,21 @@ def _usd(x: float, dp: int = 2) -> str:
     return f"${x:,.{dp}f}"
 
 
-def _dist(o: RescueOption) -> str:
-    return "no liquidation" if o.new_liquidation_price is None else f"{o.new_distance_pct:.1f}%"
+def _dist(o: RescueOption, zh: bool = False) -> str:
+    if o.new_liquidation_price is None:
+        return "無清算價" if zh else "no liquidation"
+    return f"{o.new_distance_pct:.1f}%"
 
 
 def _summary(o: RescueOption, zh: bool) -> str:
     liq = _usd(o.new_liquidation_price) if o.new_liquidation_price else ("無" if zh else "none")
     if zh:
         return (
-            f"{o.title}：新清算價 {liq}（距離 {_dist(o)}）；手續費 {_usd(o.fees_usd)}、"
+            f"{tr(ZH, o.title)}：新清算價 {liq}（距離 {_dist(o, zh)}）；手續費 {_usd(o.fees_usd)}、"
             f"已實現虧損 {_usd(o.realized_loss_usd)}、24 小時資金費 {_usd(o.funding_24h_usd)}（按當前費率）。"
         )
     return (
-        f"{o.title}: new liquidation {liq} ({_dist(o)} away); fees {_usd(o.fees_usd)}, "
+        f"{tr(EN, o.title)}: new liquidation {liq} ({_dist(o)} away); fees {_usd(o.fees_usd)}, "
         f"realized loss {_usd(o.realized_loss_usd)}, 24h funding {_usd(o.funding_24h_usd)} at current rate."
     )
 
@@ -105,12 +107,12 @@ def mock_rescue_explanation(plan: RescuePlan, language: str = "en") -> dict:
         headline = "沒有可用的方案。" if zh else "No rescue option is available."
     elif zh:
         headline = (
-            f"{plan.symbol}：建議「{best.title}」，以 {_usd(best.total_cost_usd)} 的成本"
+            f"{plan.symbol}：建議「{tr(ZH, best.title)}」，以 {_usd(best.total_cost_usd)} 的成本"
             f"{'恢復 ' + format(target, '.0f') + '% 緩衝' if best.reaches_target else '擴大緩衝'}。"
         )
     else:
         goal = f"back to a {target:.0f}% buffer" if best.reaches_target else "to widen the buffer"
-        headline = f"{plan.symbol}: cheapest way {goal} — {best.title} ({_usd(best.total_cost_usd)} incl. fees and 24h funding)."
+        headline = f"{plan.symbol}: cheapest way {goal} — {tr(EN, best.title)} ({_usd(best.total_cost_usd)} incl. fees and 24h funding)."
     trade_offs = []
     for o in plan.options:
         pros, cons = _pros_cons(o, zh)
