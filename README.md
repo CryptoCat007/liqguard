@@ -96,25 +96,26 @@ liqguard
 
 ## Bot Commands
 
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome message and quick start |
-| `/help` | Show all available commands |
-| `/bind` | Connect an exchange: Binance (read-only key), Hyperliquid (wallet address) or Binance testnet (for protective actions) |
-| `/unbind` | Disconnect an exchange |
-| `/dashboard` | One-time login link to your private web dashboard (`/dashboard revoke` signs out everywhere) |
-| `/positions` | All positions: exchange vs true liquidation price, correlated liquidation when it is closer, priority rank, sizing, funding, 8 h / 24 h drift, wicks away, adaptive tiers, stop-loss status, ADL lights, 🛟 rescue buttons |
-| `/risk` | Portfolio risk overview + Muse summary; 🎯 priority triage (handle in this order); 📉 portfolio stress test per cross account with platform vs correlated liquidation; 🧲 concentration; 📏 oversized positions with suggested sizes; protection checks (no stop, stop beyond liq, one wick from liq, ADL 4–5); liquidation, funding and wick stress test for the riskiest position |
-| `/threshold` | Configure alert thresholds (base tiers; adaptive tiers widen from these) |
-| `/settings` | Wake-up escalation (interval 1/2/5/10 min or `/settings interval 3`, max reminders, on/off), adaptive tiers on/off, stop-loss checks on/off, sizing limits (`/settings risk 2`, `/settings maxmargin 25`) |
-| `/demo` | Demo mode with price simulation: the mixed book or **🎬 5 longs, one wallet** |
-| `/stopdemo` | Stop the running demo at once; no further demo alerts or reminders are sent |
-| `/ask <question>` | Ask AI about your positions |
-| `/actions` | View pending protective actions |
-| `/killswitch` | Emergency stop for all actions |
-| `/lang` · `/language` | 🌐 Language / 語言: English or 繁體中文, saved per user |
-| `/status` | View account status |
-| `/menu` | 🏠 Main menu (inline keyboard) |
+Every command also has a button: nothing is reachable only by typing. `test_menu_routes.py`
+reads the commands the production dispatcher registers and fails if any of them has no route in
+`MENU_ROUTES` (`telegram/ui/__init__.py`), or if that route is not a button reachable by tapping from
+🏠 Main menu, in English and in 繁體中文.
+
+| Command | Button (en / zh-Hant) | Description |
+|---------|-----------------------|-------------|
+| `/start` · `/menu` | ⬅️ Main menu / ⬅️ 返回主選單 | 🏠 Main menu (inline keyboard) |
+| `/help` | ❓ Help / ❓ 幫助 | What each button does, the Muse model, the security model |
+| `/risk` | 📊 Risk overview / 📊 風險總覽 | Muse's 💡 summary, overall risk, closest position, margin to safety, handling order, stop-loss / one-wick / ADL flags, 🚑 rescue the first position |
+| `/positions` | 📋 My positions / 📋 我的倉位 | Every position, riskiest first; each opens 🛟 Rescue sim · 🕯 Wick stress · 🛑 Stop-loss check · 💸 Funding impact |
+| — | 🛡 Stop-loss check / 🛡 停損檢查 | Stop status of every position, one tap to its full 🛑 report |
+| `/ask <question>` | 🤖 Ask Muse / 🤖 問 Muse | Preset questions from the menu, or any question typed after `/ask` |
+| `/settings` · `/threshold` | 🔔 Alerts / 🔔 通知設定 | Tiers, wake-up escalation, quiet hours, adaptive tiers, stop-loss checks (`/settings interval 3`, `/settings risk 2`, `/settings maxmargin 25` still work typed) |
+| `/bind` · `/unbind` | 🔑 Bind account / 🔑 綁定帳號 | Binance (read-only key), Hyperliquid (wallet address) or Binance testnet (for protective actions); unbind with confirmation |
+| `/status` · `/actions` · `/killswitch` | 🧾 Account & actions / 🧾 帳戶與保護動作 | Account status, testnet-only protective actions with ✅ confirm / ❌ cancel, 🔴/🟢 kill switch (typed `/killswitch` toggles it and shows this screen) |
+| `/dashboard` | 🖥️ Dashboard / 🖥️ 網頁看板 | One-time login link to your private web dashboard (`/dashboard revoke` signs out everywhere) |
+| `/demo` | 🎬 Demo | Demo mode with price simulation: the mixed book or **🎬 5 longs, one wallet** |
+| `/stopdemo` | ⏹ Stop demo / ⏹ 停止 Demo | Stop the running demo at once; no further demo alerts or reminders are sent |
+| `/lang` · `/language` | 🌐 Language / 語言 | English or 繁體中文, saved per user |
 
 ## Languages (English · 繁體中文)
 
@@ -172,17 +173,37 @@ The bot's command list is registered with `setMyCommands` on startup.
 **Polling.** Requests time out after 15 s with a 0.5–3 s backoff (`telegram/polling.py`), so updates
 resume within about 25 s after a network stall instead of the default ~70 s.
 
-| Button | Screen |
-|--------|--------|
-| 📊 我的倉位 | One button per position → 救倉試算 · 插針壓測 · 止損檢查 · 資金費影響 · ⬅️ 返回主選單 (edited in place) |
-| 🚨 先處理哪個 | Priority triage, with a button straight to the top position |
-| 🧪 壓力測試 | Per-account portfolio stress test and correlated liquidation |
-| 💸 資金費率/手續費 | Funding drift, next settlement and close fees per position |
-| 🔔 通知設定 | Alert thresholds (presets), wake-up escalation interval and on/off, quiet hours (UTC+8; only critical/emergency alerts get through) |
-| 🔑 綁定帳號 | Guided self-serve binding (below) |
-| 🖥️ 網頁看板 | One-time dashboard login link (private chat only) |
-| 🎬 Demo | Demo on/off, both scenarios (mixed book, 5 longs one wallet), start/stop the simulation; every other button then works on the demo data |
-| ❓ 幫助 | What each button does and the security model |
+Menu tree (English · 繁體中文):
+
+```
+🏠 Main menu                              🏠 主選單
+├ ⏹ Stop demo (while a demo runs)         ├ ⏹ 停止 Demo（模擬進行中）
+├ 📊 Risk overview                         ├ 📊 風險總覽
+│  └ 🚑 Rescue X first · 📋 · 🛡 · 🚨 · 🧪 · 🤖 · 🔄 │  └ 🚑 先救 X · 📋 · 🛡 · 🚨 · 🧪 · 🤖 · 🔄
+├ 📋 My positions                          ├ 📋 我的倉位
+│  └ a position                            │  └ 選一個倉位
+│     ├ 🛟 Rescue sim                      │     ├ 🛟 救倉試算
+│     ├ 🕯 Wick stress                     │     ├ 🕯 插針壓測
+│     ├ 🛑 Stop-loss check                 │     ├ 🛑 停損檢查
+│     └ 💸 Funding impact                  │     └ 💸 資金費影響
+├ 🛡 Stop-loss check → 🛑 per position     ├ 🛡 停損檢查 → 🛑 各倉位
+├ 🚨 What first → 🚑 rescue #1…#3          ├ 🚨 先處理哪個 → 🚑 救第 1…3 名
+├ 🧪 Stress test → 🕯 wick stress          ├ 🧪 壓力測試 → 🕯 插針壓測
+├ 💸 Funding & fees                        ├ 💸 資金費率/手續費
+├ 🤖 Ask Muse → 3 preset questions         ├ 🤖 問 Muse → 3 個預設問題
+├ 🔔 Alerts → tiers, reminders, quiet hours├ 🔔 通知設定 → 門檻、喚醒提醒、勿擾時段
+├ 🔑 Bind account → Binance / Hyperliquid  ├ 🔑 綁定帳號 → Binance / Hyperliquid
+│   / show bound / unbind                  │   / 查看已綁定 / 解除綁定
+├ 🧾 Account & actions                     ├ 🧾 帳戶與保護動作
+│  └ ✅ confirm · ❌ cancel · 🔴/🟢 kill switch│  └ ✅ 確認 · ❌ 取消 · 🔴/🟢 緊急停止
+├ 🖥️ Dashboard                             ├ 🖥️ 網頁看板
+├ 🎬 Demo → scenarios, start / stop        ├ 🎬 Demo → 情境、開始／停止
+├ 🌐 Language / 語言                       ├ 🌐 Language / 語言
+└ ❓ Help                                  └ ❓ 幫助
+```
+
+The same tools work on demo positions: with 🎬 Demo on, 📋 My positions and 🛡 Stop-loss check list
+the demo book (or the running simulation), and every tool opens for them.
 
 Alerts carry **🚑 先處理這個** (rescue simulator for that position), **😴 暫停提醒 30 分鐘**
 (snoozes wake-up reminders) and **✅ 我醒了** (acknowledge).
@@ -440,6 +461,48 @@ A book is flagged when ≥ 75 % of notional points one way across ≥ 2 position
 pairwise correlation is ≥ 0.6. It also reports **effective independent bets**,
 (Σ|wᵢ|)² ÷ ΣΣ wᵢ wⱼ ρᵢⱼ: five correlated longs behave like about 1.4 bets.
 
+## How LiqGuard uses Meta Muse
+
+LiqGuard asks **Meta Muse** (`muse-spark-1.3` at `https://api.meta.ai/v1`; `META_MODEL` and
+`META_API_BASE` override them) for the wording of every recommendation. The numbers (distances,
+margin to add, costs, stop gaps) always come from `liqguard/risk/`; Muse explains them, picks
+among options the code computed, and every answer is validated against those numbers before it is
+shown.
+
+Every Muse touchpoint leads with one line, `💡 <recommendation> · ✦ Muse`. It shows Muse's wording
+once Muse answers and the rule-based text until then (tagged `✦ Muse (mock)` / `✦ Muse（模擬）`).
+There is no second Muse block further down.
+
+| Touchpoint | Where | What Muse writes |
+|---|---|---|
+| Portfolio summary | 📊 Risk overview / `/risk`, web hero banner and account view | One sentence naming the position to handle first and why |
+| Rescue | 🛟 Rescue sim (Telegram), web rescue panel, demo advice cards | Which of add margin / reduce / hedge to take, plus each option's pros and cons |
+| Stop check | 🛑 Stop-loss check, stop-loss alerts, web stop panel | What is wrong with the stop and which of the computed fixes to apply |
+| Alerts | Tier alerts (warning / critical / emergency), demo alerts | The add-margin / reduce advice in plain words |
+| Quick reports | Rescue and stop reports in Telegram and on the web | The report's first line |
+| Questions | 🤖 Ask Muse presets, `/ask <anything>` | The answer, from the user's own positions |
+| Screenshots | A photo sent to the bot | Position fields for the user to confirm |
+| Web | Overview, rescue panel, quick reports, account view | The same text as Telegram, from the same service and cache |
+
+**Async fallback design.**
+
+1. **Rule-based first.** Every screen, alert and card goes out at once with deterministic text.
+   `MetaLLMClient.*_now` returns an `Instant(result, pending, live)`: `result` is shown now, and
+   `pending` resolves to Muse's answer (or `None`).
+2. **Edited in place.** When Muse answers, Telegram edits the same message (`Screen.later`,
+   `BotHandlers._muse_followup`). The dashboard replaces the card from the WebSocket events
+   `advice_update`, `account_muse`, `rescue_muse` and `report_muse`. The `✦ Muse (mock)` tag then
+   becomes `✦ Muse`.
+3. **Bounded.** Each answer gets 15 s (`META_TIMEOUT`), including one retry with a larger token
+   budget. Any HTTP error, timeout, empty or `length`-truncated answer, invalid JSON, or validation
+   failure (wrong symbol, an amount not in the plan, an unknown fix) keeps the rule-based text.
+4. **Cached and shared.** Validated answers are cached per input (portfolio snapshot, rescue plan,
+   stop check) for 10 minutes, and concurrent callers share one request. Telegram and the
+   dashboard call the same `MuseService` (`AppContext.muse`), so one question costs one call
+   across both channels.
+5. **Honest.** Without `META_API_KEY`, the deterministic mock answers and is tagged as mock. The
+   dashboard pill only reads *Muse · live* when the last answer was used.
+
 ## How We Use Meta AI
 
 LiqGuard leverages Meta's Muse Spark model (`muse-spark-1.3` by default) with a unique architecture:
@@ -522,7 +585,7 @@ second request, and both show the same words in the reader's language. On the da
 |---|---|---|
 | Account view: portfolio summary and the suggestion for the position to handle first | `/api/me/account` → `muse` (`summary`, `suggestion`, `view`) | `account_muse` (tagged with `view`, so an older answer never replaces a newer one) |
 | Rescue recommendation (demo and live positions) | `…/rescue`, `/api/me/rescue/live` with `muse_pending` | `rescue_muse` (`scope`, `symbol`, `venue`, `explanation`) |
-| Quick reports: rescue and stop check (✦ Muse line; wick and funding reports are numbers only) | `…/position-tool`, `/api/me/position-tool/live` with `muse_pending` | `report_muse` (`scope`, `tool`, `symbol`, `venue`, the full re-rendered `report`) |
+| Quick reports: rescue and stop check (the first line, `💡 … · ✦ Muse`; wick and funding reports are numbers only) | `…/position-tool`, `/api/me/position-tool/live` with `muse_pending` | `report_muse` (`scope`, `tool`, `symbol`, `venue`, the full re-rendered `report`) |
 
 Events go only to the simulation hub of the user who asked (or the public demo in that language).
 Without an open socket the page falls back to asking again with `wait=1`.
@@ -860,7 +923,7 @@ private run. Set `LIQGUARD_PUBLIC_URL` to the address users open (https in produ
 | Muse summary banner | Overall risk level plus a one-line Muse summary naming the riskiest position (the same summary `/risk` shows) |
 | KPIs | Total notional, margin used, unrealized PnL, net exposure, closest distance to liquidation, margin needed to restore the safety buffer |
 | Chart | **Distance** tab: every position's distance to liquidation over simulated time, with shaded warning/critical/emergency bands and ▲ funding settlements. **Per-symbol** tabs: mark price vs the true liquidation line (which steps when the shared wallet pays funding), plus the price where each tier fires |
-| Positions | Venue, side, leverage, distance gauge with tier markers, mark and **true** liquidation price (cross wallet, other positions' PnL and maintenance), funding rate, next payment and 8 h / 24 h drift "at current rate", quick actions 救倉試算 · 插針壓測 · 止損檢查 · 資金費影響 (same text as the Telegram buttons) |
+| Positions | Venue, side, leverage, distance gauge with tier markers, mark and **true** liquidation price (cross wallet, other positions' PnL and maintenance), funding rate, next payment and 8 h / 24 h drift "at current rate", quick actions 救倉試算 · 插針壓測 · 停損檢查 · 資金費影響 (same text as the Telegram buttons) |
 | 🔔 通知設定 (signed in) | Same settings as the Telegram screen: threshold presets, escalation interval / on-off, quiet hours |
 | 🔑 綁定帳號 (signed in) | Security note, masked bindings, bind Binance (read-only key) or Hyperliquid (address), unbind with confirmation |
 | Rescue simulator | Add margin vs reduce vs hedge side by side: new liquidation, distance, fees, realized loss, 24 h funding, capital, recommended option, Muse trade-offs. Opens automatically on each alert |
