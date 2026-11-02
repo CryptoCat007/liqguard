@@ -301,6 +301,15 @@ function handle(msg) {
     case "muse":
       renderMuse(data.mode);
       break;
+    case "account_muse":
+      updateAccountMuse(data);
+      break;
+    case "rescue_muse":
+      updateRescueMuse(data);
+      break;
+    case "report_muse":
+      updateToolReport(data);
+      break;
     case "summary":
       if (data && data.step != null && S.step != null && data.step !== S.step) break;
       S.summary = data;
@@ -1424,7 +1433,7 @@ async function loadRescue(symbol, opts = {}) {
     if (!r.ok) throw new Error(`${r.status}`);
     const data = await r.json();
     showRescue(symbol, data);
-    if (data.muse_pending) awaitMuseRescue(api("/rescue", { symbol, wait: 1 }), symbol, {});
+    if (data.muse_pending && !socketOpen()) awaitMuseRescue(api("/rescue", { symbol, wait: 1 }), symbol, {});
   } catch (err) {
     S.rescue = { symbol, error: L("rescue_failed") };
     renderRescue();
@@ -1442,14 +1451,24 @@ async function loadLiveRescue(symbol, venue) {
     if (!r.ok) throw new Error(`${r.status}`);
     const data = await r.json();
     showRescue(symbol, data, { live: true });
-    if (data.muse_pending) awaitMuseRescue(`${url}&wait=1`, symbol, { live: true });
+    if (data.muse_pending && !socketOpen()) awaitMuseRescue(`${url}&wait=1`, symbol, { live: true });
   } catch (err) {
     S.rescue = { symbol, live: true, error: L("rescue_live_failed") };
     renderRescue();
   }
 }
 
-/** The rule-based comparison is already on screen; replace it with Muse's once it answers (if still open). */
+const socketOpen = () => ws?.readyState === WebSocket.OPEN;
+
+/** Muse's trade-off text, pushed over the WebSocket, replaces the rule-based one if that rescue is still open. */
+function updateRescueMuse(data) {
+  const r = S.rescue;
+  if (!r || r.loading || r.error || !r.plan || r.symbol !== data.symbol) return;
+  if ((r.live ? "live" : "sim") !== data.scope || r.plan.venue !== data.venue) return;
+  showRescue(r.symbol, { plan: r.plan, explanation: data.explanation }, { live: r.live, auto: r.auto });
+}
+
+/** Without a socket (reconnecting), ask again and wait for Muse instead. */
 async function awaitMuseRescue(url, symbol, opts) {
   try {
     const r = await fetch(url, { credentials: "same-origin" });
@@ -1845,6 +1864,9 @@ async function refreshAccount() {
       `${L("funding_rate_line", { rate: signedRate(p.funding), next: duration(p.funding.minutes_to_settlement) })} · ${driftText(p.funding)} (${p.funding.label})`) : null,
   )));
   if (!positions.length) box.append(empty("📭", L("no_positions"), L(data.label ? "no_positions_open" : "no_positions_hint")));
+  S.accountMuse = data.muse || null;
+  const muse = accountMuseBlock(S.accountMuse);
+  if (muse) box.prepend(muse);
   const live = accountInsights(data.insights);
   if (live) box.append(live);
   for (const a of data.escalations || []) {
@@ -1867,6 +1889,30 @@ async function refreshAccount() {
     ),
   )));
   if (!data.actions?.length) acts.append(empty("📋", L("no_actions"), L(data.protect_enabled ? "no_actions_hint" : "actions_disabled")));
+}
+
+/** Muse's summary and suggestion for the signed-in book: same service, inputs and cache as Telegram /risk. */
+function accountMuseBlock(m) {
+  if (!m || (!m.summary && !m.suggestion)) return null;
+  const mockTag = (mock) => (mock ? el("span", { class: "tag" }, L("muse_mock_tag")) : null);
+  const s = m.summary, g = m.suggestion;
+  return el("div", { class: "acct-muse", id: "accountMuse", "data-view": m.view },
+    el("div", { class: "acct-muse-head" }, el("b", {}, `🧠 ${L("acct_muse_title")}`),
+      m.summary_pending || m.suggestion_pending ? el("span", { class: "hint" }, L("acct_muse_waiting")) : null),
+    s ? el("div", { class: "acct-muse-line", "data-muse": "summary", "data-mock": String(!!s.mock) }, mockTag(s.mock), s.headline) : null,
+    g ? el("div", { class: "acct-muse-line", "data-muse": "suggestion", "data-mock": String(!!g.mock) },
+      el("b", { class: g.severity ? `c-${g.severity}` : "" }, `💡 ${L("acct_muse_suggest", { symbol: g.symbol })}`), " ",
+      mockTag(g.mock), g.explanation) : null,
+  );
+}
+
+function updateAccountMuse(data) {
+  const m = S.accountMuse;
+  if (!m || data.view !== m.view) return;
+  if (data.summary) { m.summary = data.summary; m.summary_pending = false; }
+  if (data.suggestion) { m.suggestion = data.suggestion; m.suggestion_pending = false; }
+  const node = $("accountMuse"), next = accountMuseBlock(m);
+  if (node && next) node.replaceWith(next);
 }
 
 function accountInsights(ins) {
@@ -1913,6 +1959,7 @@ function toolButtons(symbol, venue, live) {
 }
 
 function toolLineClass(line) {
+  if (line.startsWith("✦")) return "tool-line muse";
   if (/^(⚠️|🛑|⛔)/.test(line)) return "tool-line warn";
   if (/^(✅|💡)/.test(line)) return "tool-line good";
   if (/^\s{2,}/.test(line)) return "tool-line indent";
@@ -1927,6 +1974,7 @@ async function openTool(tool, symbol, venue, live) {
   }, toolLabel(t))));
   $("toolBody").replaceChildren(el("div", { class: "tool-line muted" }, L("tool_loading")));
   if (!dlg.open) dlg.showModal();
+  const shown = S.tool = { tool, symbol, venue, scope: live ? "live" : "sim", loaded: false };
   const url = live
     ? `/api/me/position-tool/live?${new URLSearchParams({ symbol, tool, venue })}`
     : api("/position-tool", { symbol, tool });
@@ -1939,18 +1987,32 @@ async function openTool(tool, symbol, venue, live) {
     }
     if (!r.ok) throw new Error(`${r.status}`);
     const data = await r.json();
-    $("toolTitle").textContent = data.title;
-    const body = data.lines.map((line) => line ? el("div", { class: toolLineClass(line) }, line) : el("div", { class: "tool-gap" }));
-    if (tool === "rescue") {
-      body.push(el("button", { class: "btn btn-ghost tool-more", type: "button", onclick: () => {
-        dlg.close();
-        if (live) loadLiveRescue(symbol, venue); else loadRescue(symbol);
-      } }, L("tool_compare")));
-    }
-    $("toolBody").replaceChildren(...body);
+    if (S.tool !== shown) return;
+    shown.loaded = true;
+    renderToolReport(data, tool, symbol, venue, live);
   } catch (err) {
     $("toolBody").replaceChildren(el("div", { class: "tool-line warn" }, L("tool_failed")));
   }
+}
+
+function renderToolReport(data, tool, symbol, venue, live) {
+  $("toolTitle").textContent = data.title;
+  const body = data.lines.map((line) => line ? el("div", { class: toolLineClass(line) }, line) : el("div", { class: "tool-gap" }));
+  if (tool === "rescue") {
+    body.push(el("button", { class: "btn btn-ghost tool-more", type: "button", onclick: () => {
+      $("toolDialog").close();
+      if (live) loadLiveRescue(symbol, venue); else loadRescue(symbol);
+    } }, L("tool_compare")));
+  }
+  $("toolBody").replaceChildren(...body);
+}
+
+/** Muse's line for the open quick report arrived over the WebSocket. */
+function updateToolReport(data) {
+  const t = S.tool;
+  if (!t || !t.loaded || !$("toolDialog").open || t.tool !== data.tool || t.symbol !== data.symbol || t.scope !== data.scope) return;
+  if (t.venue && t.venue !== data.venue) return;
+  renderToolReport(data.report, t.tool, t.symbol, t.venue, t.scope === "live");
 }
 
 /* ---------------- 🔔 alert settings & 🔑 exchange connections (signed-in only) ---------------- */

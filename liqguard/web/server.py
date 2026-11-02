@@ -37,6 +37,7 @@ from liqguard.auth import SessionClaims
 from liqguard.core import AppContext, MuseService
 from liqguard.core.binding import BindingService, security_note
 from liqguard.core.position_tools import TOOLS, report
+from liqguard.core.positions import BOOK_LABEL
 from liqguard.core.user_settings import apply_setting, settings_dict
 from liqguard.i18n import localize, normalize, t, web_catalog
 from liqguard.models import Position, User
@@ -409,6 +410,15 @@ def create_app(
                 sim.configure(user.threshold, user.language)
         return sim
 
+    async def watched_simulation(user_id: int) -> MarketSimulation:
+        """The user's own simulation narrated in their saved language (a finished run is kept as is)."""
+        sim = ctx.simulations.get_or_create(user_id)
+        user = await ctx.storage.get_user(user_id)
+        if user is not None and normalize(user.language) != sim.language:
+            sim.set_language(user.language)
+            sim.summary = None
+        return sim
+
     add_simulation_routes("/api/demo", public_simulation, public_simulation)
     if ctx is not None:
         add_simulation_routes("/api/me", my_simulation, my_simulation_configured)
@@ -541,8 +551,8 @@ def create_app(
                 "mode": ctx.muse.mode,
                 "summary": book.summary.result,
                 "suggestion": suggestion.to_dict() if suggestion else None,
-                "pending": book.summary.pending is not None
-                or (suggestion is not None and suggestion.explanation.pending is not None),
+                "summary_pending": book.summary.pending is not None,
+                "suggestion_pending": suggestion is not None and suggestion.explanation.pending is not None,
             }
 
         @app.get("/api/me/account")
@@ -562,7 +572,7 @@ def create_app(
             return localize(lang, {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
-                "label": label,
+                "label": t(lang, "web." + BOOK_LABEL[label].replace(".", "_")) if label in BOOK_LABEL else label,
                 "positions": overview,
                 "protection": protection,
                 "insights": insights,
@@ -631,7 +641,7 @@ def create_app(
         if claims is None:
             await websocket.close(code=WS_POLICY_VIOLATION)
             return
-        await serve_ws(websocket, ctx.simulations.get_or_create(claims.user_id))
+        await serve_ws(websocket, await watched_simulation(claims.user_id))
 
     return app
 

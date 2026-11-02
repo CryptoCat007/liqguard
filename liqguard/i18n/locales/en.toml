@@ -1109,6 +1109,12 @@ muse_title_live = "Muse answered the last request; numbers are still computed in
 muse_title_pending = "Waiting for Muse; rule-based text is shown until it answers"
 muse_title_fallback = "Muse did not answer the last request; rule-based text is shown"
 muse_title_mock = "No Meta API key: rule-based text only"
+acct_muse_title = "Muse on your book"
+book_simulation = "Demo book · market simulation"
+book_demo = "Demo book"
+book_live = "Live positions"
+acct_muse_suggest = "Handle {symbol} first"
+acct_muse_waiting = "Muse is answering; rule-based text for now"
 
 [common.weekday]
 monday = "Monday"

@@ -529,7 +529,7 @@ Response format:
             if severity == "emergency":
                 summary = f"{position.symbol} 距離清算僅 {distance:.1f}%，需立即行動"
                 explanation = (
-                    f"您的 {position.symbol} {position.side.value} 倉位處於極高風險。"
+                    f"您的 {position.symbol} {t(language, f'common.side.{position.side.value}')}單倉位處於極高風險。"
                     f"目前距離清算價格僅 {distance:.1f}%。"
                 )
                 if advice.margin_to_add_usd and advice.margin_to_add_usd > 0:

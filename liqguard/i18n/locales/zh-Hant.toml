@@ -1109,6 +1109,12 @@ muse_title_live = "Muse 已回應最近一次請求；數字仍由程式計算"
 muse_title_pending = "等待 Muse 回應；在那之前顯示規則產生的文字"
 muse_title_fallback = "Muse 未回應最近一次請求；目前顯示規則產生的文字"
 muse_title_mock = "未設定 API 金鑰：只顯示規則產生的文字"
+acct_muse_title = "Muse 看你的持倉"
+book_simulation = "示範倉位 · 市場模擬"
+book_demo = "示範倉位"
+book_live = "即時倉位"
+acct_muse_suggest = "先處理 {symbol}"
+acct_muse_waiting = "Muse 回應中，暫時顯示規則產生的文字"
 
 [common.weekday]
 monday = "星期一"

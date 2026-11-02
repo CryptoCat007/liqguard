@@ -30,6 +30,8 @@ AdapterFactory = Callable[[ExchangeBinding], ExchangeAdapter]
 LABEL_SIMULATION = "📊 Demo Mode · market simulation"
 LABEL_DEMO = "📊 Demo Mode"
 LABEL_LIVE = "📊 Live Positions"
+BOOK_LABEL = {LABEL_SIMULATION: "book.simulation", LABEL_DEMO: "book.demo", LABEL_LIVE: "book.live"}
+"""Locale key for each book label, so every channel shows it in the reader's language."""
 
 
 @dataclass

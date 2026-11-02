@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from liqguard.core.position_tools import funding_lines, money, pct, price, side
-from liqguard.core.positions import LABEL_DEMO, LABEL_LIVE, LABEL_SIMULATION
+from liqguard.core.positions import BOOK_LABEL
 from liqguard.i18n import Translator
 
 RISK_EMOJI = {"SAFE": "✅", "WARNING": "⚠️", "CRITICAL": "🚨", "EMERGENCY": "🆘"}
-BOOK_LABEL = {LABEL_SIMULATION: "book.simulation", LABEL_DEMO: "book.demo", LABEL_LIVE: "book.live"}
 
 
 def book_label(T: Translator, label: str) -> str:
