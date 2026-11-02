@@ -56,8 +56,20 @@ If you would rather inject the master key than generate it, set `LIQGUARD_MASTER
 Generate one with `docker compose run --rm liqguard python -c "from liqguard.storage import generate_key; print(generate_key())"`.
 With that set, no key file is written.
 
-Optional: run BotFather `/setdomain` with your domain to enable the Telegram Login Widget on
-`/login`.
+### Telegram Login Widget (optional)
+
+`/login` always works with the `/dashboard` one-time link. It can also show Telegram's
+"Log in with Telegram" button, which only works on the domain registered for your bot:
+
+1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/setdomain`, pick your bot and
+   send the bare domain, for example `liqguard.example.com` (no scheme, no path).
+2. Make sure `.env` has `LIQGUARD_PUBLIC_URL=https://liqguard.example.com` (the same domain), then
+   `docker compose up -d`. The bot username is detected from the token at startup;
+   `LIQGUARD_BOT_USERNAME` (without `@`) overrides it.
+
+LiqGuard renders the widget and its "or" divider only when `LIQGUARD_PUBLIC_URL` is `https://`
+and its host is not `localhost`, `127.0.0.1`, `0.0.0.0`, `::1` or `*.localhost`. Telegram rejects
+those with "Bot domain invalid", so local development shows the one-time link steps only.
 
 ### Caddy on the host instead of in compose
 
@@ -124,5 +136,6 @@ All settings are environment variables; see `.env.example` and the README's
 | `LIQGUARD_DATA_DIR` | `/data` (DB, key and audit log default into it) |
 | `LIQGUARD_DB_PATH`, `LIQGUARD_KEY_FILE`, `LIQGUARD_AUDIT_LOG` | empty, so they derive from the data dir; set them only outside Docker |
 | `LIQGUARD_DASHBOARD` / `LIQGUARD_DASHBOARD_HOST` / `PORT` | `true` / `0.0.0.0` / `8765` |
-| `LIQGUARD_PUBLIC_URL` | `https://<your domain>` |
+| `LIQGUARD_PUBLIC_URL` | `https://<your domain>` (also the domain for BotFather `/setdomain`) |
+| `LIQGUARD_BOT_USERNAME` | optional override (without `@`); detected from the token at startup, shown on `/login` and used by the Login Widget |
 | `TELEGRAM_BOT_TOKEN`, `META_API_KEY`, `LIQGUARD_MASTER_KEY` | secrets: only in `.env`, never in the image or the repo |

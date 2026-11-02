@@ -593,9 +593,14 @@ never fall back to "any user":
 1. Send `/dashboard` to the bot in a private chat. It replies with a one-time link
    (`/auth/login?token=…`, 256-bit random, stored only as a SHA-256 hash, expires after
    `LIQGUARD_LOGIN_LINK_TTL`, default 5 min). Group chats get no link.
-2. Alternatively, sign in with the **Telegram Login Widget** on `/login` (needs
-   `LIQGUARD_BOT_USERNAME` and BotFather `/setdomain`). The widget hash is verified with
-   `SHA256(bot_token)` and must be fresh.
+2. Alternatively, sign in with the **Telegram Login Widget** on `/login` (needs BotFather
+   `/setdomain` for the domain in an `https://` `LIQGUARD_PUBLIC_URL`; the widget and its "or"
+   divider are hidden on `http://` or `localhost` / `127.0.0.1`, where Telegram would only say
+   "Bot domain invalid"). The widget hash is verified with `SHA256(bot_token)` and must be fresh.
+   `/login` is rendered on the server in the visitor's language (`?lang=`, else the
+   `liqguard_lang` cookie the dashboard toggle also writes; the bot's login link carries the
+   user's language). It tells an already-used link from an expired one and shows a notice after
+   signing out.
 3. Either path sets `liqguard_session`: an HMAC-signed, expiring token
    (`LIQGUARD_SESSION_TTL`, default 12 h) in an `HttpOnly`, `SameSite=Lax` cookie (`Secure`
    when `LIQGUARD_PUBLIC_URL` is https). The token carries a session epoch;
