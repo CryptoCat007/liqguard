@@ -225,7 +225,66 @@ class TestDockerFiles:
         assert compose["services"]["caddy"]["profiles"] == ["https"]
 
     def test_no_state_or_secret_file_is_tracked(self):
-        import subprocess
+        tracked = _git_ls_files()
+        if tracked is not None:
+            assert not [f for f in tracked if f.endswith((".key", ".db", ".pem")) or f == ".env" or f.startswith("data/")]
+        # Always scan the tree too: a git-archive tarball has no .git to ask.
+        assert not _state_or_secret_files(ROOT)
 
-        tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split()
-        assert not [f for f in tracked if f.endswith((".key", ".db", ".pem")) or f == ".env" or f.startswith("data/")]
+    def test_tree_scan_flags_state_files_git_would_track(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("# state\n/data/\nbuild/\n.venv\nlocal.db\n")
+        for rel in ("data/liqguard.db", "data/encryption.key", "build/x.db", ".venv/lib/.env", "venv/y.db",
+                    "local.db", "app/local.db", "README.md"):
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text("x")
+        assert _state_or_secret_files(tmp_path) == []
+        for rel in (".env", "liqguard.db", "app/encryption.key", "app/data/z.db"):
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text("x")
+        assert _state_or_secret_files(tmp_path) == [".env", "app/data/z.db", "app/encryption.key", "liqguard.db"]
+
+
+VENV_DIRS = {".venv", "venv", "env", "ENV", ".git"}
+
+
+def _git_ls_files() -> list[str] | None:
+    """Tracked files, or None when this is not a git checkout (e.g. an extracted git-archive tarball)."""
+    import subprocess
+
+    if not (ROOT / ".git").exists():
+        return None
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.split() if out.returncode == 0 else None
+
+
+def _ignored(rel: str, name: str, patterns: list[str], is_dir: bool) -> bool:
+    """Approximate .gitignore matching (no negation): `/x` anchors to the root, `x/` matches directories only."""
+    from fnmatch import fnmatch
+
+    for pattern in patterns:
+        if pattern.endswith("/") and not is_dir:
+            continue
+        p = pattern.strip("/")
+        anchored = pattern.startswith("/") or "/" in p
+        if fnmatch(rel, p) if anchored else fnmatch(name, p):
+            return True
+    return False
+
+
+def _state_or_secret_files(root: Path) -> list[str]:
+    """`.env`, `*.db` and `encryption.key` files git would track: outside .gitignore'd paths and virtualenvs."""
+    gitignore = root / ".gitignore"
+    lines = gitignore.read_text().splitlines() if gitignore.exists() else []
+    patterns = [ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith(("#", "!"))]
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath).relative_to(root)
+        dirnames[:] = [d for d in dirnames
+                       if d not in VENV_DIRS and not _ignored((base / d).as_posix(), d, patterns, is_dir=True)]
+        found += [(base / f).as_posix() for f in filenames
+                  if (f == ".env" or f.endswith(".db") or f == "encryption.key")
+                  and not _ignored((base / f).as_posix(), f, patterns, is_dir=False)]
+    return sorted(found)
