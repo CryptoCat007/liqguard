@@ -34,16 +34,14 @@ from pydantic import BaseModel, Field
 
 from liqguard.ai import MetaLLMClient
 from liqguard.auth import SessionClaims
-from liqguard.core import AppContext
+from liqguard.core import AppContext, MuseService
 from liqguard.core.binding import BindingService, security_note
 from liqguard.core.position_tools import TOOLS, report
 from liqguard.core.user_settings import apply_setting, settings_dict
 from liqguard.i18n import localize, normalize, t, web_catalog
-from liqguard.models import User
+from liqguard.models import Position, User
 from liqguard.risk import (
-    PortfolioAnalyzer,
     RescueSimulator,
-    portfolio_insights,
     position_protection,
 )
 from liqguard.simulation import SCENARIOS, MarketSimulation
@@ -262,6 +260,45 @@ def create_app(
             body["wick_feeds"] = ctx.wicks.status()
         return body
 
+    # ---------------------------------------------------------------- Muse
+
+    shared_muse = ctx.muse if ctx is not None else (MuseService(public_sim.llm) if public_sim.llm else None)
+    app.state.muse = shared_muse
+
+    def muse_for(sim: MarketSimulation) -> Optional[MuseService]:
+        """The Muse service Telegram uses too (`ctx.muse`); its late answers reach viewers through `sim`'s hub."""
+        if sim.llm is None:
+            return None
+        if shared_muse is not None and sim.llm is shared_muse.llm:
+            return shared_muse
+        return MuseService(sim.llm)
+
+    async def rescue_body(muse: MuseService, sim: Optional[MarketSimulation], plan, position: Position, lang: str,
+                          wait: bool, scope: str = "sim") -> dict:
+        if wait:
+            return {"plan": plan.to_dict(), "explanation": await muse.explain_rescue(plan, lang), "muse_pending": False}
+        instant = muse.rescue(plan, lang)
+        if instant.pending is not None and sim is not None:
+            key = {"scope": scope, "symbol": position.symbol, "venue": position.venue.value}
+            sim.deliver_later(instant.pending, "rescue_muse", lambda live: localize(lang, {**key, "explanation": live}))
+        return {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
+
+    def quick_report(muse: Optional[MuseService], sim: Optional[MarketSimulation], tool: str, position: Position, context,
+                     protection, plan, lang: str, demo: bool, scope: str = "sim") -> dict:
+        """The Telegram quick report with Muse's line (rescue / stop); Muse's live line follows as `report_muse`."""
+        note = muse.tool_note(tool, lang, plan=plan, check=protection.stop) if muse is not None else None
+
+        def render(line: Optional[dict]) -> dict:
+            return localize(lang, report(tool, position, context, protection.to_dict(), plan.to_dict() if plan else None,
+                                         demo=demo, lang=lang, muse=line))
+
+        body = render(note.result if note else None)
+        pending = note is not None and note.pending is not None
+        if pending and sim is not None:
+            key = {"scope": scope, "tool": tool, "symbol": position.symbol, "venue": position.venue.value}
+            sim.deliver_later(note.pending, "report_muse", lambda live: {**key, "report": render(live)})
+        return {**body, "muse_pending": pending}
+
     # ---------------------------------------------------------------- simulation routes
 
     def add_simulation_routes(prefix: str, resolve, guard):
@@ -290,25 +327,37 @@ def create_app(
         @app.get(f"{prefix}/rescue")
         async def rescue(symbol: str = Query(..., max_length=32), wait: bool = False,
                          sim: MarketSimulation = Depends(resolve)):
-            """Deterministic (or cached) explanation at once; `muse_pending` means `wait=1` will bring Muse's."""
-            result = await sim.rescue_plan(symbol, wait=wait)
-            if result is None:
+            """
+            The cached or deterministic explanation at once. While Muse is still
+            answering, `muse_pending` is true and its text follows as a
+            `rescue_muse` WebSocket event (or here, with `wait=1`).
+            """
+            position = next((p for p in sim.positions if p.symbol == symbol), None)
+            plan = sim.build_rescue_plan(symbol) if position is not None else None
+            if plan is None:
                 raise HTTPException(404, "No such position in this simulation")
-            return _localized(sim, result)
+            muse = muse_for(sim)
+            if muse is None:
+                return _localized(sim, await sim.rescue_plan(symbol, wait=wait))
+            body = await rescue_body(muse, sim, plan, position, sim.language, wait)
+            return _localized(sim, body)
 
         @app.get(f"{prefix}/position-tool")
         async def position_tool(symbol: str = Query(..., max_length=32), tool: str = Query(..., pattern=TOOL_PATTERN),
                                 lang: Optional[str] = Query(None, max_length=16),
                                 sim: MarketSimulation = Depends(resolve)):
-            """Rescue / wick / stop / funding report for one simulated position (same text as the Telegram buttons)."""
+            """
+            Rescue / wick / stop / funding report for one simulated position (same
+            text as the Telegram buttons). Muse's line follows as `report_muse`.
+            """
             position = next((p for p in sim.positions if p.symbol == symbol), None)
             if position is None:
                 raise HTTPException(404, "No such position in this simulation")
             context = sim.risk_context()
+            protection = sim.protection(position, context)
             plan = sim.build_rescue_plan(symbol) if tool == "rescue" else None
             code = normalize(lang) if lang else sim.language
-            return JSONResponse(localize(code, report(tool, position, context, sim.protection(position, context).to_dict(),
-                                                      plan.to_dict() if plan else None, demo=True, lang=code)))
+            return JSONResponse(quick_report(muse_for(sim), sim, tool, position, context, protection, plan, code, demo=True))
 
         @app.post(f"{prefix}/simulate", dependencies=[Depends(require_csrf)])
         async def simulate(sim: MarketSimulation = Depends(guard)):
@@ -456,17 +505,45 @@ def create_app(
             if position is None:
                 raise HTTPException(404, "No such position")
             c = snapshot.context
-            protection = position_protection(position, c, user.threshold).to_dict()
+            protection = position_protection(position, c, user.threshold)
             plan = None
             if tool == "rescue":
                 plan = RescueSimulator(c.fees, user.threshold.safety_target_pct).simulate(
-                    position, c.account_for(position), c.funding_for(position), c.now).to_dict()
-            return JSONResponse(localize(user.language, report(tool, position, c, protection, plan,
-                                                               demo=venue == "demo", lang=user.language)))
+                    position, c.account_for(position), c.funding_for(position), c.now)
+            return JSONResponse(quick_report(ctx.muse, ctx.simulations.get(claims.user_id), tool, position, c,
+                                             protection, plan, normalize(user.language), demo=venue == "demo",
+                                             scope="live"))
 
         @app.get("/api/me/session")
         async def my_session(claims: SessionClaims = Depends(auth.required)):
             return {"user_id": claims.user_id, "username": claims.username, "expires_at": claims.expires_at}
+
+        account_views: dict[int, int] = {}
+
+        def account_muse(user_id: int, user: User, snapshot, book, lang: str) -> dict:
+            """
+            The portfolio summary and Muse's suggestion, from the same service and
+            inputs as Telegram `/risk` and tier alerts. Muse's late answers come as
+            `account_muse` events tagged with `view`, so an older view's answer never
+            replaces a newer one.
+            """
+            view = account_views[user_id] = account_views.get(user_id, 0) + 1
+            suggestion = ctx.muse.suggestion(user, snapshot, book.insights, lang)
+            sim = ctx.simulations.get(user_id)
+            if sim is not None and book.summary.pending is not None:
+                sim.deliver_later(book.summary.pending, "account_muse",
+                                  lambda live: localize(lang, {"view": view, "summary": live}))
+            if sim is not None and suggestion is not None and suggestion.explanation.pending is not None:
+                sim.deliver_later(suggestion.explanation.pending, "account_muse",
+                                  lambda live: localize(lang, {"view": view, "suggestion": suggestion.to_dict(live)}))
+            return {
+                "view": view,
+                "mode": ctx.muse.mode,
+                "summary": book.summary.result,
+                "suggestion": suggestion.to_dict() if suggestion else None,
+                "pending": book.summary.pending is not None
+                or (suggestion is not None and suggestion.explanation.pending is not None),
+            }
 
         @app.get("/api/me/account")
         async def my_account(claims: SessionClaims = Depends(auth.required)):
@@ -475,19 +552,21 @@ def create_app(
                 return {"bindings": [], "positions": None, "label": "", "actions": [], "demo_mode": False}
             snapshot = await ctx.positions.snapshot_for(user)
             positions, label = snapshot.positions, snapshot.label
-            overview = (
-                PortfolioAnalyzer(user.threshold, snapshot.context).analyze_portfolio(positions).to_dict()
-                if positions else None
-            )
+            lang = normalize(user.language)
             protection = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in positions]
-            insights = portfolio_insights(positions, snapshot.context, user.threshold).to_dict() if positions else None
-            return localize(user.language, {
+            overview = insights = muse = None
+            if positions:
+                book = ctx.muse.portfolio(user, snapshot, lang)
+                overview, insights = book.overview.to_dict(), book.insights.to_dict()
+                muse = account_muse(claims.user_id, user, snapshot, book, lang)
+            return localize(lang, {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
                 "label": label,
                 "positions": overview,
                 "protection": protection,
                 "insights": insights,
+                "muse": muse,
                 "escalations": [a.to_dict() for a in ctx.escalations.pending_for(claims.user_id) if a.acknowledged_at is None],
                 "actions": await ctx.storage.list_audit(claims.user_id, limit=50),
                 "protect_enabled": ctx.actions.is_enabled(),
@@ -520,13 +599,10 @@ def create_app(
             plan = RescueSimulator(context.fees, user.threshold.safety_target_pct).simulate(
                 position, context.account_for(position), context.funding_for(position), context.now
             )
-            if wait:
-                explanation, pending = await ctx.llm.explain_rescue(plan, user.language), False
-            else:
-                instant = ctx.llm.explain_rescue_now(plan, user.language)
-                explanation, pending = instant.result, instant.pending is not None
-            return JSONResponse(localize(user.language, {"plan": plan.to_dict(), "explanation": explanation,
-                                                         "muse_pending": pending}))
+            lang = normalize(user.language)
+            body = await rescue_body(ctx.muse, ctx.simulations.get(claims.user_id), plan, position, lang,
+                                     wait, scope="live")
+            return JSONResponse(localize(lang, body))
 
     # ---------------------------------------------------------------- websockets
 

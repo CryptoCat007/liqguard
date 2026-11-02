@@ -787,6 +787,23 @@ class MarketSimulation:
         task.add_done_callback(self._muse_tasks.discard)
         return task
 
+    def deliver_later(self, pending: Awaitable[Any], event_type: str, build: Callable[[Any], Any]) -> asyncio.Task:
+        """
+        Emit `build(answer)` as `event_type` once a Muse answer computed outside
+        the run arrives (dashboard requests), then report Muse's status. A None
+        answer (Muse failed) emits nothing: the viewer keeps the text it has.
+        """
+        async def deliver() -> None:
+            try:
+                live = await pending
+            except Exception as e:
+                logger.error("Muse follow-up failed: %s", type(e).__name__)
+                live = None
+            if live is not None:
+                await self._emit(event_type, build(live))
+            await self._muse_settled()
+        return self._spawn_muse(deliver())
+
     # ------------------------------------------------------------------ control
 
     async def start(self, source: str = "web") -> bool:
