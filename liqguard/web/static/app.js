@@ -408,8 +408,9 @@ function renderSummary(summary) {
     return;
   }
   $("headline").textContent = summary.headline;
-  $("summaryTag").textContent = L(summary.mock ? "muse_mark_mock" : "muse_mark");
-  $("summaryTag").hidden = false;
+  const summarySource = museSource(summary);
+  $("summaryTag").textContent = summarySource === "rules" ? "" : L(summarySource === "muse" ? "muse_mark" : "muse_mark_mock");
+  $("summaryTag").hidden = summarySource === "rules";
   renderHero();
 }
 
@@ -1255,11 +1256,24 @@ function updateAdvice(c) {
   }
 }
 
+/**
+ * Who wrote an explanation: "muse" (Muse answered), "rules" (a key is configured and Muse's answer is
+ * pending or failed) or "mock" (no key). Only the no-key demo text is ever labelled "(mock)".
+ */
+function museSource(x) {
+  if (!x) return "mock";
+  if (x.mock === false || x.live === true) return "muse";
+  return x.source === "rules" ? "rules" : "mock";
+}
+
 /** The one recommendation a card or panel leads with: Muse's wording once it answered, else the rule-based text. */
-function recLine(text, live, attrs = {}) {
-  return el("div", { class: `rec-line${live ? " live" : ""}`, "data-live": String(!!live), ...attrs },
-    el("span", { class: "rec-text" }, `💡 ${text}`), " ",
-    el("span", { class: "muse-mark" }, L(live ? "muse_mark" : "muse_mark_mock")));
+function recLine(text, source, attrs = {}) {
+  const src = source === true ? "muse" : source === false ? "mock" : source;
+  const live = src === "muse";
+  return el("div", { class: `rec-line${live ? " live" : ""}`, "data-live": String(live), "data-source": src, ...attrs },
+    el("span", { class: "rec-text" }, `💡 ${text}`),
+    src === "rules" ? null : " ",
+    src === "rules" ? null : el("span", { class: "muse-mark" }, L(live ? "muse_mark" : "muse_mark_mock")));
 }
 
 function adviceNode(c) {
@@ -1284,7 +1298,7 @@ function adviceNode(c) {
       el("span", { class: "adv-sym", style: { color: symbolColor(c.symbol) } }, c.symbol),
       el("span", { class: `lvl lvl-${c.level}-b` }, tierLabel(c.level)),
     ),
-    recLine(c.recommendation?.text ?? c.explanation, !!c.recommendation?.live, { "data-rec": "advice" }),
+    recLine(c.recommendation?.text ?? c.explanation, c.recommendation?.source ?? !!c.recommendation?.live, { "data-rec": "advice" }),
     actions.length ? el("div", { class: "adv-actions" }, ...actions) : null,
     c.rescue ? rescueMini(c) : null,
     c.ack_id ? el("div", { class: "chips" }, ackButton(c.ack_id, c.symbol)) : null,
@@ -1547,7 +1561,7 @@ function renderRescue() {
 
   body.replaceChildren(
     head,
-    ex ? recLine(ex.headline, !ex.mock, { "data-rec": "rescue" }) : null,
+    ex ? recLine(ex.headline, museSource(ex), { "data-rec": "rescue" }) : null,
     plan.already_safe
       ? empty("✅", L("rescue_safe", { target: plan.target_distance_pct }), L("rescue_safe_hint"))
       : el("div", { class: "rs-grid" }, ...cols),
@@ -1900,7 +1914,7 @@ function accountMuseBlock(m) {
   if (!m || (!m.summary && !m.suggestion)) return null;
   const s = m.summary, g = m.suggestion;
   const [text, mock, kind] = s ? [s.headline, s.mock, "summary"] : [g.explanation, g.mock, "suggestion"];
-  return recLine(text, !mock, { id: "accountMuse", class: `rec-line acct-muse${mock ? "" : " live"}`, "data-view": m.view, "data-muse": kind, "data-mock": String(!!mock) });
+  return recLine(text, museSource(s || g), { id: "accountMuse", class: `rec-line acct-muse${mock ? "" : " live"}`, "data-view": m.view, "data-muse": kind, "data-mock": String(!!mock) });
 }
 
 function updateAccountMuse(data) {

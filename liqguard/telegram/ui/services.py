@@ -138,6 +138,21 @@ class UIServices:
         return RescueSimulator(c.fees, found.user.threshold.safety_target_pct).simulate(
             found.position, c.account_for(found.position), c.funding_for(found.position), c.now)
 
+    def warm_top(self, user: User, snapshot: BookSnapshot, insights: PortfolioInsights, lang: str,
+                 n: int = 2) -> None:
+        """Start Muse on the rescue and stop-loss texts of triage's top picks, the buttons the overview leads to."""
+        plans, checks = [], []
+        for item in insights.at_risk[:n]:
+            pos = next((p for p in snapshot.positions
+                        if p.symbol == item.symbol and p.venue.value == item.venue), None)
+            if pos is None:
+                continue
+            plan = self.rescue_plan(Found(user, snapshot, pos, self.source_of(snapshot, pos)))
+            if plan is not None:
+                plans.append(plan)
+            checks.append(position_protection(pos, snapshot.context, user.threshold).stop)
+        self.muse.warm(lang, tuple(plans), tuple(checks))
+
     def simulation(self, user_id: int) -> Optional[MarketSimulation]:
         return self.ctx.simulations.get(user_id)
 

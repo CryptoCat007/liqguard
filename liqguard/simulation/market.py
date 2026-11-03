@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
+from liqguard.ai.service import MuseService
 from liqguard.alerts.escalation import ESCALATING, EscalationTracker, reminder_text, urgency
 from liqguard.alerts.messages import advice_recommendation
 from liqguard.i18n import Msg, has, normalize
@@ -275,7 +276,7 @@ class MarketSimulation:
 
     def __init__(
         self,
-        llm_client: Optional["MetaLLMClient"] = None,
+        llm_client: "Optional[MuseService | MetaLLMClient]" = None,
         owner_id: Optional[int] = None,
         threshold: Optional[UserThreshold] = None,
         specs: tuple[SimPositionSpec, ...] = DEFAULT_SPECS,
@@ -295,9 +296,12 @@ class MarketSimulation:
         escalation_seconds_per_minute: float = ESCALATION_SECONDS_PER_MINUTE,
         scenario: Optional[str] = None,
         clock: Callable[[], float] = time.monotonic,
+        open_at_warning: bool = False,
     ):
         self._init_kwargs = {k: v for k, v in locals().items() if k not in ("self", "__class__")}
-        self.llm = llm_client
+        self.muse: Optional[MuseService] = MuseService.of(llm_client)
+        self.open_at_warning = open_at_warning
+        """The public demo opens where a position already needs attention, so the first screen shows an action."""
         self.clock = clock
         self.scenario = DEFAULT_SCENARIO if scenario is None else scenario
         self.owner_id = owner_id
@@ -336,7 +340,7 @@ class MarketSimulation:
     # ------------------------------------------------------------------ state
 
     def reset(self) -> None:
-        """Return to step 0 and clear history. Does not stop a running task."""
+        """Return to the opening step (0, or the first warning with `open_at_warning`) and clear history. Does not stop a running task."""
         rng = random.Random(self.seed)
         self._phases = {s.symbol: rng.uniform(0, 2 * math.pi) for s in self.specs}
         self._noise = {s.symbol: [rng.gauss(0, 0.25) for _ in range(self.steps + 1)] for s in self.specs}
@@ -373,9 +377,28 @@ class MarketSimulation:
         }
         self._marks = [self._solve_marks(step) for step in range(self.steps + 1)]
         self._settled_this_step: dict[str, float] = {}
-        self.positions = self._positions_at(0)
+        if self.open_at_warning:
+            self._open_at(self._warning_step())
+        self.positions = self._positions_at(self.step)
         self.overview = self._analyze()
         self._record_tick()
+
+    def _warning_step(self) -> int:
+        """The first step at which a position is inside the warning tier (at most halfway through the run)."""
+        for step in range(self.steps // 2 + 1):
+            if any(p.distance_to_liquidation_pct <= self.threshold.warning_distance_pct for p in self._positions_at(step)):
+                return step
+        return self.steps // 2
+
+    def _open_at(self, step: int) -> None:
+        """Begin the book at `step`; funding settlements before it are skipped, not charged."""
+        self.step = step
+        now = self.sim_now
+        for key, info in self.funding.items():
+            t = info.next_funding_time
+            while t <= now:
+                t += timedelta(hours=info.interval_hours)
+            self.funding[key] = dataclasses.replace(info, next_funding_time=t)
 
     def configure(self, threshold: Optional[UserThreshold] = None, language: Optional[str] = None) -> bool:
         """Apply the owner's thresholds/language. Ignored while a run is in progress."""
@@ -583,16 +606,16 @@ class MarketSimulation:
         plan = self.build_rescue_plan(symbol)
         if plan is None:
             return None
-        if wait or self.llm is None:
+        if wait or self.muse is None:
             return {"plan": plan.to_dict(), "explanation": await self._explain_rescue(plan), "muse_pending": False}
-        instant = self.llm.explain_rescue_now(plan, self.language)
+        instant = self.muse.rescue(plan, self.language)
         return {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
 
     async def _explain_rescue(self, plan: RescuePlan) -> Optional[dict]:
-        if self.llm is None:
+        if self.muse is None:
             return None
         try:
-            return await self.llm.explain_rescue(plan, self.language)
+            return await self.muse.explain_rescue(plan, self.language)
         except Exception as e:
             logger.error("Rescue explanation failed: %s", type(e).__name__)
             return None
@@ -749,8 +772,12 @@ class MarketSimulation:
             coro.close()
 
     @property
+    def llm(self) -> Optional["MetaLLMClient"]:
+        return self.muse.llm if self.muse is not None else None
+
+    @property
     def muse_mode(self) -> str:
-        return "mock" if self.llm is None else self.llm.mode
+        return "mock" if self.muse is None else self.muse.mode
 
     async def _muse_settled(self) -> None:
         """Tell viewers when Muse's status changed, so the badge only says live after a real answer."""
@@ -763,17 +790,32 @@ class MarketSimulation:
         """A summary to show right away (rule-based); Muse's phrasing follows as a "summary" event."""
         if self.summary is None:
             self.summary = self._tick_summary(self.insights())
-            if self.llm is not None and not self.llm.is_mock:
+            if self.muse is not None and not self.muse.is_mock:
                 self._spawn_muse(self.refresh_summary())
 
     async def _summary_soon(self) -> None:
         """The rule-based summary at once; with live Muse its phrasing follows as another "summary" event."""
-        if self.llm is None or self.llm.is_mock:
+        if self.muse is None or self.muse.is_mock:
             await self.refresh_summary()
             return
         self.summary = self._tick_summary(self.insights())
         await self._emit("summary", self.summary)
         self._spawn_muse(self.refresh_summary())
+        self.warm_top()
+
+    def warm_top(self, n: int = 2) -> None:
+        """Ask Muse now about the rescue and stop-loss of triage's top picks, so opening them finds the answer cached."""
+        if self.muse is None or self.muse.is_mock:
+            return
+        ctx = self.risk_context()
+        plans, checks = [], []
+        for item in self.insights().at_risk[:n]:
+            pos = self._position(item.symbol)
+            if pos is None:
+                continue
+            plans.append(self.build_rescue_plan(pos.symbol))
+            checks.append(self.protection(pos, ctx).stop)
+        self.muse.warm(self.language, tuple(plans), tuple(checks))
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -917,9 +959,9 @@ class MarketSimulation:
 
     def _tick_summary(self, insights: PortfolioInsights) -> Optional[dict]:
         """Rule-based summary from this step's overview and triage focus (goes out inside the tick)."""
-        if self.llm is None:
+        if self.muse is None:
             return None
-        return {**self.llm.mock_portfolio_summary(self.overview, self.language, insights.focus), "step": self.step}
+        return {**self.muse.rule_summary(self.overview, self.language, insights.focus), "step": self.step}
 
     async def refresh_summary(self) -> Optional[dict]:
         """
@@ -927,11 +969,11 @@ class MarketSimulation:
         if the simulation moved on while Muse was answering, the stale headline
         is dropped so the summary never quotes an older distance than the tick.
         """
-        if self.llm is None:
+        if self.muse is None:
             return None
         step, overview, focus = self.step, self.overview, self.insights().focus
         try:
-            summary = await self.llm.summarize_portfolio(overview, self.language, focus)
+            summary = await self.muse.summarize_portfolio(overview, self.language, focus)
         except Exception as e:
             logger.error("Portfolio summary failed: %s", type(e).__name__)
             return self.summary
@@ -1079,7 +1121,7 @@ class MarketSimulation:
                 await self._fire_alert(tier, pos, protection, insights)
         else:
             await self._fire_triage(crossings, insights)
-        if self.llm is not None and not self.llm.is_mock:
+        if self.muse is not None and not self.muse.is_mock:
             self._spawn_muse(self.refresh_summary())
 
     async def _fire_triage(self, crossings: list, insights: PortfolioInsights) -> None:
@@ -1225,9 +1267,9 @@ class MarketSimulation:
 
     def _explain_stop(self, alert: dict, check) -> Optional[dict]:
         """The deterministic (or cached) explanation now; Muse's follows as an "alert_update"."""
-        if self.llm is None or check is None:
+        if self.muse is None or check is None:
             return None
-        instant = self.llm.explain_stop_fix_now(check, self.language)
+        instant = self.muse.explain_stop_fix_now(check, self.language)
         if instant.pending is not None:
             self._spawn_muse(self._update_alert(alert, instant.pending))
         return instant.result
@@ -1398,12 +1440,12 @@ class MarketSimulation:
         """
         explanation, summary, mock = None, None, True
         advice_now = rescue_now = None
-        if self.llm is not None:
-            advice_now = self.llm.explain_risk_with_advice_now(pos, margin, self.language)
-            rescue_now = self.llm.explain_rescue_now(plan, self.language)
+        if self.muse is not None:
+            advice_now = self.muse.advice_now(pos, margin, self.language)
+            rescue_now = self.muse.rescue(plan, self.language)
             explanation = advice_now.result.get("explanation")
             summary = advice_now.result.get("summary")
-            mock = bool(advice_now.result.get("mock", self.llm.is_mock))
+            mock = bool(advice_now.result.get("mock", self.muse.is_mock))
         if not explanation:
             explanation = AdviceCalculator.format_advice_text(margin, self.language)
         rescue_explanation = rescue_now.result if rescue_now else None
@@ -1438,6 +1480,7 @@ class MarketSimulation:
             "rescue": plan.to_dict(),
             "rescue_explanation": rescue_explanation,
             "mock": mock,
+            "source": "muse" if not mock else (self.muse.fallback_source if self.muse is not None else "mock"),
         }
         card["recommendation"] = advice_recommendation(card)
         self.advice.append(card)
@@ -1459,7 +1502,7 @@ class MarketSimulation:
             return
         if live_advice is not None:
             card.update(summary=live_advice.get("summary"), explanation=live_advice.get("explanation") or explanation,
-                        mock=False)
+                        mock=False, source="muse")
         if live_rescue is not None:
             card["rescue_explanation"] = live_rescue
         card["recommendation"] = advice_recommendation(card)

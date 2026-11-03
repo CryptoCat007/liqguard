@@ -162,7 +162,7 @@ def create_app(
     if ctx is not None:
         public_sim = ctx.simulations.public
     else:
-        public_sim = demo_simulation or MarketSimulation(llm_client or MetaLLMClient())
+        public_sim = demo_simulation or MarketSimulation(llm_client or MetaLLMClient(), open_at_warning=True)
     if public_sim.owner_id is not None:
         raise ValueError("The public dashboard must use an owner-less simulation")
 
@@ -263,16 +263,16 @@ def create_app(
 
     # ---------------------------------------------------------------- Muse
 
-    shared_muse = ctx.muse if ctx is not None else (MuseService(public_sim.llm) if public_sim.llm else None)
+    shared_muse = ctx.muse if ctx is not None else public_sim.muse
     app.state.muse = shared_muse
 
     def muse_for(sim: MarketSimulation) -> Optional[MuseService]:
         """The Muse service Telegram uses too (`ctx.muse`); its late answers reach viewers through `sim`'s hub."""
-        if sim.llm is None:
+        if sim.muse is None:
             return None
         if shared_muse is not None and sim.llm is shared_muse.llm:
             return shared_muse
-        return MuseService(sim.llm)
+        return sim.muse
 
     async def rescue_body(muse: MuseService, sim: Optional[MarketSimulation], plan, position: Position, lang: str,
                           wait: bool, scope: str = "sim") -> dict:
@@ -569,6 +569,7 @@ def create_app(
                 book = ctx.muse.portfolio(user, snapshot, lang)
                 overview, insights = book.overview.to_dict(), book.insights.to_dict()
                 muse = account_muse(claims.user_id, user, snapshot, book, lang)
+                ctx.muse.warm_book(user, snapshot, book.insights, lang)
             return localize(lang, {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,

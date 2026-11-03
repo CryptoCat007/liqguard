@@ -86,8 +86,10 @@ class AppContext:
             **(simulation_options or {}),
         }
 
+        muse = MuseService(llm)
+
         def make_simulation(owner_id: Optional[int]) -> MarketSimulation:
-            return MarketSimulation(llm, owner_id=owner_id, **options)
+            return MarketSimulation(muse, owner_id=owner_id, **{"open_at_warning": owner_id is None, **options})
 
         simulations = SimulationRegistry(make_simulation)
         simulations.on_create(lambda sim: actions.audit.subscribe(sim.owner_id, sim.record_protective_audit))
@@ -116,6 +118,7 @@ class AppContext:
             fees=fees,
             wicks=wicks,
             escalations=EscalationTracker(),
+            muse=muse,
         )
 
     async def mute_demo(self, user_id: int, source: str, stop: bool = False) -> bool:

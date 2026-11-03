@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from liqguard.ai import get_news_stub
 from liqguard.alerts import ACK_PREFIX, DEMO_VENUE
-from liqguard.alerts.messages import recommendation_line
+from liqguard.alerts.messages import muse_source, recommendation_line
 from liqguard.core import AppContext, BookSnapshot
 from liqguard.core.positions import LABEL_SIMULATION
 from liqguard.core.user_settings import apply_setting as apply_user_setting
@@ -437,7 +437,7 @@ class BotHandlers:
 
     @staticmethod
     def _summary_line(summary: dict, language: str) -> str:
-        return recommendation_line(language, summary["headline"], not summary.get("mock", True)) + "\n\n"
+        return recommendation_line(language, summary["headline"], muse_source(summary)) + "\n\n"
 
     async def _risk_overview_text(self, overview, language: str, focus: Optional[dict] = None) -> str:
         summary = self.muse.llm.summarize_portfolio_now(overview, language, focus).result

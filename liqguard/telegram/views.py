@@ -10,6 +10,7 @@ from liqguard.alerts import (
     HANDLE_FIRST_ICON,
     comparison_line,
     format_price,
+    muse_source,
     priority_line,
     recommendation_line,
     sizing_line,
@@ -78,7 +79,7 @@ def format_rescue_text(plan: dict, explanation: Optional[dict], demo: bool = Fal
         f"Mark {_money(plan['mark_price'])} · Liq {_money(current['price'])} · {dist} away · target {plan['target_distance_pct']:.0f}%",
     ]
     if explanation:
-        lines.append(recommendation_line("en", explanation["headline"], not explanation.get("mock", True)))
+        lines.append(recommendation_line("en", explanation["headline"], muse_source(explanation)))
     lines.append("")
     trades = {t.get("option"): t for t in (explanation or {}).get("trade_offs", [])}
     if plan.get("already_safe"):

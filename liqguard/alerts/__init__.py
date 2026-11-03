@@ -23,6 +23,7 @@ from .messages import (
     format_sizing_message,
     format_stop_message,
     format_triage_message,
+    muse_source,
     priority_line,
     recommendation_line,
     sizing_line,
@@ -40,6 +41,7 @@ from .monitor import (
 )
 
 __all__ = [
+    "muse_source",
     "recommendation_line",
     "ACK_PREFIX",
     "DEMO_ALERT_WINDOW_SECONDS",

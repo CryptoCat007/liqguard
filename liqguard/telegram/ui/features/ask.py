@@ -25,9 +25,11 @@ async def answer(req: Request) -> Screen:
     question = T(f"ask.q.{key}")
     instant = s.muse.answer_now(snapshot.positions, question, T.lang)
 
-    def text(reply: str, live: bool) -> str:
-        tag = T("alert.muse_mark" if live else "alert.muse_mark_mock")
-        return f"{T('ask.answer', question=question)}\n\n{str(reply).strip()}\n\n{tag}"
+    def text(reply: str, source: str) -> str:
+        body = f"{T('ask.answer', question=question)}\n\n{str(reply).strip()}"
+        if source == "rules":
+            return body
+        return f"{body}\n\n{T('alert.muse_mark' if source == 'muse' else 'alert.muse_mark_mock')}"
 
     later = None
     if instant.pending is not None:
@@ -35,9 +37,9 @@ async def answer(req: Request) -> Screen:
 
         async def later() -> Optional[str]:
             live = await pending
-            return text(live, True) if live else None
+            return text(live, "muse") if live else None
 
-    return Screen(text(instant.result, instant.live), kb.ask_answer(T, req.sign), later=later)
+    return Screen(text(instant.result, instant.source), kb.ask_answer(T, req.sign), later=later)
 
 
 HANDLERS = {"qa": ask_menu, "qq": answer}

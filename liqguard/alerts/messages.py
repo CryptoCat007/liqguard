@@ -40,38 +40,64 @@ def muse_tag(lang: str, mock: bool) -> str:
     return t(lang, "alert.muse_mock" if mock else "alert.muse")
 
 
-def recommendation_line(lang: str, text, live: bool) -> str:
+MUSE, RULES, MOCK = "muse", "rules", "mock"
+
+
+def muse_source(explained: Optional[dict]) -> str:
+    """Who wrote an explanation dict: MUSE, RULES (a key is configured; Muse is pending or failed) or MOCK (no key)."""
+    if not explained:
+        return MOCK
+    if not explained.get("mock", True):
+        return MUSE
+    return RULES if explained.get("source") == RULES else MOCK
+
+
+def _as_source(live) -> str:
+    if isinstance(live, str):
+        return live if live in (MUSE, RULES, MOCK) else MOCK
+    return MUSE if live else MOCK
+
+
+def recommendation_line(lang: str, text, live) -> str:
     """
-    The one recommendation a message leads with: Muse's wording once it
-    arrived (`live`), else the rule-based text, marked with a small ✦ Muse tag.
+    The one recommendation a message leads with. `live` is who wrote it
+    (MUSE / RULES / MOCK, or a bool for MUSE / MOCK): Muse's wording is
+    tagged ✦ Muse, the no-key demo text ✦ Muse (mock), and the rule-based
+    text shown while a live Muse answer is pending (or after it failed)
+    carries no tag at all, since it is neither Muse nor a mock.
     """
-    return t(lang, "alert.recommend", text=str(tr(lang, text)).strip(),
-             tag=t(lang, "alert.muse_mark" if live else "alert.muse_mark_mock"))
+    source = _as_source(live)
+    body = str(tr(lang, text)).strip()
+    if source == RULES:
+        return t(lang, "alert.recommend_plain", text=body)
+    return t(lang, "alert.recommend", text=body, tag=t(lang, "alert.muse_mark" if source == MUSE else "alert.muse_mark_mock"))
 
 
 def advice_recommendation(card: dict) -> dict:
     """
-    {"text", "live"} for a simulated advice card: the recommended rescue (Muse's
-    headline when it answered), else the add-margin / reduce advice (Muse's
-    explanation when it answered). Telegram and the dashboard both show this line.
+    {"text", "live", "source"} for a simulated advice card: the recommended
+    rescue (Muse's headline when it answered), else the add-margin / reduce
+    advice (Muse's explanation when it answered). Telegram and the dashboard
+    both show this line.
     """
     plan, explained = card.get("rescue"), card.get("rescue_explanation") or {}
+    fallback = RULES if card.get("source") == RULES or explained.get("source") == RULES else MOCK
     best = None
     if plan and not plan.get("already_safe"):
         best = next((o for o in plan["options"] if o["kind"] == plan["recommended"]), None)
     if best is not None and explained.get("headline") and not explained.get("mock", True):
-        return {"text": explained["headline"], "live": True}
+        return {"text": explained["headline"], "live": True, "source": MUSE}
     if card.get("explanation") and not card.get("mock", True):
-        return {"text": card["explanation"], "live": True}
+        return {"text": card["explanation"], "live": True, "source": MUSE}
     if best is not None:
         return {"text": Msg("sim.rec_cheapest", title=best["title"], cost=f"{best['costs']['total_cost_usd']:,.2f}"),
-                "live": False}
+                "live": False, "source": fallback}
     if card.get("margin_to_add_usd"):
         where = Msg("sim.where_cross" if card.get("margin_mode") == "cross" else "sim.where_margin")
         return {"text": Msg("sim.rec_add", amount=f"{card['margin_to_add_usd']:,.2f}", where=where,
                             target=f"{card['target_distance_pct']:.0f}", pct=f"{card.get('reduce_size_pct', 0):.1f}"),
-                "live": False}
-    return {"text": card.get("explanation") or "", "live": False}
+                "live": False, "source": fallback}
+    return {"text": card.get("explanation") or "", "live": False, "source": fallback}
 
 
 def format_stop_message(check: dict, explanation: Optional[dict] = None, demo: bool = False, lang: str = EN) -> str:
@@ -90,7 +116,7 @@ def format_stop_message(check: dict, explanation: Optional[dict] = None, demo: b
     if check.get("loss_if_liquidated_usd"):
         lines.append(t(lang, "alert.stop.loss", loss=_usd(check["loss_if_liquidated_usd"], lang)))
     if explanation and explanation.get("headline"):
-        lines.append(recommendation_line(lang, explanation["headline"], not explanation.get("mock", True)))
+        lines.append(recommendation_line(lang, explanation["headline"], muse_source(explanation)))
     for f in check.get("fixes", []):
         if f["kind"] == "move_stop":
             lines.append(t(lang, "alert.stop.fix_move", stop=_usd(f["stop_price"], lang), pnl=_usd(f["pnl_at_stop_usd"], lang)))

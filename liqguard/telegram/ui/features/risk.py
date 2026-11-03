@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from liqguard.alerts import recommendation_line
+from liqguard.alerts import muse_source, recommendation_line
 from liqguard.risk import position_protection
 
 from .. import keyboards as kb
@@ -70,7 +70,7 @@ async def overview(req: Request) -> Screen:
     body += ["", T("overview.hint")]
 
     def text(summary: dict) -> str:
-        head = recommendation_line(T.lang, summary["headline"], not summary.get("mock", True))
+        head = recommendation_line(T.lang, summary["headline"], muse_source(summary))
         return "\n".join([T("overview.title", book=book_label(T, snapshot.label)), "", head, "", *body])
 
     first: Optional[tuple[str, str]] = None
@@ -79,6 +79,7 @@ async def overview(req: Request) -> Screen:
         pos = next((p for p in snapshot.positions if p.symbol == focus["symbol"] and p.venue.value == focus["venue"]), None)
         if pos is not None:
             first = (s.source_of(snapshot, pos), pos.symbol)
+    s.warm_top(user, snapshot, insights, T.lang)
 
     later = None
     if book.summary.pending is not None:

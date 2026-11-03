@@ -55,7 +55,7 @@ def format_advice_message(card: dict, lang: str = EN) -> str:
         t(lang, "sim.mark_liq", mark=f"{card['mark_price']:,.2f}", liq=f"{card['liquidation_price']:,.2f}"),
     ]
     rec = advice_recommendation(card)
-    lines.append(recommendation_line(lang, rec["text"], rec["live"]))
+    lines.append(recommendation_line(lang, rec["text"], rec.get("source", rec["live"])))
     for line in (priority_line(card.get("priority"), card.get("handle_first"), lang),
                  comparison_line(card["liq_comparison"], lang) if card.get("liq_comparison") else None,
                  wick_line(card.get("wicks"), lang)):

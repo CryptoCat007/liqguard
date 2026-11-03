@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from liqguard.alerts.messages import recommendation_line
+from liqguard.alerts.messages import muse_source, recommendation_line
 from liqguard.i18n import EN, Translator
 from liqguard.models import Position
 from liqguard.risk import RiskContext, project_funding
@@ -145,7 +145,7 @@ def close_fee_line(T: Translator, position: Position, context: RiskContext) -> s
 
 
 def muse_line(T: Translator, note: dict) -> str:
-    return recommendation_line(T.lang, note["text"], not note.get("mock", True))
+    return recommendation_line(T.lang, note["text"], muse_source(note))
 
 
 def report(tool: str, position: Position, context: RiskContext, protection: dict,

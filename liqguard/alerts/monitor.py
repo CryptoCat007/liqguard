@@ -27,6 +27,8 @@ from .demo_window import DemoAlertWindow
 from .escalation import ESCALATING, EscalationService, ack_action
 from .manager import AlertManager
 from .messages import (
+    MOCK,
+    MUSE,
     _usd,
     comparison_line,
     demo_tag,
@@ -80,20 +82,21 @@ def rescue_action(position: Position, lang: str = EN) -> Action:
 
 def format_alert_message(position: Position, assessment: RiskAssessment, explanation: str,
                          protection: Optional[dict] = None, insights: Optional[PortfolioInsights] = None,
-                         lang: str = EN, live: bool = True) -> str:
+                         lang: str = EN, live: Union[bool, str] = True) -> str:
     """
     Tier alert. One recommendation line follows the distance: Muse's
     `explanation` when `live`, else the computed add-margin amount.
     """
     emoji = SEVERITY_EMOJI.get(assessment.risk_level_str, "❓")
     level = assessment.risk_level_str.lower()
-    if live and explanation:
-        recommendation = recommendation_line(lang, explanation, True)
+    source = live if isinstance(live, str) else (MUSE if live else MOCK)
+    if source == MUSE and explanation:
+        recommendation = recommendation_line(lang, explanation, MUSE)
     elif assessment.margin_to_safety > 0:
         recommendation = recommendation_line(lang, t(lang, "alert.tier.rule_add_margin",
-                                                     amount=f"{assessment.margin_to_safety:,.2f}"), False)
+                                                     amount=f"{assessment.margin_to_safety:,.2f}"), source)
     else:
-        recommendation = recommendation_line(lang, explanation or "", False)
+        recommendation = recommendation_line(lang, explanation or "", source)
     message = (
         t(lang, "alert.tier.head", emoji=emoji, level=t(lang, f"common.severity_upper.{level}")) + "\n\n"
         + f"**{position.symbol}** {side_upper(lang, position.side.value)}\n"
@@ -179,12 +182,13 @@ class PositionMonitor:
         return await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language,
                                           demo=user.is_demo_mode)
 
-    async def _explain(self, method: str, fallback_method: str, *args) -> tuple[Any, Optional[Awaitable[Any]], bool]:
-        """(text to send now, Muse's answer still on its way, whether the text now is Muse's). Alerts never wait for Muse."""
+    async def _explain(self, method: str, fallback_method: str, *args) -> tuple[Any, Optional[Awaitable[Any]], Any]:
+        """(text to send now, Muse's answer still on its way, who wrote the text now). Alerts never wait for Muse."""
         now = getattr(self.explainer, method, None)
         if now is not None:
             instant = now(*args)
-            return instant.result, instant.pending, bool(getattr(instant, "live", False))
+            live = bool(getattr(instant, "live", False))
+            return instant.result, instant.pending, getattr(instant, "source", MUSE if live else MOCK)
         later = getattr(self.explainer, fallback_method, None)
         return (await later(*args) if later is not None else None), None, True
 
