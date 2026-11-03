@@ -31,8 +31,19 @@ from liqguard.risk.portfolio import PortfolioRiskOverview
 from liqguard.risk.rescue import RescuePlan
 from liqguard.risk.stops import StopCheck
 
-from .rescue import RESCUE_EXPLANATION_SCHEMA, mock_rescue_explanation, validate_rescue_explanation
-from .stops import STOP_EXPLANATION_SCHEMA, mock_stop_explanation, validate_stop_explanation
+from . import amounts, figures
+from .rescue import (
+    RESCUE_EXPLANATION_SCHEMA,
+    mock_rescue_explanation,
+    plan_figures,
+    validate_rescue_explanation,
+)
+from .stops import (
+    STOP_EXPLANATION_SCHEMA,
+    mock_stop_explanation,
+    stop_figures,
+    validate_stop_explanation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +53,15 @@ DEFAULT_MODEL = "muse-spark-1.3"
 # ends with finish_reason "length" and no content at all.
 DEFAULT_MAX_TOKENS = 2000
 RETRY_MAX_TOKENS = 6000
-DEFAULT_TIMEOUT = 15.0
+DEFAULT_TIMEOUT = 20.0
+DEFAULT_CONCURRENCY = 3
+QUEUE_TIMEOUT = 60.0
 DEFAULT_REASONING_EFFORT = "low"
 CACHE_TTL_SECONDS = 600
 CACHE_SIZE = 256
+
+MUSE, RULES, MOCK = "muse", "rules", "mock"
+"""Who wrote a text: Muse itself, the rule-based fallback while a key is configured, or the no-key mock."""
 
 
 def _env_number(name: str, default: float, cast=float, minimum: float = 0) -> float:
@@ -68,18 +84,28 @@ class Instant:
     pending: Optional["asyncio.Future[Any]"] = None
     live: bool = False
     """Whether `result` is Muse's own answer (cached) rather than the deterministic text."""
+    source: str = MOCK
+    """Who wrote `result`: MUSE, RULES (a key is configured; Muse's answer is pending or failed) or MOCK (no key)."""
+
+    def __post_init__(self) -> None:
+        if self.live:
+            self.source = MUSE
 
     def map(self, fn: Callable[[Any], Any]) -> "Instant":
         """The same answer shaped by `fn` (now, and when Muse's arrives; None stays None)."""
         if self.pending is None:
-            return Instant(fn(self.result), live=self.live)
+            return Instant(fn(self.result), live=self.live, source=self.source)
         source = self.pending
 
         async def later() -> Any:
             live = await source
             return None if live is None else fn(live)
 
-        return Instant(fn(self.result), asyncio.ensure_future(later()))
+        return Instant(fn(self.result), asyncio.ensure_future(later()), source=self.source)
+
+
+class _Busy(Exception):
+    """Every request slot stayed taken for QUEUE_TIMEOUT: the deterministic text stays, Muse's status is unchanged."""
 
 
 @dataclass
@@ -89,6 +115,10 @@ class _Job:
     fallback: Callable[[], Any]
     fetch: Callable[[], Awaitable[Any]]
     """Muse's validated answer, or None after recording why it failed."""
+    slot: Optional[str] = None
+    """Same question about the same position (e.g. "rescue:en:binance:SOLUSDT"), whatever the exact numbers."""
+    adapt: Optional[Callable[[Any], Any]] = None
+    """A slot-mate's answer made fit for this job's numbers, or None when it no longer fits."""
 
 
 ADVICE_RESPONSE_SCHEMA = {
@@ -183,6 +213,11 @@ class MetaLLMClient:
         self.last_at: Optional[float] = None
         self._cache: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
         self._inflight: dict[str, asyncio.Task] = {}
+        self._inflight_slots: dict[str, asyncio.Task] = {}
+        self._recent: "OrderedDict[str, str]" = OrderedDict()
+        self.concurrency = int(_env_number("META_CONCURRENCY", DEFAULT_CONCURRENCY, int, 1))
+        self._slots: dict[Any, asyncio.Semaphore] = {}
+        self.rejected = 0
 
         self._use_mock = use_mock if use_mock is not None else not bool(api_key)
         if self._use_mock:
@@ -215,10 +250,19 @@ class MetaLLMClient:
 
     @property
     def mode(self) -> str:
-        """"mock" (no key), "live" (the last Muse answer was used), "fallback" (it failed) or "pending" (none yet)."""
+        """
+        "mock" (no key), "live" (the last request to Muse answered), "fallback"
+        (it timed out or errored) or "pending" (none yet). An answer the
+        validator turned down still counts as live: the API is healthy.
+        """
         if self._use_mock:
             return "mock"
         return {True: "live", False: "fallback"}.get(self.last_ok, "pending")
+
+    @property
+    def fallback_source(self) -> str:
+        """How to label the deterministic text: MOCK without a key, RULES with one."""
+        return MOCK if self._use_mock else RULES
 
     def status(self) -> dict:
         return {"mode": self.mode, "model": self.model, "last_error": self.last_error,
@@ -232,6 +276,31 @@ class MetaLLMClient:
     def _failed(self, kind: str, reason: str) -> None:
         self.last_ok, self.last_error, self.last_at = False, reason, time.time()
         logger.warning("Muse %s failed (%s, model=%s); showing deterministic text", kind, reason, self.model)
+
+    def _slot(self) -> asyncio.Semaphore:
+        """At most `concurrency` requests in flight per event loop; the rest wait their turn off the clock."""
+        loop = asyncio.get_running_loop()
+        sem = self._slots.get(loop)
+        if sem is None:
+            self._slots = {lp: s for lp, s in self._slots.items() if not lp.is_closed()}
+            sem = self._slots[loop] = asyncio.Semaphore(self.concurrency)
+        return sem
+
+    async def _request(self, kind: str, kwargs: dict):
+        """
+        One API request. The time budget starts once the request holds a slot,
+        so a burst queues instead of timing out while it waits.
+        """
+        sem = self._slot()
+        try:
+            await asyncio.wait_for(sem.acquire(), QUEUE_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("Muse %s gave up after %gs in the queue; showing deterministic text", kind, QUEUE_TIMEOUT)
+            raise _Busy() from None
+        try:
+            return await asyncio.wait_for(self._create(kwargs), self.timeout)
+        finally:
+            sem.release()
 
     async def _create(self, kwargs: dict):
         try:
@@ -263,7 +332,12 @@ class MetaLLMClient:
             if self.reasoning_effort and self._reasoning_accepted is not False:
                 kwargs["reasoning_effort"] = self.reasoning_effort
             try:
-                response = await self._create(kwargs)
+                response = await self._request(kind, kwargs)
+            except _Busy:
+                return None
+            except asyncio.TimeoutError:
+                self._failed(kind, "timeout")
+                return None
             except NotFoundError:
                 logger.error("Muse model %r not found at %s; set META_MODEL to a model GET /models lists",
                              self.model, self.base_url)
@@ -282,6 +356,7 @@ class MetaLLMClient:
             content = getattr(getattr(choice, "message", None), "content", None)
             finish = getattr(choice, "finish_reason", None)
             if isinstance(content, str) and content.strip() and finish != "length":
+                self._succeeded()
                 return content
             logger.warning("Muse %s returned no usable content (finish_reason=%s, max_tokens=%d, reasoning_tokens=%s)%s",
                            kind, finish if isinstance(finish, str) else None, budget, _reasoning_tokens(response),
@@ -299,7 +374,7 @@ class MetaLLMClient:
         except ValueError:
             data = None
         if not isinstance(data, dict):
-            self._failed(kind, "invalid_json")
+            self._rejected(kind, "invalid_json")
             return None
         return data
 
@@ -320,56 +395,107 @@ class MetaLLMClient:
         self._cache.move_to_end(key)
         return hit[1]
 
-    def _remember(self, key: str, value: Any) -> None:
-        self._cache[key] = (time.monotonic() + CACHE_TTL_SECONDS, value)
-        self._cache.move_to_end(key)
+    def _remember(self, job: _Job, value: Any) -> None:
+        self._cache[job.key] = (time.monotonic() + CACHE_TTL_SECONDS, value)
+        self._cache.move_to_end(job.key)
         while len(self._cache) > CACHE_SIZE:
             self._cache.popitem(last=False)
+        if job.slot:
+            self._recent[job.slot] = job.key
+            self._recent.move_to_end(job.slot)
+            while len(self._recent) > CACHE_SIZE:
+                self._recent.popitem(last=False)
 
-    async def _fetch(self, job: _Job) -> Any:
-        try:
-            live = await asyncio.wait_for(job.fetch(), self.timeout)
-        except asyncio.TimeoutError:
-            self._failed(job.kind, "timeout")
+    def _adapted(self, job: _Job, value: Any) -> Any:
+        if value is None or job.adapt is None:
             return None
+        try:
+            return job.adapt(value)
+        except Exception as e:
+            logger.warning("Muse %s: could not reuse a recent answer (%s)", job.kind, type(e).__name__)
+            return None
+
+    def _hit(self, job: _Job) -> Any:
+        """Muse's answer for exactly this input, else a recent one for the same position that still fits it."""
+        hit = self._cached(job.key)
+        if hit is not None or not job.slot:
+            return hit
+        key = self._recent.get(job.slot)
+        reused = self._adapted(job, self._cached(key)) if key else None
+        if reused is not None:
+            self._remember(job, reused)
+        return reused
+
+    def _labelled(self, value: Any, source: str) -> Any:
+        return {**value, "source": source} if isinstance(value, dict) else value
+
+    def _fallback(self, job: _Job) -> Any:
+        return self._labelled(job.fallback(), self.fallback_source)
+
+    async def _fetch(self, job: _Job, mate: Optional[asyncio.Task] = None) -> Any:
+        if mate is not None:
+            # The same question about the same position is already being asked: reuse it if it still fits.
+            reused = self._adapted(job, await asyncio.shield(mate))
+            if reused is not None:
+                self._remember(job, reused)
+                return reused
+        try:
+            live = await job.fetch()
         except Exception as e:
             self._failed(job.kind, type(e).__name__)
             return None
         if live is not None:
-            self._succeeded()
-            self._remember(job.key, live)
+            live = self._labelled(live, MUSE)
+            self._remember(job, live)
         return live
 
     def _start(self, job: _Job) -> asyncio.Task:
-        """One request per input at a time: concurrent callers share the same task."""
+        """One request per input at a time; a newer input for the same position first waits for the older one."""
         task = self._inflight.get(job.key)
         if task is None:
-            task = asyncio.create_task(self._fetch(job))
+            mate = self._inflight_slots.get(job.slot) if job.slot else None
+            task = asyncio.create_task(self._fetch(job, mate if mate is not None and not mate.done() else None))
             self._inflight[job.key] = task
             task.add_done_callback(lambda _t, key=job.key: self._inflight.pop(key, None))
+            if job.slot:
+                self._inflight_slots[job.slot] = task
+                task.add_done_callback(lambda t, slot=job.slot: self._inflight_slots.pop(slot, None)
+                                       if self._inflight_slots.get(slot) is t else None)
         return task
 
     async def _run(self, job: _Job) -> Any:
         """Muse's answer within the time budget, else the deterministic one."""
         if self._use_mock:
             return job.fallback()
-        hit = self._cached(job.key)
+        hit = self._hit(job)
         if hit is not None:
             return hit
         live = await asyncio.shield(self._start(job))
-        return job.fallback() if live is None else live
+        return self._fallback(job) if live is None else live
 
     def _now(self, job: _Job) -> Instant:
         if self._use_mock:
             return Instant(job.fallback())
-        hit = self._cached(job.key)
+        hit = self._hit(job)
         if hit is not None:
             return Instant(hit, live=True)
         # Shielded: a caller that gives up (e.g. a stopped demo) must not cancel the shared request.
-        return Instant(job.fallback(), asyncio.shield(self._start(job)))
+        return Instant(self._fallback(job), asyncio.shield(self._start(job)), source=RULES)
+
+    def warm(self, job: _Job) -> None:
+        """Ask Muse now so the answer is cached by the time someone opens it."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if not self._use_mock and self._hit(job) is None:
+            self._start(job)
 
     def _rejected(self, kind: str, problem: str) -> None:
-        self._failed(kind, f"rejected: {problem}")
+        """Muse answered but the answer broke a rule; the API is fine, so the status stays live."""
+        self.rejected += 1
+        self.last_error = f"rejected: {problem}"
+        logger.warning("Muse %s answer rejected (%s, model=%s); showing deterministic text", kind, problem, self.model)
 
     # ------------------------------------------------------------------ advice
 
@@ -379,15 +505,12 @@ class MetaLLMClient:
             return self._mock_explain_advice(position, advice, language, distance_pct, severity)
 
         async def fetch() -> Optional[dict]:
-            user_content = f"""Position and pre-calculated advice:
+            facts = advice_facts(position, advice, distance_pct, severity)
+            user_content = f"""Position and pre-calculated advice (figures already formatted for the reader):
+{json.dumps(facts, indent=2, ensure_ascii=False)}
 
-Position:
-{json.dumps(position.to_dict(), indent=2)}
-
-Calculated Advice (use these exact numbers):
-{json.dumps(advice.to_dict(), indent=2)}
-
-Explain this advice to the user. Use the exact numbers provided - do not calculate new ones."""
+Explain this advice to the user. Copy figures exactly as written above (e.g. "5.2% from liquidation", "-$7,674");
+never print raw decimals and never calculate new numbers."""
             data = await self._chat_json("advice", [
                 {"role": "system", "content": self._get_advice_system_prompt(language)},
                 {"role": "user", "content": user_content},
@@ -780,12 +903,13 @@ Question: {question}"""
         """Deterministic summary from the same numbers (no LLM call), safe to compute every tick."""
         facts = self.portfolio_facts(overview, focus)
         rp = self._focus_position(overview, focus)
-        return {**facts, "headline": self._mock_portfolio_headline(rp, language, facts["priority_basis"]), "mock": True}
+        return {**facts, "headline": self._mock_portfolio_headline(rp, language, facts["priority_basis"]), "mock": True,
+                "source": self.fallback_source}
 
     def _summary_job(self, overview: PortfolioRiskOverview, language: str, focus: Optional[dict]) -> _Job:
         facts = self.portfolio_facts(overview, focus)
         rp = self._focus_position(overview, focus)
-        user_content = json.dumps({**facts, **overview.to_dict()["summary"]}, indent=2)
+        user_content = json.dumps(summary_prompt_facts(facts, overview), indent=2, ensure_ascii=False)
 
         def fallback() -> dict:
             return self.mock_portfolio_summary(overview, language, focus)
@@ -794,12 +918,14 @@ Question: {question}"""
             if is_zh(language):
                 system_prompt = (
                     "你是加密貨幣風險分析師。用一句繁體中文（台灣用語，最多 30 字）總結投資組合風險，"
-                    "必須點名 riskiest_symbol 並使用提供的精確數字。回傳 JSON：{\"headline\": \"...\"}"
+                    "必須點名 riskiest_symbol，數字照抄輸入中已格式化的寫法（例如「距離清算 5.2%」「-$7,674」），"
+                    "不要輸出原始小數，也不要自行計算。回傳 JSON：{\"headline\": \"...\"}"
                 )
             else:
                 system_prompt = (
-                    "You are a crypto risk analyst. Summarize portfolio risk in ONE sentence "
-                    "(max 25 words). Name riskiest_symbol and use only the exact numbers given. "
+                    "You are a crypto risk analyst. Summarize portfolio risk in ONE sentence (max 25 words). "
+                    "Name riskiest_symbol. Copy figures exactly as formatted in the input (e.g. \"5.2% from "
+                    "liquidation\", \"-$7,674\"); never print raw decimals and never compute new numbers. "
                     "Return JSON: {\"headline\": \"...\"}"
                 )
             data = await self._chat_json("summary", [
@@ -812,9 +938,28 @@ Question: {question}"""
             if not headline or rp.symbol not in headline or not self._headline_numbers_ok(headline, facts):
                 self._rejected("summary", "headline misses the riskiest position or quotes another number")
                 return None
+            if raw_figure(headline):
+                self._rejected("summary", "headline prints a raw decimal")
+                return None
             return {**facts, "headline": headline, "mock": False}
 
-        return _Job("summary", self._key("summary", language, user_content), fallback, fetch)
+        def adapt(old: dict) -> Optional[dict]:
+            headline = old.get("headline") or ""
+            same = all(old.get(k) == facts[k] for k in ("riskiest_symbol", "riskiest_venue", "risk_level"))
+            was, now = old.get("riskiest_distance_pct"), facts["riskiest_distance_pct"]
+            if not same or was is None or now is None or f"{was:.1f}" != f"{now:.1f}":
+                return None
+            if not self._headline_numbers_ok(headline, facts):
+                return None
+            action = facts.get("recommended_action") or {}
+            allowed = amounts.with_sums([[overview.total_unrealized_pnl, overview.total_margin_used,
+                                          overview.total_notional_value, action.get("amount_usd")]])
+            if amounts.unlisted(headline, allowed):
+                return None
+            return {**old, **facts, "headline": headline}
+
+        slot = f"summary:{language}:{facts['riskiest_venue']}:{facts['riskiest_symbol']}"
+        return _Job("summary", self._key("summary", language, user_content), fallback, fetch, slot, adapt)
 
     async def summarize_portfolio(
         self,
@@ -892,16 +1037,18 @@ Question: {question}"""
 
         async def fetch() -> Optional[dict]:
             system_prompt = (
-                "You explain liquidation rescue options to a crypto trader. All numbers are already computed; "
-                "quote only dollar amounts that appear in the input, never compute new ones. Compare add_margin, "
-                "reduce and hedge: what each costs (fees, realized loss, 24h funding 'at current rate'), how far it moves "
-                "the liquidation price, and its risks. Recommend the plan's `recommended` option unless it does not reach "
-                f"the target. Answer in {muse_language(language)}. Return JSON matching this schema: "
+                "You explain liquidation rescue options to a crypto trader. Every figure is already computed and "
+                "formatted. Quote figures exactly as written in the input (e.g. \"$1,381.22\", \"5.2%\"); never round, "
+                "add or compute new numbers and never print raw decimals. Compare add_margin, reduce and hedge: what "
+                "each costs (fees, realized loss, 24h funding at the current rate), how far it moves the liquidation "
+                "price, and its risks. Recommend the plan's `recommended` option unless it does not reach the target. "
+                "Be brief: headline under 25 words, each summary under 20 words, at most 2 pros and 2 cons per option. "
+                f"Answer in {muse_language(language)}. Return JSON matching this schema: "
                 + json.dumps(RESCUE_EXPLANATION_SCHEMA)
             )
             data = await self._chat_json("rescue", [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(plan_dict, indent=2)},
+                {"role": "user", "content": json.dumps(plan_figures(plan), indent=2, ensure_ascii=False)},
             ])
             if data is None:
                 return None
@@ -911,7 +1058,12 @@ Question: {question}"""
                 return None
             return {**data, "mock": False}
 
-        return _Job("rescue", self._key("rescue", language, plan_dict), fallback, fetch)
+        def adapt(old: dict) -> Optional[dict]:
+            fits = old.get("recommended_option") == plan.recommended and validate_rescue_explanation(old, plan) is None
+            return old if fits else None
+
+        slot = f"rescue:{language}:{plan.venue}:{plan.symbol}"
+        return _Job("rescue", self._key("rescue", language, plan_dict), fallback, fetch, slot, adapt)
 
     async def explain_rescue(self, plan: RescuePlan, language: str = "en") -> dict:
         """
@@ -932,16 +1084,18 @@ Question: {question}"""
 
         async def fetch() -> Optional[dict]:
             system_prompt = (
-                "You review a crypto trader's stop-loss against the liquidation price. All numbers are computed; quote "
-                "only dollar amounts from the input. Say plainly what is wrong (no stop, stop beyond liquidation so it "
-                "never fires, or stop too close to liquidation), then suggest exactly one of the computed `fixes` "
+                "You review a crypto trader's stop-loss against the liquidation price. Every figure is already "
+                "computed and formatted; quote figures exactly as written in the input, never round, add or compute "
+                "new ones and never print raw decimals. Say plainly what is wrong (no stop, stop beyond liquidation so "
+                "it never fires, or stop too close to liquidation), then suggest exactly one of the computed `fixes` "
                 "(move_stop, add_margin, reduce) and why. Prefer keeping the trader's stop with a smaller position when "
-                f"that fix exists. Answer in {muse_language(language)}. Return JSON matching this schema: "
+                "that fix exists. Be brief: headline under 25 words, explanation under 45 words. "
+                f"Answer in {muse_language(language)}. Return JSON matching this schema: "
                 + json.dumps(STOP_EXPLANATION_SCHEMA)
             )
             data = await self._chat_json("stop", [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(check_dict, indent=2)},
+                {"role": "user", "content": json.dumps(stop_figures(check), indent=2, ensure_ascii=False)},
             ])
             if data is None:
                 return None
@@ -949,9 +1103,14 @@ Question: {question}"""
             if problem:
                 self._rejected("stop", problem)
                 return None
-            return {**data, "mock": False}
+            return {**data, "mock": False, "for_status": check.status}
 
-        return _Job("stop", self._key("stop", language, check_dict), fallback, fetch)
+        def adapt(old: dict) -> Optional[dict]:
+            fits = old.get("for_status") == check.status and validate_stop_explanation(old, check) is None
+            return old if fits else None
+
+        slot = f"stop:{language}:{check.venue}:{check.symbol}"
+        return _Job("stop", self._key("stop", language, check_dict), fallback, fetch, slot, adapt)
 
     async def explain_stop_fix(self, check: StopCheck, language: str = "en") -> dict:
         """
@@ -963,6 +1122,14 @@ Question: {question}"""
 
     def explain_stop_fix_now(self, check: StopCheck, language: str = "en") -> Instant:
         return self._now(self._stop_job(check, language))
+
+    def warm_rescue(self, plan: RescuePlan, language: str = "en") -> None:
+        if not plan.already_safe:
+            self.warm(self._rescue_job(plan, language))
+
+    def warm_stop(self, check: StopCheck, language: str = "en") -> None:
+        if check.needs_warning:
+            self.warm(self._stop_job(check, language))
 
     def _risk_job(self, position: Position, distance_pct: float, margin_to_safety: float,
                   severity: Optional[AlertSeverity], language: str) -> _Job:
@@ -1004,6 +1171,65 @@ Question: {question}"""
                 "high" if alert.severity == AlertSeverity.CRITICAL else "medium"
             )
         }
+
+
+_RAW_DECIMAL = re.compile(r"(?<![\w$.,])-?(\d+)\.(\d+)(?![\d%x])")
+
+
+def raw_figure(text: str) -> bool:
+    """
+    True if `text` prints a figure no reader would write: a bare decimal with
+    two or more places ("5.15 distance"), a trailing ".0" ("-7674.0 PnL") or
+    four digits without a thousands separator. "1.8 typical wicks" is fine.
+    """
+    for m in _RAW_DECIMAL.finditer(text):
+        whole, frac = m.group(1), m.group(2)
+        if len(frac) >= 2 or set(frac) == {"0"} or len(whole) >= 4:
+            return True
+    return False
+
+
+def advice_facts(position: Position, advice: ActionableAdvice, distance_pct: Optional[float],
+                 severity: Optional[str]) -> dict:
+    """What an alert's advice may say, every figure already written for the reader."""
+    distance = position.distance_to_liquidation_pct if distance_pct is None else distance_pct
+    facts = {
+        "symbol": position.symbol,
+        "side": position.side.value,
+        "venue": position.venue.value,
+        "leverage": f"{position.leverage:g}x",
+        "severity": severity,
+        "mark_price": figures.price(position.mark_price),
+        "liquidation_price": figures.price(position.liquidation_price),
+        "distance_to_liquidation": figures.pct(distance),
+        "unrealized_pnl": figures.signed_usd(position.unrealized_pnl),
+        "recommended_action": advice.action_type.value,
+        "target_distance": figures.pct(advice.target_distance_pct, 0),
+        "margin_to_add": figures.usd(advice.margin_to_add_usd) if advice.margin_to_add_usd else None,
+        "reduce_size_by": figures.pct(advice.reduce_size_pct) if advice.reduce_size_pct else None,
+        "new_liquidation_price": figures.price(advice.new_liquidation_price) if advice.new_liquidation_price else None,
+    }
+    return {k: v for k, v in facts.items() if v is not None}
+
+
+def summary_prompt_facts(facts: dict, overview: PortfolioRiskOverview) -> dict:
+    """The portfolio summary's input, every figure already written for the reader."""
+    action = facts.get("recommended_action") or {}
+    out = {
+        "risk_level": facts["risk_level"],
+        "riskiest_symbol": facts["riskiest_symbol"],
+        "riskiest_venue": facts["riskiest_venue"],
+        "riskiest_distance": f"{figures.pct(facts['riskiest_distance_pct'])} from liquidation"
+        if facts.get("riskiest_distance_pct") is not None else None,
+        "priority_reason": facts.get("priority_reason"),
+        "positions": overview.total_positions,
+        "total_unrealized_pnl": figures.signed_usd(overview.total_unrealized_pnl),
+        "total_margin_used": figures.usd(overview.total_margin_used),
+    }
+    if action.get("action_type") == "add_margin":
+        out["recommended_action"] = (f"add {figures.usd(action['amount_usd'])} margin to {action['symbol']} "
+                                     f"to restore a {figures.pct(action['target_distance_pct'], 0)} buffer")
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def _strip_fence(content: str) -> str:

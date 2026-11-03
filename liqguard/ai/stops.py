@@ -10,11 +10,12 @@ quotes a dollar amount that isn't in it.
 
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 from liqguard.i18n import is_zh
 from liqguard.risk.stops import BEYOND_LIQUIDATION, NO_STOP, TOO_CLOSE, StopCheck, StopFix
+
+from . import amounts, figures
 
 FIX_KINDS = ("move_stop", "add_margin", "reduce")
 
@@ -28,9 +29,6 @@ STOP_EXPLANATION_SCHEMA = {
     },
     "required": ["headline", "suggested_fix", "explanation", "caveat"],
 }
-
-_DOLLARS = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)")
-
 
 def _usd(x: Optional[float], dp: int = 2) -> str:
     return "n/a" if x is None else f"${x:,.{dp}f}"
@@ -96,18 +94,39 @@ def mock_stop_explanation(check: StopCheck, language: str = "en") -> dict:
 
 
 def stop_amounts(check: StopCheck) -> set[float]:
-    values = [check.mark_price, check.liquidation_price, check.stop_price, check.pnl_at_stop_usd,
-              check.loss_if_liquidated_usd]
-    for f in check.fixes:
-        values += [f.stop_price, f.pnl_at_stop_usd, f.add_margin_usd, f.new_liquidation_price, f.fees_usd]
-    out = set()
-    for v in values:
-        if v is None:
-            continue
-        for x in (v, abs(v)):
-            for dp in (0, 1, 2):
-                out.add(round(x, dp))
-    return out
+    """Every dollar figure the explanation may quote: the check's own, and the sum of two figures of one fix."""
+    head = [check.mark_price, check.liquidation_price, check.stop_price, check.pnl_at_stop_usd, check.loss_if_liquidated_usd]
+    return amounts.with_sums([head, *([f.stop_price, f.pnl_at_stop_usd, f.add_margin_usd, f.new_liquidation_price, f.fees_usd]
+                                      for f in check.fixes)])
+
+
+def stop_figures(check: StopCheck) -> dict:
+    """The check as Muse should quote it: every amount already written for the reader."""
+    def fix(f: StopFix) -> dict:
+        out = {
+            "fix": f.kind,
+            "stop_price": figures.price(f.stop_price),
+            "pnl_if_stop_fills": figures.signed_usd(f.pnl_at_stop_usd),
+            "add_margin": figures.usd(f.add_margin_usd, cents=True) if f.add_margin_usd else None,
+            "reduce_position_by": figures.pct(f.reduce_pct) if f.reduce_pct else None,
+            "new_liquidation_price": figures.price(f.new_liquidation_price),
+            "fees": figures.usd(f.fees_usd, cents=True) if f.fees_usd else None,
+        }
+        return {k: v for k, v in out.items() if v is not None}
+
+    out = {
+        "symbol": check.symbol,
+        "side": check.side,
+        "status": check.status,
+        "mark_price": figures.price(check.mark_price),
+        "liquidation_price": figures.price(check.liquidation_price),
+        "stop_price": figures.price(check.stop_price) if check.stop_price is not None else "none",
+        "gap_between_stop_and_liquidation": figures.pct(check.gap_pct, 2) if check.gap_pct is not None else None,
+        "required_gap": figures.pct(check.required_gap_pct, 2),
+        "loss_if_liquidated": figures.usd(check.loss_if_liquidated_usd, cents=True) if check.loss_if_liquidated_usd else None,
+        "fixes": [fix(f) for f in check.fixes],
+    }
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def validate_stop_explanation(data: dict, check: StopCheck) -> Optional[str]:
@@ -117,10 +136,6 @@ def validate_stop_explanation(data: dict, check: StopCheck) -> Optional[str]:
     for key in ("headline", "explanation"):
         if not isinstance(data.get(key), str) or not data[key].strip():
             return f"missing {key}"
-    allowed = stop_amounts(check)
     text = " ".join(str(data.get(k, "")) for k in ("headline", "explanation", "caveat"))
-    for match in _DOLLARS.findall(text):
-        value = float(match.replace(",", ""))
-        if not any(abs(value - a) <= 0.011 for a in allowed):
-            return f"amount ${match} not in check"
-    return None
+    shown = amounts.unlisted(text, stop_amounts(check))
+    return f"amount {shown} not in check" if shown else None

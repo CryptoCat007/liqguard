@@ -9,11 +9,12 @@ dollar amount that is not in the plan.
 
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 from liqguard.i18n import EN, ZH, is_zh, tr
 from liqguard.risk.rescue import ADD_MARGIN, HEDGE, OPTION_ORDER, REDUCE, RescueOption, RescuePlan
+
+from . import amounts, figures
 
 RESCUE_EXPLANATION_SCHEMA = {
     "type": "object",
@@ -37,9 +38,6 @@ RESCUE_EXPLANATION_SCHEMA = {
     },
     "required": ["headline", "recommended_option", "trade_offs", "caveat"],
 }
-
-_DOLLARS = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)")
-
 
 def _usd(x: float, dp: int = 2) -> str:
     return f"${x:,.{dp}f}"
@@ -126,22 +124,47 @@ def mock_rescue_explanation(plan: RescuePlan, language: str = "en") -> dict:
     return {"headline": headline, "recommended_option": plan.recommended, "trade_offs": trade_offs, "caveat": caveat, "mock": True}
 
 
+def _option_values(o: RescueOption) -> list[Optional[float]]:
+    params = [v for v in o.params.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return [o.fees_usd, o.funding_24h_usd, o.realized_loss_usd, o.capital_required_usd, o.total_cost_usd,
+            o.new_liquidation_price, *params]
+
+
 def plan_amounts(plan: RescuePlan) -> set[float]:
-    """Every dollar figure the explanation may quote, at the rounding a reader would use."""
-    values = [plan.mark_price, plan.current.wallet_balance, plan.current.margin_buffer]
-    if plan.current.price:
-        values.append(plan.current.price)
-    for o in plan.options:
-        values += [o.fees_usd, o.funding_24h_usd, abs(o.funding_24h_usd), o.realized_loss_usd,
-                   o.capital_required_usd, o.total_cost_usd, abs(o.total_cost_usd)]
-        if o.new_liquidation_price:
-            values.append(o.new_liquidation_price)
-        values += [v for v in o.params.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    out = set()
-    for v in values:
-        for dp in (0, 1, 2):
-            out.add(round(v, dp))
-    return out
+    """Every dollar figure the explanation may quote: the plan's own, and the sum of two costs of one option."""
+    head = [plan.mark_price, plan.current.wallet_balance, plan.current.margin_buffer, plan.current.price]
+    return amounts.with_sums([head, *(_option_values(o) for o in plan.options)])
+
+
+def plan_figures(plan: RescuePlan) -> dict:
+    """The plan as Muse should quote it: every amount already written for the reader."""
+    def option(o: RescueOption) -> dict:
+        return {
+            "option": o.kind,
+            "title": tr(EN, o.title),
+            "new_liquidation_price": figures.price(o.new_liquidation_price) if o.new_liquidation_price else "none",
+            "new_distance_from_liquidation": figures.pct(o.new_distance_pct) if o.new_liquidation_price else "none",
+            "reaches_target": o.reaches_target,
+            "fees": figures.usd(o.fees_usd, cents=True),
+            "realized_loss": figures.usd(o.realized_loss_usd, cents=True),
+            "funding_24h_at_current_rate": figures.usd(o.funding_24h_usd, cents=True),
+            "new_capital_required": figures.usd(o.capital_required_usd, cents=True),
+            "total_cost": figures.usd(o.total_cost_usd, cents=True),
+        }
+
+    current = plan.current
+    return {
+        "symbol": plan.symbol,
+        "venue": plan.venue,
+        "side": plan.side,
+        "margin_mode": plan.margin_mode,
+        "mark_price": figures.price(plan.mark_price),
+        "liquidation_price": figures.price(current.price) if current.price else "none",
+        "distance_from_liquidation": figures.pct(current.distance_pct) if current.distance_pct is not None else "none",
+        "target_distance": figures.pct(plan.target_distance_pct, 0),
+        "recommended": plan.recommended,
+        "options": [option(o) for o in plan.options],
+    }
 
 
 def validate_rescue_explanation(data: dict, plan: RescuePlan) -> Optional[str]:
@@ -157,13 +180,9 @@ def validate_rescue_explanation(data: dict, plan: RescuePlan) -> Optional[str]:
     for t in trade_offs:
         if not isinstance(t, dict) or t.get("option") not in kinds:
             return "trade-off for an unknown option"
-    allowed = plan_amounts(plan)
     text = " ".join([data["headline"], str(data.get("caveat", ""))] + [
         " ".join([str(t.get("summary", ""))] + [str(x) for x in t.get("pros", []) + t.get("cons", [])])
         for t in trade_offs
     ])
-    for match in _DOLLARS.findall(text):
-        value = float(match.replace(",", ""))
-        if not any(abs(value - a) <= 0.011 for a in allowed):
-            return f"amount ${match} not in plan"
-    return None
+    shown = amounts.unlisted(text, plan_amounts(plan))
+    return f"amount {shown} not in plan" if shown else None
