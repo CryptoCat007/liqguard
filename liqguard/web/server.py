@@ -54,6 +54,8 @@ from .security import apply_security_headers, require_csrf
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+PUBLIC_PRECOMPUTE_TOP = 4
+"""Positions of the public demo whose rescue / stop-loss texts are fetched at startup (2 requests at a time)."""
 
 
 class AckRequest(BaseModel):
@@ -184,7 +186,9 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        precompute = asyncio.create_task(public_sim.precompute_top(PUBLIC_PRECOMPUTE_TOP))
         yield
+        precompute.cancel()
         for sim in list(public_sims.values()):
             await sim.stop(source="shutdown")
 
@@ -281,7 +285,8 @@ def create_app(
         instant = muse.rescue(plan, lang)
         if instant.pending is not None and sim is not None:
             key = {"scope": scope, "symbol": position.symbol, "venue": position.venue.value}
-            sim.deliver_later(instant.pending, "rescue_muse", lambda live: localize(lang, {**key, "explanation": live}))
+            sim.deliver_later(instant.pending, "rescue_muse", lambda live: localize(lang, {**key, "explanation": live}),
+                              fallback=instant.result)
         return {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
 
     def quick_report(muse: Optional[MuseService], sim: Optional[MarketSimulation], tool: str, position: Position, context,
@@ -297,7 +302,8 @@ def create_app(
         pending = note is not None and note.pending is not None
         if pending and sim is not None:
             key = {"scope": scope, "tool": tool, "symbol": position.symbol, "venue": position.venue.value}
-            sim.deliver_later(note.pending, "report_muse", lambda live: {**key, "report": render(live)})
+            sim.deliver_later(note.pending, "report_muse", lambda live: {**key, "report": render(live)},
+                              fallback=note.result)
         return {**body, "muse_pending": pending}
 
     # ---------------------------------------------------------------- simulation routes

@@ -803,10 +803,7 @@ class MarketSimulation:
         self._spawn_muse(self.refresh_summary())
         self.warm_top()
 
-    def warm_top(self, n: int = 2) -> None:
-        """Ask Muse now about the rescue and stop-loss of triage's top picks, so opening them finds the answer cached."""
-        if self.muse is None or self.muse.is_mock:
-            return
+    def _top_picks(self, n: int) -> tuple[tuple, tuple]:
         ctx = self.risk_context()
         plans, checks = [], []
         for item in self.insights().at_risk[:n]:
@@ -815,7 +812,23 @@ class MarketSimulation:
                 continue
             plans.append(self.build_rescue_plan(pos.symbol))
             checks.append(self.protection(pos, ctx).stop)
-        self.muse.warm(self.language, tuple(plans), tuple(checks))
+        return tuple(plans), tuple(checks)
+
+    def warm_top(self, n: int = 2) -> None:
+        """Ask Muse now about the rescue and stop-loss of triage's top picks, so opening them finds the answer cached."""
+        if self.muse is None or self.muse.is_mock:
+            return
+        self.muse.warm(self.language, *self._top_picks(n))
+
+    async def precompute_top(self, n: int = 4, parallel: int = 2) -> int:
+        """
+        The public demo's opening book, explained ahead of its first visitors:
+        rescue and stop-loss texts (EN and zh in one answer each) for the top
+        `n` picks, `parallel` requests at a time.
+        """
+        if self.muse is None or self.muse.is_mock:
+            return 0
+        return await self.muse.precompute(*self._top_picks(n), parallel=parallel)
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -830,11 +843,14 @@ class MarketSimulation:
         task.add_done_callback(self._muse_tasks.discard)
         return task
 
-    def deliver_later(self, pending: Awaitable[Any], event_type: str, build: Callable[[Any], Any]) -> asyncio.Task:
+    def deliver_later(self, pending: Awaitable[Any], event_type: str, build: Callable[[Any], Any],
+                      fallback: Any = None) -> asyncio.Task:
         """
         Emit `build(answer)` as `event_type` once a Muse answer computed outside
-        the run arrives (dashboard requests), then report Muse's status. A None
-        answer (Muse failed) emits nothing: the viewer keeps the text it has.
+        the run arrives (dashboard requests), then report Muse's status. When
+        Muse fails, `build(fallback)` (the text the viewer already has) is
+        emitted with `muse_failed: true`, so every pending request ends with
+        one event; without a fallback nothing is emitted.
         """
         async def deliver() -> None:
             try:
@@ -844,6 +860,9 @@ class MarketSimulation:
                 live = None
             if live is not None:
                 await self._emit(event_type, build(live))
+            elif fallback is not None:
+                payload = build(fallback)
+                await self._emit(event_type, {**payload, "muse_failed": True} if isinstance(payload, dict) else payload)
             await self._muse_settled()
         return self._spawn_muse(deliver())
 
