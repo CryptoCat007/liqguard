@@ -43,6 +43,10 @@ from .liquidation import (
 
 ADD_MARGIN, REDUCE, HEDGE = "add_margin", "reduce", "hedge"
 OPTION_ORDER = (ADD_MARGIN, REDUCE, HEDGE)
+NO_RESCUE = "none"
+"""`RescuePlan.recommended` when there is nothing worth doing (already safe, or every option is a no-op)."""
+MIN_ACTION_USD = 0.01
+MIN_ACTION_PCT = 1e-6
 FUNDING_HORIZON_HOURS = 24
 
 
@@ -65,6 +69,14 @@ class RescueOption:
     def total_cost_usd(self) -> float:
         """Fees + realized loss + 24 h funding (negative funding = received)."""
         return self.fees_usd + self.realized_loss_usd + self.funding_24h_usd
+
+    @property
+    def is_noop(self) -> bool:
+        """Adds no margin, closes nothing and hedges nothing (e.g. "add $0.00"): never recommended nor explained."""
+        if self.kind == ADD_MARGIN:
+            return abs(float(self.params.get("amount_usd") or 0.0)) < MIN_ACTION_USD
+        share = {REDUCE: "reduce_pct", HEDGE: "hedge_pct"}.get(self.kind)
+        return share is not None and abs(float(self.params.get(share) or 0.0)) < MIN_ACTION_PCT
 
     def to_dict(self) -> dict:
         inf = math.isinf(self.new_distance_pct)
@@ -107,8 +119,7 @@ class RescuePlan:
     @property
     def already_safe(self) -> bool:
         """Already at or beyond the target: every option is a no-op, so there is nothing to recommend."""
-        d = self.current.distance_pct
-        return d is None or d >= self.target_distance_pct
+        return _safe(self.current.distance_pct, self.target_distance_pct)
 
     def margin_advice(self) -> ActionableAdvice:
         """The add-margin option as `ActionableAdvice` (what alerts, Muse and the confirm flow consume)."""
@@ -364,12 +375,19 @@ class RescueSimulator:
             target_distance_pct=self.target,
             funding=funding,
             options=options,
-            recommended=recommend(options),
+            recommended=NO_RESCUE if _safe(current.distance_pct, self.target) else recommend(options),
         )
 
 
+def _safe(distance_pct: Optional[float], target: float) -> bool:
+    return distance_pct is None or distance_pct >= target
+
+
 def recommend(options: tuple[RescueOption, ...]) -> str:
-    """Cheapest option that reaches the target and actually protects against liquidation."""
+    """Cheapest option that reaches the target and actually protects against liquidation; NO_RESCUE if every option is a no-op."""
+    options = tuple(o for o in options if not o.is_noop)
+    if not options:
+        return NO_RESCUE
     viable = [o for o in options if o.reaches_target and o.protects_liquidation]
     if viable:
         return min(viable, key=lambda o: (round(o.total_cost_usd, 2), OPTION_ORDER.index(o.kind))).kind

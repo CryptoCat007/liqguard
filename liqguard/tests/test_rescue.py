@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from liqguard.ai import MetaLLMClient, mock_rescue_explanation, validate_rescue_explanation
+from liqguard.ai.rescue import plan_figures
 from liqguard.alerts import AlertManager, PositionMonitor
 from liqguard.core import BookSnapshot
 from liqguard.models import (
@@ -32,7 +33,7 @@ from liqguard.risk import (
     RiskContext,
     true_liquidation,
 )
-from liqguard.risk.rescue import RescueOption, recommend
+from liqguard.risk.rescue import NO_RESCUE, RescueOption, recommend
 from liqguard.simulation import TIERS, MarketSimulation
 from liqguard.web import create_app
 from liqguard.web.auth import SESSION_COOKIE
@@ -157,6 +158,21 @@ class TestAlreadySafe:
         safe = self.safe_plan()
         assert safe.already_safe and safe.to_dict()["already_safe"] is True
 
+    def test_nothing_is_recommended_and_no_option_reaches_muse(self):
+        safe = self.safe_plan()
+        assert safe.recommended == NO_RESCUE
+        facts = plan_figures(safe)
+        assert facts["recommended"] == "none" and facts["options"] == []
+        assert "$0.00" not in json.dumps(facts)
+
+    def test_muse_saying_no_rescue_is_accepted_and_recommending_one_is_not(self):
+        safe = self.safe_plan()
+        calm = {"headline": "No rescue needed: already beyond the 5% target.", "recommended_option": "none",
+                "trade_offs": [], "caveat": ""}
+        assert validate_rescue_explanation(calm, safe) is None
+        pushy = {**calm, "recommended_option": ADD_MARGIN, "headline": "Add $0.00 to isolated margin for $0.00."}
+        assert "needs none" in validate_rescue_explanation(pushy, safe)
+
     def test_mock_says_no_rescue_needed_and_validates(self):
         safe = self.safe_plan()
         ex = mock_rescue_explanation(safe)
@@ -175,8 +191,17 @@ class TestAlreadySafe:
 
 
 class TestRecommend:
-    def opt(self, kind, cost, reaches=True, protects=True, distance=30.0):
-        return RescueOption(kind, kind, 1.0, distance, reaches, protects, cost, 0, 0, 0)
+    SIZE = {ADD_MARGIN: {"amount_usd": 500.0}, REDUCE: {"reduce_pct": 20.0}, HEDGE: {"hedge_pct": 20.0}}
+
+    def opt(self, kind, cost, reaches=True, protects=True, distance=30.0, params=None):
+        return RescueOption(kind, kind, 1.0, distance, reaches, protects, cost, 0, 0, 0,
+                            params=self.SIZE[kind] if params is None else params)
+
+    def test_a_zero_amount_option_is_never_recommended(self):
+        free = self.opt(ADD_MARGIN, 0, params={"amount_usd": 0.0})
+        assert free.is_noop and recommend((free, self.opt(REDUCE, 20), self.opt(HEDGE, 30))) == REDUCE
+        noops = (free, self.opt(REDUCE, 0, params={"reduce_pct": 8.7e-17}), self.opt(HEDGE, 0, params={"hedge_pct": 0.0}))
+        assert recommend(noops) == NO_RESCUE
 
     def test_cheapest_viable_wins(self):
         assert recommend((self.opt(ADD_MARGIN, 50), self.opt(REDUCE, 20), self.opt(HEDGE, 30))) == REDUCE

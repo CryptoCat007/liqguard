@@ -12,7 +12,15 @@ from __future__ import annotations
 from typing import Optional
 
 from liqguard.i18n import EN, ZH, is_zh, tr
-from liqguard.risk.rescue import ADD_MARGIN, HEDGE, OPTION_ORDER, REDUCE, RescueOption, RescuePlan
+from liqguard.risk.rescue import (
+    ADD_MARGIN,
+    HEDGE,
+    NO_RESCUE,
+    OPTION_ORDER,
+    REDUCE,
+    RescueOption,
+    RescuePlan,
+)
 
 from . import amounts, figures
 
@@ -20,7 +28,7 @@ RESCUE_EXPLANATION_SCHEMA = {
     "type": "object",
     "properties": {
         "headline": {"type": "string", "description": "One sentence naming the recommended option"},
-        "recommended_option": {"type": "string", "enum": list(OPTION_ORDER)},
+        "recommended_option": {"type": "string", "enum": [*OPTION_ORDER, NO_RESCUE]},
         "trade_offs": {
             "type": "array",
             "items": {
@@ -112,7 +120,7 @@ def mock_rescue_explanation(plan: RescuePlan, language: str = "en") -> dict:
         goal = f"back to a {target:.0f}% buffer" if best.reaches_target else "to widen the buffer"
         headline = f"{plan.symbol}: cheapest way {goal} — {tr(EN, best.title)} ({_usd(best.total_cost_usd)} incl. fees and 24h funding)."
     trade_offs = []
-    for o in plan.options:
+    for o in ([] if plan.already_safe else explainable(plan)):
         pros, cons = _pros_cons(o, zh)
         trade_offs.append({"option": o.kind, "summary": _summary(o, zh), "pros": pros, "cons": cons})
     caveat = (
@@ -128,6 +136,11 @@ def _option_values(o: RescueOption) -> list[Optional[float]]:
     params = [v for v in o.params.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
     return [o.fees_usd, o.funding_24h_usd, o.realized_loss_usd, o.capital_required_usd, o.total_cost_usd,
             o.new_liquidation_price, *params]
+
+
+def explainable(plan: RescuePlan) -> list[RescueOption]:
+    """The options worth a word: no-ops ("add $0.00") are never explained nor recommended."""
+    return [o for o in plan.options if not o.is_noop]
 
 
 def plan_amounts(plan: RescuePlan) -> set[float]:
@@ -163,19 +176,23 @@ def plan_figures(plan: RescuePlan) -> dict:
         "distance_from_liquidation": figures.pct(current.distance_pct) if current.distance_pct is not None else "none",
         "target_distance": figures.pct(plan.target_distance_pct, 0),
         "recommended": plan.recommended,
-        "options": [option(o) for o in plan.options],
+        "options": [] if plan.already_safe else [option(o) for o in explainable(plan)],
     }
 
 
 def validate_rescue_explanation(data: dict, plan: RescuePlan) -> Optional[str]:
     """None if `data` is acceptable, else the reason it was rejected."""
-    kinds = {o.kind for o in plan.options}
-    if data.get("recommended_option") not in kinds:
+    kinds = {o.kind for o in explainable(plan)}
+    nothing_to_do = plan.recommended == NO_RESCUE
+    if nothing_to_do:
+        if data.get("recommended_option") != NO_RESCUE:
+            return "recommends an action for a position that needs none"
+    elif data.get("recommended_option") not in kinds:
         return "recommended_option not in plan"
     if not isinstance(data.get("headline"), str) or not data["headline"].strip():
         return "missing headline"
-    trade_offs = data.get("trade_offs")
-    if not isinstance(trade_offs, list) or not trade_offs:
+    trade_offs = data.get("trade_offs", [] if nothing_to_do else None)
+    if not isinstance(trade_offs, list) or (not trade_offs and not nothing_to_do):
         return "missing trade_offs"
     for t in trade_offs:
         if not isinstance(t, dict) or t.get("option") not in kinds:

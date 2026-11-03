@@ -39,7 +39,7 @@ from .portfolio import (
     format_portfolio_overview_text,
 )
 from .protection import PositionProtection, position_protection
-from .rescue import ADD_MARGIN, HEDGE, REDUCE, RescueOption, RescuePlan, RescueSimulator
+from .rescue import ADD_MARGIN, HEDGE, NO_RESCUE, REDUCE, RescueOption, RescuePlan, RescueSimulator
 from .sessions import (
     SessionInfo,
     is_stock_perp,
@@ -163,6 +163,7 @@ __all__ = [
     "format_portfolio_overview_text",
     "ADD_MARGIN",
     "HEDGE",
+    "NO_RESCUE",
     "REDUCE",
     "RescueOption",
     "RescuePlan",

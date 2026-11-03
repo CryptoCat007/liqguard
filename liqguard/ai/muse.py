@@ -172,10 +172,11 @@ _BOTH = ('Reply with JSON {"en": A, "zh-Hant": A}: the same answer A in English 
 
 RESCUE_SYSTEM_PROMPT = (
     "You explain liquidation rescue options to a crypto trader in plain words. All figures are precomputed. "
-    "Recommend the input's `recommended` option. "
+    "Recommend the input's `recommended` option. When `recommended` is \"none\" the position is already beyond "
+    "its target distance: say no rescue is needed (quote the distance and target), use \"none\" and empty trade_offs. "
     + _BOTH + " "
     'A = {"headline": max 20 words naming the recommended option and its cost, '
-    '"recommended_option": "add_margin"|"reduce"|"hedge", '
+    '"recommended_option": "add_margin"|"reduce"|"hedge"|"none", '
     '"trade_offs": [{"option", "summary": max 15 words, "pros": [1 short item], "cons": [1 short item]}] '
     'one per input option, "caveat": max 15 words}.'
 )
@@ -184,6 +185,7 @@ STOP_SYSTEM_PROMPT = (
     "You review a crypto trader's stop-loss against the liquidation price. All figures are precomputed. "
     "Say what is wrong (no stop, stop beyond liquidation so it never fires, or too close to it) and pick one of "
     "the input `fixes`, preferring to keep the trader's stop with a smaller position when that fix exists. "
+    "If status is ok, confirm in one sentence that the stop fires before liquidation and use \"none\". "
     + _BOTH + " "
     'A = {"headline": max 20 words, "suggested_fix": "move_stop"|"add_margin"|"reduce"|"none", '
     '"explanation": max 35 words, "caveat": max 15 words}.'
@@ -1232,8 +1234,8 @@ Question: {question}"""
         """
         if self._use_mock:
             return 0
-        jobs = [self._rescue_both(p) for p in plans if p is not None and not p.already_safe]
-        jobs += [self._stop_both(c) for c in checks if c is not None and c.needs_warning]
+        jobs = [self._rescue_both(p) for p in plans if p is not None]
+        jobs += [self._stop_both(c) for c in checks if c is not None]
         gate = asyncio.Semaphore(max(1, parallel))
 
         async def one(job: _Job) -> bool:

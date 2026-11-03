@@ -40,7 +40,7 @@ class ZhMuse(SmartMuse):
         if "rescue options" in system:
             plan = json.loads(user)
             return both({"headline": "Muse 比較了各救援方案。", "recommended_option": plan["recommended"],
-                         "trade_offs": [{"option": plan["recommended"], "summary": "Muse 偏好這個方案。", "pros": [], "cons": []}],
+                         "trade_offs": [] if plan["recommended"] == "none" else [{"option": plan["recommended"], "summary": "Muse 偏好這個方案。", "pros": [], "cons": []}],
                          "caveat": "Muse 提醒。"})
         if "stop-loss" in system:
             return both({"headline": "Muse 檢查了停損。", "explanation": "Muse 說明停損位置。", "suggested_fix": "none"})
