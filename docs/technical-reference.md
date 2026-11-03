@@ -587,8 +587,17 @@ second request, and both show the same words in the reader's language. On the da
 | Rescue recommendation (demo and live positions) | `…/rescue`, `/api/me/rescue/live` with `muse_pending` | `rescue_muse` (`scope`, `symbol`, `venue`, `explanation`) |
 | Quick reports: rescue and stop check (the first line, `💡 … · ✦ Muse`; wick and funding reports are numbers only) | `…/position-tool`, `/api/me/position-tool/live` with `muse_pending` | `report_muse` (`scope`, `tool`, `symbol`, `venue`, the full re-rendered `report`) |
 
-Events go only to the simulation hub of the user who asked (or the public demo in that language).
+Every response with `muse_pending: true` also carries a `request_id`, and ends with exactly one
+event carrying that `request_id` and the request's `lang`: Muse's text, or (if Muse fails) the
+rule text with `muse_failed: true`. Stopping or resetting the demo does not cancel it. Events go
+to the simulation hub of the user who asked; public demo events go to every public viewer
+whatever their language (the page ignores other languages and request ids it already applied).
+A viewer that connects later gets the last 5 minutes of follow-ups replayed after the snapshot.
 Without an open socket the page falls back to asking again with `wait=1`.
+
+A rescue plan for a position already beyond its target recommends `none`, and options that would
+do nothing (e.g. "add $0.00") are never recommended nor sent to Muse; Muse then only says no rescue
+is needed. A stop-loss that is fine gets a one-line confirmation.
 
 **The badge is honest.** The dashboard's Muse pill reads *Muse · live* only when the last Muse
 call produced an answer that was used; otherwise *Muse · connecting* (no call yet), *Muse ·
@@ -1008,6 +1017,8 @@ python3 -m pytest liqguard/tests/ -q
 | `test_advice.py` | Actionable advice; added margin lands exactly on the target distance |
 | `test_portfolio.py` | `/risk` portfolio aggregation and metrics |
 | `test_llm.py` | Mock mode, severity levels, one-line portfolio summary (incl. live-response validation) |
+| `test_dashboard_e2e.py` | The real dashboard and a fake Meta API on uvicorn, 3 WebSocket viewers (EN, EN, zh), 16 concurrent rescue / report requests with the demo stopped mid-flight: every announced `request_id` reaches every viewer exactly once, late viewers get it replayed, safe positions get a Muse line and never "$0.00" |
+| `test_muse_release_gate.py` | The release gate (16 concurrent requests, ≥90% live within 30 s) against a fake that spends reasoning tokens like production; EN+zh in one request; bounded warm-up; startup precompute; follow-up event names incl. failure |
 | `test_muse_api.py` | Live Muse path against a mocked HTTP layer: model / base / budget defaults and env overrides, `content: null` and `finish_reason: length` retried with a larger budget, 404 `model_not_found`, timeouts, HTTP errors, invalid JSON, `reasoning_effort` fallback, per-input cache, honest status, no key or prompt in logs |
 | `test_muse_channels.py` | Telegram and the dashboard hold the same `MuseService` (handlers, menus, monitor, every simulation, the web app); `/risk` and `/api/me/account` on one book make one summary request and show the same headline; account, rescue and quick-report text follow over the WebSocket only to the asking user; quick reports match Telegram word for word; zh-Hant follow-ups contain no English |
 | `test_muse_async.py` | Muse never blocks: demo steps, `/risk`, rescue buttons, `/ask` and monitor alerts go out with the rule-based text and are edited when Muse answers; timeouts keep the rule-based text; `/rescue?wait=1` |

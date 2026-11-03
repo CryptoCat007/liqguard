@@ -22,8 +22,9 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -178,6 +179,7 @@ def create_app(
         sim = public_sims.get(code)
         if sim is None:
             sim = public_sims[code] = public_sim.sibling(code)
+            sim.adopt_follow_ups(public_sim)
             hubs.attach(sim)
         return sim
     if ctx is not None:
@@ -278,18 +280,35 @@ def create_app(
             return shared_muse
         return sim.muse
 
-    async def rescue_body(muse: MuseService, sim: Optional[MarketSimulation], plan, position: Position, lang: str,
+    def follow_up(viewers: "MarketSimulation | Callable[[], MarketSimulation]", pending, event_type: str, build,
+                  fallback, lang: str) -> str:
+        """
+        Deliver Muse's answer to a request that returned `muse_pending: true` as
+        exactly one `event_type` event (Muse's text, or the rule text with
+        `muse_failed: true`) carrying the response's `request_id`. Public demo
+        answers reach every public viewer whatever their language (tagged
+        `lang`); late viewers get it replayed when they connect.
+        """
+        request_id = uuid.uuid4().hex[:16]
+        sim = viewers() if callable(viewers) else viewers
+        public = any(sim is s for s in public_sims.values())
+        sim.deliver_later(pending, event_type, lambda answer: {**build(answer), "request_id": request_id, "lang": lang},
+                          fallback=fallback, targets=(lambda: list(public_sims.values())) if public else None)
+        return request_id
+
+    async def rescue_body(muse: MuseService, sim: "MarketSimulation | Callable[[], MarketSimulation]", plan, position: Position, lang: str,
                           wait: bool, scope: str = "sim") -> dict:
         if wait:
             return {"plan": plan.to_dict(), "explanation": await muse.explain_rescue(plan, lang), "muse_pending": False}
         instant = muse.rescue(plan, lang)
-        if instant.pending is not None and sim is not None:
+        body = {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
+        if instant.pending is not None:
             key = {"scope": scope, "symbol": position.symbol, "venue": position.venue.value}
-            sim.deliver_later(instant.pending, "rescue_muse", lambda live: localize(lang, {**key, "explanation": live}),
-                              fallback=instant.result)
-        return {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
+            body["request_id"] = follow_up(sim, instant.pending, "rescue_muse",
+                                           lambda answer: localize(lang, {**key, "explanation": answer}), instant.result, lang)
+        return body
 
-    def quick_report(muse: Optional[MuseService], sim: Optional[MarketSimulation], tool: str, position: Position, context,
+    def quick_report(muse: Optional[MuseService], sim: "MarketSimulation | Callable[[], MarketSimulation]", tool: str, position: Position, context,
                      protection, plan, lang: str, demo: bool, scope: str = "sim") -> dict:
         """The Telegram quick report with Muse's line (rescue / stop); Muse's live line follows as `report_muse`."""
         note = muse.tool_note(tool, lang, plan=plan, check=protection.stop) if muse is not None else None
@@ -300,11 +319,12 @@ def create_app(
 
         body = render(note.result if note else None)
         pending = note is not None and note.pending is not None
-        if pending and sim is not None:
+        out = {**body, "muse_pending": pending}
+        if pending:
             key = {"scope": scope, "tool": tool, "symbol": position.symbol, "venue": position.venue.value}
-            sim.deliver_later(note.pending, "report_muse", lambda live: {**key, "report": render(live)},
-                              fallback=note.result)
-        return {**body, "muse_pending": pending}
+            out["request_id"] = follow_up(sim, note.pending, "report_muse", lambda answer: {**key, "report": render(answer)},
+                                          note.result, lang)
+        return out
 
     # ---------------------------------------------------------------- simulation routes
 
@@ -526,7 +546,7 @@ def create_app(
             if tool == "rescue":
                 plan = RescueSimulator(c.fees, user.threshold.safety_target_pct).simulate(
                     position, c.account_for(position), c.funding_for(position), c.now)
-            return JSONResponse(quick_report(ctx.muse, ctx.simulations.get(claims.user_id), tool, position, c,
+            return JSONResponse(quick_report(ctx.muse, lambda: ctx.simulations.get_or_create(claims.user_id), tool, position, c,
                                              protection, plan, normalize(user.language), demo=venue == "demo",
                                              scope="live"))
 
@@ -545,13 +565,17 @@ def create_app(
             """
             view = account_views[user_id] = account_views.get(user_id, 0) + 1
             suggestion = ctx.muse.suggestion(user, snapshot, book.insights, lang)
-            sim = ctx.simulations.get(user_id)
-            if sim is not None and book.summary.pending is not None:
-                sim.deliver_later(book.summary.pending, "account_muse",
-                                  lambda live: localize(lang, {"view": view, "summary": live}))
-            if sim is not None and suggestion is not None and suggestion.explanation.pending is not None:
-                sim.deliver_later(suggestion.explanation.pending, "account_muse",
-                                  lambda live: localize(lang, {"view": view, "suggestion": suggestion.to_dict(live)}))
+            def sim() -> MarketSimulation:
+                return ctx.simulations.get_or_create(user_id)
+
+            if book.summary.pending is not None:
+                follow_up(sim, book.summary.pending, "account_muse",
+                          lambda answer: localize(lang, {"view": view, "summary": answer}), book.summary.result, lang)
+            if suggestion is not None and suggestion.explanation.pending is not None:
+                follow_up(sim, suggestion.explanation.pending, "account_muse",
+                          lambda answer: localize(lang, {"view": view, "suggestion": suggestion.to_dict(
+                              None if answer is suggestion.explanation.result else answer)}),
+                          suggestion.explanation.result, lang)
             return {
                 "view": view,
                 "mode": ctx.muse.mode,
@@ -617,7 +641,7 @@ def create_app(
                 position, context.account_for(position), context.funding_for(position), context.now
             )
             lang = normalize(user.language)
-            body = await rescue_body(ctx.muse, ctx.simulations.get(claims.user_id), plan, position, lang,
+            body = await rescue_body(ctx.muse, lambda: ctx.simulations.get_or_create(claims.user_id), plan, position, lang,
                                      wait, scope="live")
             return JSONResponse(localize(lang, body))
 
@@ -628,8 +652,12 @@ def create_app(
         await _ensure_summary(sim)
         await websocket.send_json({"type": "snapshot", "data": localize(sim.language, sim.snapshot())})
         hub = hubs.for_simulation(sim)
+        # No await between these two: each follow-up reaches this viewer exactly once, live or replayed.
         hub.clients.add(websocket)
+        missed = sim.recent_follow_ups()
         try:
+            for event in missed:
+                await websocket.send_json(localize(sim.language, event))
             while True:
                 if await websocket.receive_text() == "ping":
                     await websocket.send_text('{"type":"pong"}')

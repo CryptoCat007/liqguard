@@ -57,6 +57,7 @@ import logging
 import math
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
@@ -109,6 +110,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MUTED_EVENTS = frozenset({"alert", "advice", "escalation"})
+FOLLOW_UP_REPLAY_SECONDS = 300.0
+FOLLOW_UP_REPLAY_EVENTS = 128
 
 EventCallback = Callable[[dict], Awaitable[None]]
 
@@ -332,6 +335,8 @@ class MarketSimulation:
         self._task: Optional[asyncio.Task] = None
         self._side_tasks: set[asyncio.Task] = set()
         self._muse_tasks: set[asyncio.Task] = set()
+        self._deliveries: set[asyncio.Task] = set()
+        self._follow_ups: "deque[tuple[float, dict]]" = deque(maxlen=FOLLOW_UP_REPLAY_EVENTS)
         self._muse_reported = self.muse_mode
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -803,11 +808,16 @@ class MarketSimulation:
         self._spawn_muse(self.refresh_summary())
         self.warm_top()
 
-    def _top_picks(self, n: int) -> tuple[tuple, tuple]:
+    def _top_picks(self, n: int, at_risk_only: bool = True) -> tuple[tuple, tuple]:
         ctx = self.risk_context()
         plans, checks = [], []
-        for item in self.insights().at_risk[:n]:
-            pos = self._position(item.symbol)
+        insights = self.insights()
+        picks = [item.symbol for item in insights.at_risk]
+        if not at_risk_only:
+            picks += [p.symbol for p in sorted(self.positions, key=lambda p: p.distance_to_liquidation_pct)
+                      if p.symbol not in picks]
+        for symbol in picks[:n]:
+            pos = self._position(symbol)
             if pos is None:
                 continue
             plans.append(self.build_rescue_plan(pos.symbol))
@@ -823,12 +833,12 @@ class MarketSimulation:
     async def precompute_top(self, n: int = 4, parallel: int = 2) -> int:
         """
         The public demo's opening book, explained ahead of its first visitors:
-        rescue and stop-loss texts (EN and zh in one answer each) for the top
-        `n` picks, `parallel` requests at a time.
+        rescue and stop-loss texts (EN and zh in one answer each) for its `n`
+        riskiest positions, safe ones included, `parallel` requests at a time.
         """
         if self.muse is None or self.muse.is_mock:
             return 0
-        return await self.muse.precompute(*self._top_picks(n), parallel=parallel)
+        return await self.muse.precompute(*self._top_picks(n, at_risk_only=False), parallel=parallel)
 
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -844,13 +854,17 @@ class MarketSimulation:
         return task
 
     def deliver_later(self, pending: Awaitable[Any], event_type: str, build: Callable[[Any], Any],
-                      fallback: Any = None) -> asyncio.Task:
+                      fallback: Any = None,
+                      targets: Optional[Callable[[], list["MarketSimulation"]]] = None) -> asyncio.Task:
         """
         Emit `build(answer)` as `event_type` once a Muse answer computed outside
         the run arrives (dashboard requests), then report Muse's status. When
         Muse fails, `build(fallback)` (the text the viewer already has) is
         emitted with `muse_failed: true`, so every pending request ends with
-        one event; without a fallback nothing is emitted.
+        one event; without a fallback nothing is emitted. `targets` (default:
+        this run) are the runs whose viewers get it, e.g. every language of the
+        public demo. Stopping or resetting the run does not cancel a delivery,
+        and late subscribers get it from `recent_follow_ups`.
         """
         async def deliver() -> None:
             try:
@@ -858,13 +872,36 @@ class MarketSimulation:
             except Exception as e:
                 logger.error("Muse follow-up failed: %s", type(e).__name__)
                 live = None
+            payload = None
             if live is not None:
-                await self._emit(event_type, build(live))
-            elif fallback is not None:
-                payload = build(fallback)
-                await self._emit(event_type, {**payload, "muse_failed": True} if isinstance(payload, dict) else payload)
-            await self._muse_settled()
-        return self._spawn_muse(deliver())
+                payload = _built(build, live)
+            if payload is None and fallback is not None:
+                payload = _built(build, fallback)
+                if isinstance(payload, dict):
+                    payload = {**payload, "muse_failed": True}
+            runs = targets() if targets is not None else [self]
+            for run in runs:
+                if payload is not None:
+                    await run.publish_follow_up(event_type, payload)
+                await run._muse_settled()
+
+        task = asyncio.create_task(deliver())
+        self._deliveries.add(task)
+        task.add_done_callback(self._deliveries.discard)
+        return task
+
+    async def publish_follow_up(self, event_type: str, payload: Any) -> None:
+        self._follow_ups.append((time.monotonic(), {"type": event_type, "data": payload}))
+        await self._emit(event_type, payload)
+
+    def adopt_follow_ups(self, other: "MarketSimulation") -> None:
+        """Start with `other`'s follow-ups (a new language run of the public demo replays what it missed)."""
+        self._follow_ups.extend(other._follow_ups)
+
+    def recent_follow_ups(self, max_age: float = FOLLOW_UP_REPLAY_SECONDS) -> list[dict]:
+        """Follow-up events of the last `max_age` seconds, oldest first (replayed to a viewer that just connected)."""
+        cutoff = time.monotonic() - max_age
+        return [event for at, event in self._follow_ups if at >= cutoff]
 
     # ------------------------------------------------------------------ control
 
@@ -932,6 +969,9 @@ class MarketSimulation:
     async def stop(self, source: str = "web") -> None:
         self.muted = self.muted or source
         await self._stop_escalation()
+        if source == "shutdown":
+            for task in list(self._deliveries):
+                task.cancel()
         if not self.is_running:
             await self.silence(source)
             return
@@ -970,8 +1010,8 @@ class MarketSimulation:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        if self._side_tasks or self._muse_tasks:
-            await asyncio.gather(*self._side_tasks, *self._muse_tasks, return_exceptions=True)
+        if self._side_tasks or self._muse_tasks or self._deliveries:
+            await asyncio.gather(*self._side_tasks, *self._muse_tasks, *self._deliveries, return_exceptions=True)
 
     def _status(self) -> dict:
         return {"state": self.state, "step": self.step, "total_steps": self.steps, "muted": bool(self.muted)}
@@ -1526,3 +1566,11 @@ class MarketSimulation:
             card["rescue_explanation"] = live_rescue
         card["recommendation"] = advice_recommendation(card)
         await self._emit("advice_update", card)
+
+
+def _built(build: Callable[[Any], Any], answer: Any) -> Any:
+    try:
+        return build(answer)
+    except Exception as e:
+        logger.error("Muse follow-up could not be rendered: %s", type(e).__name__)
+        return None

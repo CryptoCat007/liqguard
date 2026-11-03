@@ -42,7 +42,7 @@ class SmartMuse:
         if "rescue options" in system:
             plan = json.loads(user)
             return both({"headline": "Muse compares the rescue options.", "recommended_option": plan["recommended"],
-                         "trade_offs": [{"option": plan["recommended"], "summary": "Muse prefers this.", "pros": [], "cons": []}],
+                         "trade_offs": [] if plan["recommended"] == "none" else [{"option": plan["recommended"], "summary": "Muse prefers this.", "pros": [], "cons": []}],
                          "caveat": "Muse caveat."})
         if "stop-loss" in system:
             return both({"headline": "Muse reviewed the stop.", "explanation": "Muse explains the stop.", "suggested_fix": "none"})
@@ -135,7 +135,8 @@ class TestDemo:
         assert updated and updated[0]["id"] == stops[0]["id"]
         assert updated[0]["explanation"]["headline"] == "Muse reviewed the stop."
 
-    def test_web_rescue_answers_now_and_with_wait(self):
+    def test_web_rescue_answers_now_and_with_wait(self, monkeypatch):
+        monkeypatch.setattr("liqguard.web.server.PUBLIC_PRECOMPUTE_TOP", 0)
         muse = SmartMuse()
         sim = demo(live_llm(muse))
         with TestClient(create_app(demo_simulation=sim)) as c:

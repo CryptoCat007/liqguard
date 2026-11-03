@@ -274,8 +274,20 @@ function renderMuse(mode) {
   pill.dataset.mode = known;
 }
 
+const SEEN_FOLLOW_UPS = new Set();
+
+/** A Muse follow-up for another language's view, or one already applied (replayed on reconnect). */
+function skipFollowUp(data) {
+  if (!data || !data.request_id) return false;
+  if (data.lang && data.lang !== I18N.lang) return true;
+  if (SEEN_FOLLOW_UPS.has(data.request_id)) return true;
+  SEEN_FOLLOW_UPS.add(data.request_id);
+  return false;
+}
+
 function handle(msg) {
   const { type, data } = msg;
+  if (type.endsWith("_muse") && skipFollowUp(data)) return;
   switch (type) {
     case "snapshot":
     case "reset":
