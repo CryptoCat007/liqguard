@@ -47,7 +47,7 @@ def test_live_muse_wording_replaces_the_rule_text():
             "explanation": "rule text", "mock": True}
     assert advice_recommendation(card)["live"] is False
     live = advice_recommendation({**card, "explanation": "Muse says add $100.", "mock": False})
-    assert live == {"text": "Muse says add $100.", "live": True}
+    assert live == {"text": "Muse says add $100.", "live": True, "source": "muse"}
 
 
 @pytest.mark.parametrize("lang", LANGS)

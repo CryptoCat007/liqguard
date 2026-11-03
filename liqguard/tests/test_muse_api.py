@@ -100,7 +100,7 @@ class TestRequest:
         llm = client_for(fake)
         assert (await llm.summarize_portfolio(overview))["mock"] is False
         assert "reasoning_effort" in fake.requests[0] and "reasoning_effort" not in fake.requests[1]
-        overview.position_summaries[0].distance_to_liquidation_pct += 0.01
+        overview.position_summaries[0].distance_to_liquidation_pct += 1.0
         await llm.summarize_portfolio(overview)
         assert len(fake.requests) == 3 and "reasoning_effort" not in fake.requests[2]
         assert llm.mode == "live" and llm.status()["reasoning_effort"] is None
@@ -160,7 +160,7 @@ class TestFailures:
     async def test_invalid_json(self, overview):
         llm = client_for(FakeMuse((200, completion("I think BTCUSDT is risky."))))
         assert (await llm.summarize_portfolio(overview))["mock"] is True
-        assert llm.last_error == "invalid_json"
+        assert llm.last_error == "rejected: invalid_json" and llm.mode == "live"
 
     async def test_fenced_json_is_accepted(self, overview):
         fenced = "```json\n" + json.dumps({"headline": HEADLINE}) + "\n```"
@@ -173,7 +173,7 @@ class TestFailures:
         with caplog.at_level(logging.DEBUG):
             for _ in range(3):
                 await llm.summarize_portfolio(overview)
-                overview.position_summaries[0].distance_to_liquidation_pct += 0.01
+                overview.position_summaries[0].distance_to_liquidation_pct += 1.0
         assert KEY not in caplog.text and "Summarize portfolio risk" not in caplog.text
         assert "riskiest_distance_pct" not in caplog.text
 
@@ -184,17 +184,18 @@ class TestStatus:
         llm = client_for(fake)
         await llm.summarize_portfolio(overview)
         assert llm.mode == "live"
-        overview.position_summaries[0].distance_to_liquidation_pct += 0.01
+        overview.position_summaries[0].distance_to_liquidation_pct += 1.0
         await llm.summarize_portfolio(overview)
         assert llm.mode == "fallback" and llm.last_error == "http_500"
-        overview.position_summaries[0].distance_to_liquidation_pct += 0.01
+        overview.position_summaries[0].distance_to_liquidation_pct += 1.0
         await llm.summarize_portfolio(overview)
         assert llm.mode == "live" and llm.last_error is None
 
-    async def test_rejected_answer_is_not_live(self, overview):
+    async def test_rejected_answer_keeps_rule_text_but_the_api_counts_as_live(self, overview):
         llm = client_for(FakeMuse(ok("ETH looks risky")))
-        assert (await llm.summarize_portfolio(overview))["mock"] is True
-        assert llm.mode == "fallback"
+        result = await llm.summarize_portfolio(overview)
+        assert result["mock"] is True and result["source"] == "rules"
+        assert llm.mode == "live" and llm.rejected == 1 and llm.last_error.startswith("rejected")
 
     def test_mock_mode(self):
         assert MetaLLMClient(use_mock=True).mode == "mock"

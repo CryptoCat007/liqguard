@@ -240,7 +240,7 @@ class TestMuseExplanation:
         bad.pop("mock")
         mutate(bad)
         result = await live_client(json.dumps(bad)).explain_rescue(plan)
-        assert result["mock"] is True and result == mock_rescue_explanation(plan)
+        assert result["mock"] is True and result == {**mock_rescue_explanation(plan), "source": "rules"}
 
     async def test_live_garbage_falls_back(self, plan):
         assert (await live_client("not json").explain_rescue(plan))["mock"] is True

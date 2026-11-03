@@ -222,7 +222,8 @@ class TestPortfolioSummary:
         assert result["riskiest_symbol"] == "BTCUSDT"
         assert "BTCUSDT" in result["headline"]
         assert result["mock"] is True
-        assert client.mode == "fallback" and client.last_error.startswith("rejected")
+        assert result["source"] == "rules"
+        assert client.mode == "live" and client.last_error.startswith("rejected")
 
     async def test_live_headline_used_when_valid(self, overview):
         from unittest.mock import AsyncMock, MagicMock

@@ -128,7 +128,8 @@ class TestOneService:
             async with signed_in(web_client(create_app(ctx)), ctx, ALICE) as web:
                 first = (await web.get("/api/me/account")).json()["muse"]
                 assert first["summary"]["mock"] is True and first["summary_pending"] is True
-                assert reply.text.startswith(f"💡 {first['summary']['headline']} · ✦ Muse (mock)")
+                assert first["summary"]["source"] == "rules"
+                assert reply.text.startswith(f"💡 {first['summary']['headline']}\n")
 
                 gate.set()
                 live = await reply.pending
@@ -202,7 +203,8 @@ class TestWebSocketFollowUps:
     async def test_quick_reports_carry_muse_line_and_follow_over_the_socket(self, live):
         report = (await live.web.get("/api/me/position-tool/live?symbol=BTCUSDT&venue=demo&tool=rescue")).json()
         assert report["muse_pending"] is True
-        assert report["muse"]["mock"] is True and report["lines"][0].startswith("💡 ") and report["lines"][0].endswith(" · ✦ Muse (mock)")
+        assert report["muse"]["mock"] is True and report["muse"]["source"] == "rules"
+        assert report["lines"][0].startswith("💡 ") and "✦ Muse" not in report["lines"][0]
         wick = (await live.web.get("/api/me/position-tool/live?symbol=BTCUSDT&venue=demo&tool=wick")).json()
         assert wick["muse_pending"] is False and not any("✦ Muse" in line for line in wick["lines"])
 
@@ -244,7 +246,7 @@ class TestWebSocketFollowUps:
         cb.data = ui.codec.encode(ALICE, "pr", "demo", "BTCUSDT")
         await asyncio.wait_for(ui.router.handle(cb), 5)
         first = cb.message.edit_text.await_args
-        assert "· ✦ Muse (mock)" in first.args[0]
+        assert "💡 " in first.args[0] and "✦ Muse" not in first.args[0]
         live.gate.set()
         assert await until(lambda: cb.message.edit_text.await_count == 2)
         edited = cb.message.edit_text.await_args
@@ -301,7 +303,7 @@ async def test_zh_follow_ups_reach_the_browser_in_chinese(settings):
                 seen = _receive_until(ws, expected)
             assert expected <= seen.keys(), seen.keys()
             assert account["muse"]["summary"]["headline"] and rescue["explanation"]
-            assert report["lines"][0].startswith("💡 ") and "· ✦ Muse" in report["lines"][0]
+            assert report["lines"][0].startswith("💡 ") and "模擬" not in report["lines"][0]
             leftovers = [hit for part in (account, rescue, report, *seen.values()) for hit in english_in(part)]
             assert not leftovers, leftovers[:10]
             assert any(e["data"].get("summary", {}).get("headline", "").startswith("Muse：") for e in seen.values()

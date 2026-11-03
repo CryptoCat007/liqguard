@@ -176,7 +176,8 @@ class TestTelegram:
         message = fake_message(ALICE, "/risk")
         await asyncio.wait_for(handlers.cmd_risk(message), 2)
         text = message.answer.call_args.args[0]
-        assert text.startswith("💡 ") and text.split("\n")[0].endswith("· ✦ Muse (mock)")
+        # A key is configured: the rule text goes out untagged (not "mock") until Muse's wording replaces it.
+        assert text.startswith("💡 ") and "✦ Muse" not in text.split("\n")[0]
         sent = message.answer.return_value
         sent.edit_text.assert_not_called()
         gate.set()
@@ -189,7 +190,7 @@ class TestTelegram:
         await self.demo_user(ctx, handlers)
         cb = fake_callback(ALICE, "rescue:sim:BTCUSDT")
         await asyncio.wait_for(handlers.callback_rescue(cb), 2)
-        assert "Muse (mock)" in cb.message.answer.call_args.args[0]
+        assert "💡 " in cb.message.answer.call_args.args[0] and "Muse (mock)" not in cb.message.answer.call_args.args[0]
         gate.set()
         sent = cb.message.answer.return_value
         assert await until(lambda: sent.edit_text.await_count == 1)
