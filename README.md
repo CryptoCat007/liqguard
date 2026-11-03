@@ -88,8 +88,9 @@ Muse never holds up a message:
 2. **Edited in place.** When Muse answers, Telegram edits the same message, and the dashboard
    swaps the text from the WebSocket events `advice_update`, `account_muse`, `rescue_muse` and
    `report_muse`. The tag becomes `✦ Muse`.
-3. **Bounded.** Each answer has a 15 s budget (`META_TIMEOUT`), including one retry with a larger
-   token budget (`muse-spark-1.3` reasons before answering). If Muse fails or times out, the
+3. **Bounded.** Each attempt has 25 s (`META_TIMEOUT`) once it holds one of 6 request slots
+   (`META_CONCURRENCY`). Short explanations ask for `minimal` reasoning with a 5000-token budget, so
+   `muse-spark-1.3` rarely needs its one retry. If Muse fails or times out, the
    rule-based text stays. Failures include HTTP errors, empty or truncated answers, invalid JSON
    and answers that fail validation.
 4. **Cached.** Validated answers are cached per input (portfolio snapshot, rescue plan, stop check)

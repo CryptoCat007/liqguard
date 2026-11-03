@@ -38,7 +38,8 @@ META_API_KEY=                                    # optional; Muse runs in mock m
 
 With `META_API_KEY` set, Muse uses `muse-spark-1.3` by default. If the logs say `model_not_found`,
 set `META_MODEL` to a model `GET https://api.meta.ai/v1/models` lists. `META_API_BASE`,
-`META_MAX_TOKENS` (2000), `META_TIMEOUT` (15 s) and `META_REASONING_EFFORT` (`low`) are optional;
+`META_MAX_TOKENS` (5000), `META_TIMEOUT` (25 s per attempt), `META_CONCURRENCY` (6),
+`META_REASONING_EFFORT` (`low`) and `META_SHORT_REASONING_EFFORT` (`minimal`) are optional;
 see the README's environment table. Startup logs one `Muse: live API · model … at …` line (never the key).
 
 Never commit `.env`. `docker-compose.yml` pins the data paths, bind address and port, so the

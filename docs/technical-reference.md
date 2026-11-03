@@ -496,8 +496,8 @@ There is no second Muse block further down.
    `BotHandlers._muse_followup`). The dashboard replaces the card from the WebSocket events
    `advice_update`, `account_muse`, `rescue_muse` and `report_muse`. The `✦ Muse (mock)` tag then
    becomes `✦ Muse`.
-3. **Bounded.** Each answer gets 15 s (`META_TIMEOUT`), including one retry with a larger token
-   budget. Any HTTP error, timeout, empty or `length`-truncated answer, invalid JSON, or validation
+3. **Bounded.** Each attempt gets 25 s (`META_TIMEOUT`), counted once the request holds one of
+   6 slots (`META_CONCURRENCY`); a `length`-truncated attempt is retried once with a larger budget. Any HTTP error, timeout, empty or `length`-truncated answer, invalid JSON, or validation
    failure (wrong symbol, an amount not in the plan, an unknown fix) keeps the rule-based text.
 4. **Cached and shared.** Validated answers are cached per input (portfolio snapshot, rescue plan,
    stop check) for 10 minutes, and concurrent callers share one request. Telegram and the
@@ -547,16 +547,25 @@ client.is_mock  # True when running without API key
 
 With `META_API_KEY` set, LiqGuard calls `muse-spark-1.3` at `https://api.meta.ai/v1`
 (`META_MODEL` / `META_API_BASE` override both). That model reasons before it answers and spends
-roughly 900-1200 tokens doing so, so a small `max_tokens` ends with `finish_reason: "length"` and
-`content: null`. The client therefore:
+up to ~2000 tokens doing so at `low` effort; reasoning counts against `max_tokens`, so a small budget
+ends with `finish_reason: "length"` and `content: null`. The client therefore:
 
-- asks with `max_tokens` 2000 (`META_MAX_TOKENS`) and `reasoning_effort` `low`; if the API
-  rejects `reasoning_effort` with a 400 that names it, it is dropped for the rest of the process;
-- treats `content: null` or `finish_reason: "length"` as a failure, retries once with double the
-  budget, then falls back to the deterministic text;
+- asks with `max_tokens` 5000 (`META_MAX_TOKENS`). Short explanations (rescue, stop-loss, summary,
+  advice, risk) send `reasoning_effort` `minimal` (`META_SHORT_REASONING_EFFORT`), everything else
+  `low` (`META_REASONING_EFFORT`). Muse Spark always reasons, so `none` is an HTTP 400 there and
+  LiqGuard never sends it. A 400 naming a refused value steps back to the default effort; a 400
+  saying the parameter is unsupported drops it for the rest of the process;
+- treats `content: null` or `finish_reason: "length"` as a failure, retries once with a larger
+  budget (8000), then falls back to the deterministic text;
 - treats a 404 (`model_not_found`), any other HTTP error, a connection error, invalid JSON or an
   answer that fails validation (wrong symbol, an amount not in the plan, an unknown fix) the same way;
-- gives each answer 15 s (`META_TIMEOUT`), retry included; the SDK's own retries are off;
+- runs at most 6 requests at once (`META_CONCURRENCY`) and gives each attempt 25 s (`META_TIMEOUT`)
+  from the moment it holds a slot; waiting for a slot is off the clock (given up after 60 s). The
+  SDK's own retries are off;
+- asks once per rescue plan or stop check for English and Traditional Chinese together, so every
+  viewer and surface of the same position shares one request (each language is validated on its
+  own). Background warm-ups (triage's top picks, the public demo's opening book at startup) use at
+  most half the slots and ask about one position at most once a minute;
 - logs the call kind, model, finish reason and reasoning tokens, never the key or the prompt.
 
 **Muse never holds up a message.** `/risk`, rescue buttons, `/ask`, tier and stop-loss alerts,
@@ -1064,9 +1073,11 @@ process: look for a second bot instance polling the same token.
 | `META_API_KEY` | No | Meta AI API key (Muse runs in deterministic mock mode if unset) |
 | `META_MODEL` | No | Model name (default: `muse-spark-1.3`; must be one `GET /v1/models` lists) |
 | `META_API_BASE` | No | OpenAI-compatible base URL (default: `https://api.meta.ai/v1`) |
-| `META_MAX_TOKENS` | No | Completion budget per Muse call, reasoning included (default: 2000) |
-| `META_TIMEOUT` | No | Seconds Muse gets per answer, retry included, before the rule-based text stays (default: 15) |
-| `META_REASONING_EFFORT` | No | `low` / `medium` / `high`, sent only while the API accepts it; `none` disables it (default: `low`) |
+| `META_MAX_TOKENS` | No | Completion budget per Muse call, reasoning included (default: 5000) |
+| `META_TIMEOUT` | No | Seconds per attempt, counted once a request slot is free (default: 25) |
+| `META_CONCURRENCY` | No | Muse requests in flight at once; the rest queue off the clock (default: 6) |
+| `META_REASONING_EFFORT` | No | `minimal` / `low` / `medium` / `high`, sent only while the API accepts it; `none` sends nothing (default: `low`) |
+| `META_SHORT_REASONING_EFFORT` | No | Effort for rescue, stop-loss, summary, advice and risk texts (default: `minimal`) |
 | `LIQGUARD_MASTER_KEY` | Recommended | Master key(s), comma-separated for rotation. Legacy name `LIQGUARD_ENCRYPTION_KEY` still works |
 | `LIQGUARD_DATA_DIR` | No | One directory for all state; the three paths below default into it (`liqguard.db`, `encryption.key`, `audit.log`). The Docker image sets `/data` |
 | `LIQGUARD_KEY_FILE` | No | Key file used when no env key is set (default `$LIQGUARD_DATA_DIR/encryption.key`, else `~/.liqguard/encryption.key`; created mode 600 on first boot) |
