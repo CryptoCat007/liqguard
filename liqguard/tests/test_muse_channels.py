@@ -27,7 +27,7 @@ from liqguard.web import create_app
 from liqguard.web.auth import SESSION_COOKIE
 
 from .conftest import ALICE, BOB, until
-from .test_muse_async import SmartMuse, live_llm
+from .test_muse_async import SmartMuse, both, live_llm
 from .zh_scan import english_in
 
 SUMMARY = "Summarize portfolio"
@@ -39,11 +39,11 @@ class ZhMuse(SmartMuse):
     def answer(self, system: str, user: str):
         if "rescue options" in system:
             plan = json.loads(user)
-            return {"headline": "Muse 比較了各救援方案。", "recommended_option": plan["recommended"],
-                    "trade_offs": [{"option": plan["recommended"], "summary": "Muse 偏好這個方案。", "pros": [], "cons": []}],
-                    "caveat": "Muse 提醒。"}
+            return both({"headline": "Muse 比較了各救援方案。", "recommended_option": plan["recommended"],
+                         "trade_offs": [{"option": plan["recommended"], "summary": "Muse 偏好這個方案。", "pros": [], "cons": []}],
+                         "caveat": "Muse 提醒。"})
         if "stop-loss" in system:
-            return {"headline": "Muse 檢查了停損。", "explanation": "Muse 說明停損位置。", "suggested_fix": "none"}
+            return both({"headline": "Muse 檢查了停損。", "explanation": "Muse 說明停損位置。", "suggested_fix": "none"})
         if SUMMARY in system or "總結投資組合" in system:
             return {"headline": f"Muse：{json.loads(user)['riskiest_symbol']} 風險最高。"}
         if "Explain risk" in system or "解釋風險" in system:

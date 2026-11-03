@@ -24,6 +24,11 @@ from .conftest import ALICE, fake_callback, fake_message, until
 from .test_muse_api import completion
 
 
+def both(answer: dict, zh: dict = None) -> dict:
+    """Rescue and stop-loss answers come in English and Traditional Chinese at once."""
+    return {"en": answer, "zh-Hant": zh or answer}
+
+
 class SmartMuse:
     """A valid answer for every prompt LiqGuard sends, held back until `gate` opens."""
 
@@ -36,11 +41,11 @@ class SmartMuse:
     def answer(self, system: str, user: str):
         if "rescue options" in system:
             plan = json.loads(user)
-            return {"headline": "Muse compares the rescue options.", "recommended_option": plan["recommended"],
-                    "trade_offs": [{"option": plan["recommended"], "summary": "Muse prefers this.", "pros": [], "cons": []}],
-                    "caveat": "Muse caveat."}
+            return both({"headline": "Muse compares the rescue options.", "recommended_option": plan["recommended"],
+                         "trade_offs": [{"option": plan["recommended"], "summary": "Muse prefers this.", "pros": [], "cons": []}],
+                         "caveat": "Muse caveat."})
         if "stop-loss" in system:
-            return {"headline": "Muse reviewed the stop.", "explanation": "Muse explains the stop.", "suggested_fix": "none"}
+            return both({"headline": "Muse reviewed the stop.", "explanation": "Muse explains the stop.", "suggested_fix": "none"})
         if "Summarize portfolio" in system or "總結投資組合" in system:
             return {"headline": f"Muse: {json.loads(user)['riskiest_symbol']} leads the risk."}
         if "Explain risk" in system or "解釋風險" in system:

@@ -146,6 +146,10 @@ class MuseService:
             if check is not None:
                 self.llm.warm_stop(check, language)
 
+    async def precompute(self, plans: tuple = (), checks: tuple = (), parallel: int = 2) -> int:
+        """Like `warm`, but awaited and at most `parallel` requests at a time (the public demo at startup)."""
+        return await self.llm.precompute(plans, checks, parallel)
+
     # ------------------------------------------------------------------ portfolio
 
     def portfolio(self, user: User, snapshot: BookSnapshot, language: Optional[str] = None) -> PortfolioMuse:

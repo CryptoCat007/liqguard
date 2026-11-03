@@ -78,10 +78,12 @@ class TestRequest:
         result = await llm.summarize_portfolio(overview)
         assert result["headline"] == HEADLINE and result["mock"] is False
         body = fake.requests[0]
-        assert body["model"] == "muse-spark-1.3" and body["max_tokens"] == DEFAULT_MAX_TOKENS == 2000
-        assert body["reasoning_effort"] == "low" and body["response_format"] == {"type": "json_object"}
+        assert body["model"] == "muse-spark-1.3" and body["max_tokens"] == DEFAULT_MAX_TOKENS == 5000
+        assert body["reasoning_effort"] == "minimal" and body["response_format"] == {"type": "json_object"}
         assert fake.urls[0] == "https://api.meta.ai/v1/chat/completions"
         assert llm.mode == "live" and llm.status()["reasoning_effort"] == "low"
+        assert llm.status()["short_reasoning_effort"] == "minimal"
+        assert llm.timeout == 25.0 and llm.concurrency == 6
 
     async def test_env_overrides(self, overview, monkeypatch):
         monkeypatch.setenv("META_MODEL", "muse-spark-1.2")
@@ -105,6 +107,17 @@ class TestRequest:
         assert len(fake.requests) == 3 and "reasoning_effort" not in fake.requests[2]
         assert llm.mode == "live" and llm.status()["reasoning_effort"] is None
 
+    async def test_refused_minimal_effort_steps_back_to_the_default(self, overview):
+        error = {"error": {"message": "reasoning_effort 'minimal' is not supported for this model", "type": "invalid_request_error"}}
+        fake = FakeMuse((400, error), ok(), ok("BTCUSDT still leads the risk."))
+        llm = client_for(fake)
+        assert (await llm.summarize_portfolio(overview))["mock"] is False
+        assert [r.get("reasoning_effort") for r in fake.requests] == ["minimal", "low"]
+        overview.position_summaries[0].distance_to_liquidation_pct += 1.0
+        await llm.summarize_portfolio(overview)
+        assert fake.requests[2]["reasoning_effort"] == "low"
+        assert llm.status()["reasoning_effort"] == "low" and llm.status()["short_reasoning_effort"] == "low"
+
     async def test_other_400_is_a_clean_failure(self, overview):
         fake = FakeMuse((400, {"error": {"message": "bad messages"}}))
         llm = client_for(fake)
@@ -119,7 +132,7 @@ class TestFailures:
         llm = client_for(fake)
         result = await llm.summarize_portfolio(overview)
         assert result["headline"] == HEADLINE and result["mock"] is False
-        assert [r["max_tokens"] for r in fake.requests] == [2000, 4000]
+        assert [r["max_tokens"] for r in fake.requests] == [5000, 8000]
         assert llm.mode == "live"
 
     async def test_null_content_twice_falls_back_to_deterministic_text(self, overview, caplog):
