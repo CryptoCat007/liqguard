@@ -129,54 +129,6 @@ POSITION_EXTRACT_SCHEMA = {
 }
 
 
-RISK_ANALYSIS_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_position_risk_metrics",
-            "description": "Get pre-calculated risk metrics for a position. Always call this first.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "symbol": {"type": "string", "description": "Position symbol"}
-                },
-                "required": ["symbol"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_margin_advice",
-            "description": "Get exact margin amount needed to reach safety target",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "symbol": {"type": "string"},
-                    "target_distance_pct": {"type": "number", "description": "Target distance from liquidation (default 30)"}
-                },
-                "required": ["symbol"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_reduction_advice",
-            "description": "Get exact position reduction needed to reach safety target",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "symbol": {"type": "string"},
-                    "target_distance_pct": {"type": "number"}
-                },
-                "required": ["symbol"]
-            }
-        }
-    },
-]
-
-
 class MetaLLMClient:
     """
     Client for Meta AI's LLM API (Muse Spark).
@@ -185,7 +137,7 @@ class MetaLLMClient:
     so demo and tests work without credentials.
 
     Features:
-    - Tool calling for risk calculations (numbers computed deterministically)
+    - Numbers computed deterministically; Muse only words them, and answers are validated
     - Structured output for risk assessments
     - Plain-language explanations in English and Traditional Chinese
     - Image understanding for screenshot parsing
