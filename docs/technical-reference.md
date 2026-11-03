@@ -58,7 +58,7 @@ Try it with `/demo` → **🎬 5 longs, one wallet**, or pick that scenario on t
 
 ```bash
 # Clone the repository
-git clone <this repo> liqguard
+git clone https://github.com/CryptoCat007/liqguard.git liqguard
 cd liqguard
 
 # Install dependencies

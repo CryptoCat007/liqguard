@@ -169,7 +169,7 @@ owner's Telegram id, and `test_isolation.py` checks each kind with two users.
 Requires Python 3.11+.
 
 ```bash
-git clone <this repo> liqguard && cd liqguard
+git clone https://github.com/CryptoCat007/liqguard.git liqguard && cd liqguard
 pip install -e ".[dev]"
 cp .env.example .env        # placeholders only; fill in TELEGRAM_BOT_TOKEN, optionally META_API_KEY
 liqguard                    # bot + monitor; add LIQGUARD_DASHBOARD=true for the dashboard
