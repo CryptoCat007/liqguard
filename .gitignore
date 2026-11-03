@@ -52,6 +52,8 @@ coverage.xml
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -77,6 +79,7 @@ venv.bak/
 # Secrets (never commit these!)
 *.pem
 *.key
+*.fernet
 secrets.json
 
 # OS
@@ -86,4 +89,4 @@ Thumbs.db
 # Project specific
 liqguard.db
 uploads/
-/data/
+data/
