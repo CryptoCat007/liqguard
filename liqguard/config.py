@@ -78,6 +78,16 @@ class Settings:
     risk_per_trade_pct: float = 2.0
     max_margin_pct: float = 25.0
 
+    # PayPal Subscriptions (sandbox by default)
+    paypal_client_id: Optional[str] = field(default=None, repr=False)
+    paypal_client_secret: Optional[str] = field(default=None, repr=False)
+    paypal_webhook_id: Optional[str] = None
+    paypal_env: str = "sandbox"
+    paypal_plan_id: Optional[str] = None
+
+    # Pro tier settings
+    pro_poll_interval: int = 10  # faster polling for Pro users
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
         data_dir = _path(env.get("LIQGUARD_DATA_DIR"))
@@ -113,6 +123,12 @@ class Settings:
             escalation_max_reminders=max(1, _int(env.get("LIQGUARD_ESCALATION_MAX_REMINDERS"), 5)),
             risk_per_trade_pct=min(max(_float(env.get("LIQGUARD_RISK_PER_TRADE_PCT"), 2.0), 0.1), 20.0),
             max_margin_pct=min(max(_float(env.get("LIQGUARD_MAX_MARGIN_PCT"), 25.0), 1.0), 100.0),
+            paypal_client_id=env.get("PAYPAL_CLIENT_ID") or None,
+            paypal_client_secret=env.get("PAYPAL_CLIENT_SECRET") or None,
+            paypal_webhook_id=env.get("PAYPAL_WEBHOOK_ID") or None,
+            paypal_env=env.get("PAYPAL_ENV", "sandbox").lower(),
+            paypal_plan_id=env.get("PAYPAL_PLAN_ID") or None,
+            pro_poll_interval=max(5, _int(env.get("LIQGUARD_PRO_POLL_INTERVAL"), 10)),
         )
 
     def default_threshold(self) -> UserThreshold:
@@ -150,3 +166,15 @@ class Settings:
     @property
     def secure_cookies(self) -> bool:
         return self.dashboard_url.startswith("https://")
+
+    @property
+    def paypal_enabled(self) -> bool:
+        """PayPal integration is available when credentials are configured."""
+        return bool(self.paypal_client_id and self.paypal_client_secret)
+
+    @property
+    def paypal_api_base(self) -> str:
+        """PayPal API endpoint based on environment."""
+        if self.paypal_env == "live":
+            return "https://api-m.paypal.com"
+        return "https://api-m.sandbox.paypal.com"

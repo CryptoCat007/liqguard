@@ -54,6 +54,7 @@ SAMPLE_ARGS = {
     "by": ("hyperliquid", "mainnet"), "ds": ("cross_longs",), "aa": ("AbCdEf123_-x",), "az": ("AbCdEf123_-x",),
     "ro": (), "sc": (), "ac": (), "ak": ("on",), "ay": ("pa_0123456789ab",), "an": ("pa_0123456789ab",),
     "qa": (), "qq": ("first",),
+    "pu": (), "pm": (), "rp": (), "px": ("auto",),
 }
 
 
@@ -185,12 +186,20 @@ def all_keyboards(T: Translator, sign: Signer) -> list:
         kb.demo_started(T, sign),
         kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x"),
         kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x", demo=True),
+        kb.alert_keyboard(T, sign, "sim", "BTCUSDT", "AbCdEf123_-x", agent=True),
+        kb.agent_checkout(T, sign),
+        kb.agent_checkout(T, sign, "https://www.sandbox.paypal.com/checkoutnow?token=x", "rescue"),
         kb.risk_overview(T, sign, ("sim", "BTCUSDT")),
         kb.stop_list(T, sign, [("sim", "BTCUSDT", "🛑 BTCUSDT")]),
         kb.account(T, sign, [("pa_0123456789ab", "89ab")], kill_active=False),
         kb.account(T, sign, [], kill_active=True),
         kb.ask_menu(T, sign, ("risk", "first", "pnl")),
         kb.ask_answer(T, sign),
+        kb.pro_upgrade(T, sign),
+        kb.pro_upgrade(T, sign, "https://www.sandbox.paypal.com/checkoutnow?token=x", manage=True),
+        kb.pro_manage(T, sign),
+        kb.rescue_pass(T, sign),
+        kb.rescue_with_upgrade(T, sign, "sim", "BTCUSDT", show_upgrade=True),
     ]
 
 
@@ -386,8 +395,12 @@ class TestKeyboards:
 
     def test_dashboard_url_button_only_for_https(self):
         T = Translator(EN)
-        assert labels(kb.dashboard(T, self.sign, "http://localhost/x")) == [T("kb.back_menu")]
-        assert labels(kb.dashboard(T, self.sign, "https://x.test/y"))[0] == T("kb.open_dashboard")
+        assert labels(kb.dashboard(T, self.sign, "http://localhost/x")) == [
+            T("pro.kb.upgrade"), T("pro.kb.agent"), T("kb.back_menu"),
+        ]
+        https_labels = labels(kb.dashboard(T, self.sign, "https://x.test/y"))
+        assert https_labels[0] == T("kb.open_dashboard")
+        assert T("pro.kb.upgrade") in https_labels
 
     def test_chinese_labels_are_traditional_and_english_labels_have_no_chinese(self):
         simplified = set("险仓设绑帐户启关闭页种发误确认损费详")
@@ -767,12 +780,13 @@ class TestDemoClickThrough:
 
         await click(ui, ALICE, ui.signer(ALICE)("ds", "critical"), state)
         visited, seen = await crawl(ui, ALICE, menu, state)
-        expected = set(ACTIONS) - {"do", "dx", "by", "bb", "bh", "bc", "db", "bx", "aa", "az", "ls", "ay", "an"}
+        expected = set(ACTIONS) - {"do", "dx", "by", "bb", "bh", "bc", "db", "bx", "aa", "az", "ls", "ay", "an",
+                                   "pu", "pm", "rp"}
         assert expected <= visited, expected - visited
         tools = {(a, args) for a, args in seen if a in ("pr", "pw", "ps", "pf")}
         assert {args for _, args in tools} >= {("demo", s) for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT")}
 
-        for action in ("db", "bb", "bh", "bc"):
+        for action in ("db", "bb", "bh", "bc", "pu", "pm", "rp"):
             cb, handled = await click(ui, ALICE, ui.signer(ALICE)(action), state)
             assert handled == action and toast(cb)[0] != T(ERROR)
 

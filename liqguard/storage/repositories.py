@@ -310,6 +310,217 @@ class SqliteAuditSink:
             )
 
 
+class SubscriptionRepository:
+    """PayPal subscription storage for Pro tier."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def get_active_subscription(self, telegram_id: int) -> Optional[dict]:
+        """Get the user's active subscription, if any."""
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT * FROM subscriptions WHERE telegram_id = ? AND status = 'ACTIVE' ORDER BY id DESC LIMIT 1",
+                (telegram_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    async def get_user_by_subscription(self, subscription_id: str) -> Optional[int]:
+        """Get telegram_id by subscription_id."""
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT telegram_id FROM subscriptions WHERE subscription_id = ?",
+                (subscription_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        return row["telegram_id"] if row else None
+
+    async def get_user_by_custom_id(self, custom_id: str) -> Optional[int]:
+        """Get telegram_id from custom_id (stored temporarily in pending state)."""
+        try:
+            return int(custom_id)
+        except (ValueError, TypeError):
+            return None
+
+    async def save_subscription(
+        self,
+        telegram_id: int,
+        subscription_id: str,
+        plan_id: str,
+        status: str,
+        payer_email: Optional[str] = None,
+        activated_at: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Save or update a subscription."""
+        now = _now().isoformat()
+        async with self.db.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO subscriptions (telegram_id, subscription_id, plan_id, status, payer_email, activated_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(subscription_id) DO UPDATE SET
+                    status = excluded.status,
+                    payer_email = COALESCE(excluded.payer_email, payer_email),
+                    activated_at = COALESCE(excluded.activated_at, activated_at),
+                    updated_at = excluded.updated_at
+                """,
+                (telegram_id, subscription_id, plan_id, status, payer_email, activated_at, now, now),
+            )
+            await conn.commit()
+
+    async def update_subscription_status(self, subscription_id: str, status: str) -> None:
+        """Update subscription status."""
+        now = _now().isoformat()
+        cancelled_at = now if status == "CANCELLED" else None
+        async with self.db.connect() as conn:
+            if cancelled_at:
+                await conn.execute(
+                    "UPDATE subscriptions SET status = ?, cancelled_at = ?, updated_at = ? WHERE subscription_id = ?",
+                    (status, cancelled_at, now, subscription_id),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE subscriptions SET status = ?, updated_at = ? WHERE subscription_id = ?",
+                    (status, now, subscription_id),
+                )
+            await conn.commit()
+
+    async def list_for_user(self, telegram_id: int) -> list[dict]:
+        """List all subscriptions for a user."""
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT * FROM subscriptions WHERE telegram_id = ? ORDER BY id DESC",
+                (telegram_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+class RescuePassRepository:
+    """One-time Rescue Pass storage."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def get_passes(self, telegram_id: int) -> int:
+        """Get remaining Rescue Passes for a user."""
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT remaining FROM rescue_passes WHERE telegram_id = ?",
+                (telegram_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        return row["remaining"] if row else 0
+
+    async def add_passes(self, telegram_id: int, count: int) -> None:
+        """Add Rescue Passes to user account."""
+        now = _now().isoformat()
+        async with self.db.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO rescue_passes (telegram_id, remaining, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET
+                    remaining = remaining + excluded.remaining,
+                    updated_at = excluded.updated_at
+                """,
+                (telegram_id, count, now),
+            )
+            await conn.commit()
+
+    async def use_pass(self, telegram_id: int) -> bool:
+        """Use one Rescue Pass. Returns True if successful."""
+        now = _now().isoformat()
+        async with self.db.connect() as conn:
+            cur = await conn.execute(
+                "UPDATE rescue_passes SET remaining = remaining - 1, updated_at = ? WHERE telegram_id = ? AND remaining > 0",
+                (now, telegram_id),
+            )
+            await conn.commit()
+            return cur.rowcount > 0
+
+
+class PaymentEventRepository:
+    """Webhook event idempotency tracking."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def has_event(self, event_id: str) -> bool:
+        """Check if event has already been processed."""
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT 1 FROM payment_events WHERE event_id = ?",
+                (event_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        return row is not None
+
+    async def save_event(
+        self,
+        event_id: str,
+        event_type: str,
+        resource_id: str,
+        telegram_id: Optional[int],
+        payload: dict,
+    ) -> None:
+        """Store processed event."""
+        now = _now().isoformat()
+        async with self.db.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO payment_events (event_id, event_type, resource_id, telegram_id, payload_json, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, event_type, resource_id, telegram_id, json.dumps(payload), now),
+            )
+            await conn.commit()
+
+
+class AgentActionRepository:
+    """Log of Muse / rules PayPal agent tool calls (no secrets, no model-chosen amounts)."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def save(
+        self,
+        telegram_id: int,
+        *,
+        tool: Optional[str],
+        product: Optional[str],
+        source: str,
+        resource_id: Optional[str],
+        approve_url: Optional[str],
+        status: str,
+        message: str = "",
+    ) -> None:
+        now = _now().isoformat()
+        async with self.db.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_actions
+                    (telegram_id, tool, product, source, resource_id, approve_url, status, message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (telegram_id, tool, product, source, resource_id, approve_url, status, message, now),
+            )
+            await conn.commit()
+
+    async def list_for_user(self, telegram_id: int, limit: int = 20) -> list[dict]:
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT * FROM agent_actions WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+                (telegram_id, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
 class LoginTokenRepository:
     """One-time dashboard login tokens. Only SHA-256 hashes are stored."""
 

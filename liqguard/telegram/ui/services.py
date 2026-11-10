@@ -219,3 +219,113 @@ class UIServices:
             return None
         token = await self.ctx.login_links.create(user_id)
         return self.ctx.dashboard_login_url(token, lang), max(1, self.ctx.settings.login_link_ttl // 60)
+
+    def paypal_enabled(self) -> bool:
+        return bool(self.ctx.settings.paypal_enabled)
+
+    def paypal_client(self):
+        settings = self.ctx.settings
+        if not settings.paypal_enabled:
+            return None
+        from liqguard.payments import PayPalClient
+
+        return PayPalClient(
+            settings.paypal_client_id, settings.paypal_client_secret,
+            settings.paypal_api_base, settings.paypal_webhook_id,
+        )
+
+    async def billing_status(self, user_id: int):
+        entitlements = self.ctx.entitlements
+        if entitlements is None:
+            from liqguard.payments import ProStatus
+            return ProStatus.free()
+        return await entitlements.get_status(user_id)
+
+    async def create_pro_checkout(self, user_id: int) -> Optional[str]:
+        """PayPal approve URL for a Pro subscription, or None if billing is off / plan missing."""
+        settings = self.ctx.settings
+        if not settings.paypal_enabled or not settings.paypal_plan_id:
+            return None
+        from liqguard.payments import PayPalClient, PayPalError
+
+        client = PayPalClient(
+            settings.paypal_client_id, settings.paypal_client_secret,
+            settings.paypal_api_base, settings.paypal_webhook_id,
+        )
+        return_url = f"{settings.dashboard_url}/api/me/billing/return"
+        cancel_url = f"{settings.dashboard_url}/me"
+        try:
+            result = await client.create_subscription(
+                plan_id=settings.paypal_plan_id,
+                return_url=return_url,
+                cancel_url=cancel_url,
+                custom_id=str(user_id),
+            )
+            await self.ctx.storage.save_subscription(
+                user_id, result["subscription_id"], settings.paypal_plan_id, "PENDING",
+            )
+            return result.get("approve_url")
+        except PayPalError:
+            return None
+
+    async def create_rescue_pass_checkout(self, user_id: int) -> Optional[str]:
+        settings = self.ctx.settings
+        if not settings.paypal_enabled:
+            return None
+        from liqguard.payments import PayPalClient, PayPalError
+
+        client = PayPalClient(
+            settings.paypal_client_id, settings.paypal_client_secret,
+            settings.paypal_api_base, settings.paypal_webhook_id,
+        )
+        try:
+            result = await client.create_order(
+                amount_usd="2.99",
+                description="LiqGuard Rescue Pass",
+                return_url=f"{settings.dashboard_url}/api/me/billing/rescue-return",
+                cancel_url=f"{settings.dashboard_url}/me",
+                custom_id=str(user_id),
+            )
+            return result.get("approve_url")
+        except PayPalError:
+            return None
+
+    async def cancel_pro(self, user_id: int) -> bool:
+        settings = self.ctx.settings
+        entitlements = self.ctx.entitlements
+        if not settings.paypal_enabled or entitlements is None:
+            return False
+        status = await entitlements.get_status(user_id)
+        if not status.subscription_id:
+            return False
+        from liqguard.payments import PayPalClient
+
+        client = PayPalClient(
+            settings.paypal_client_id, settings.paypal_client_secret,
+            settings.paypal_api_base, settings.paypal_webhook_id,
+        )
+        ok = await client.cancel_subscription(status.subscription_id, "User requested")
+        if ok:
+            await self.ctx.storage.update_subscription_status(status.subscription_id, "CANCELLED")
+        return ok
+
+    async def agent_checkout(self, user_id: int, text: str, lang: str, product: Optional[str] = None,
+                             default_product: Optional[str] = None):
+        from liqguard.payments.agent import run_checkout
+
+        settings = self.ctx.settings
+        return await run_checkout(
+            self.paypal_client(), self.ctx.llm,
+            user_id=user_id, text=text, lang=lang,
+            plan_id=settings.paypal_plan_id,
+            dashboard_url=settings.dashboard_url,
+            product=product, store=self.ctx.storage,
+            default_product=default_product,
+        )
+
+    async def muse_upgrade_hint(self, user_id: int, lang: str, distance_pct: Optional[float] = None) -> Optional[str]:
+        entitlements = self.ctx.entitlements
+        if entitlements is None or not entitlements.paypal_enabled:
+            return None
+        high_risk = distance_pct is not None and distance_pct <= 20
+        return await entitlements.upgrade_hint(user_id, lang, high_risk=high_risk)

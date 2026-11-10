@@ -42,6 +42,8 @@ from liqguard.core.positions import BOOK_LABEL
 from liqguard.core.user_settings import apply_setting, settings_dict
 from liqguard.i18n import localize, normalize, t, web_catalog
 from liqguard.models import Position, User
+from liqguard.payments import PayPalClient, PayPalError
+from liqguard.payments.webhooks import WebhookHandler, extract_webhook_headers
 from liqguard.risk import (
     RescueSimulator,
     position_protection,
@@ -74,6 +76,11 @@ class LanguageRequest(BaseModel):
 class SettingRequest(BaseModel):
     key: str = Field(..., min_length=1, max_length=16, pattern=r"^[a-z]+$")
     value: str = Field(..., min_length=1, max_length=8, pattern=r"^[a-z0-9.\-]+$")
+
+
+class AgentCheckoutRequest(BaseModel):
+    text: str = Field("", max_length=400)
+    product: Optional[str] = Field(None, pattern=r"^(pro|rescue|auto)?$")
 
 
 class UnbindRequest(BaseModel):
@@ -265,7 +272,54 @@ def create_app(
         if ctx is not None:
             body["funding_feeds"] = ctx.market.status()
             body["wick_feeds"] = ctx.wicks.status()
+            body["paypal"] = ctx.settings.paypal_enabled
         return body
+
+    @app.get("/api/billing/status")
+    async def billing_status_public():
+        """Whether PayPal Pro checkout is configured. Always safe; no secrets."""
+        enabled = bool(ctx is not None and ctx.settings.paypal_enabled)
+        plan = ctx.settings.paypal_plan_id if enabled else None
+        return {"enabled": enabled, "plan_id": plan, "env": (ctx.settings.paypal_env if enabled else "sandbox")}
+
+    @app.get("/api/grid-filter")
+    async def grid_filter(q: str = Query("", max_length=200)):
+        """Natural-language AG Grid filter. Muse when live; deterministic rules otherwise."""
+        from liqguard.payments.agent import parse_grid_filter
+
+        spec = parse_grid_filter(q)
+        spec.setdefault("source", "rules")
+        llm = ctx.llm if ctx is not None else None
+        if llm is not None and not llm.is_mock and q.strip():
+            try:
+                raw = await asyncio.wait_for(
+                    llm._chat(
+                        "grid-filter",
+                        [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Return JSON with optional keys max_distance_pct (number), "
+                                    "side (long|short), level (emergency|critical|warning|safe), symbol. "
+                                    "Omit keys you cannot infer."
+                                ),
+                            },
+                            {"role": "user", "content": q},
+                        ],
+                        json_mode=True,
+                        temperature=0,
+                    ),
+                    2.0,
+                )
+                if raw:
+                    data = json.loads(raw)
+                    for key in ("max_distance_pct", "side", "level", "symbol"):
+                        if data.get(key) not in (None, ""):
+                            spec[key] = data[key]
+                    spec["source"] = "muse"
+            except Exception:
+                spec["source"] = "rules"
+        return spec
 
     # ---------------------------------------------------------------- Muse
 
@@ -297,11 +351,21 @@ def create_app(
         return request_id
 
     async def rescue_body(muse: MuseService, sim: "MarketSimulation | Callable[[], MarketSimulation]", plan, position: Position, lang: str,
-                          wait: bool, scope: str = "sim") -> dict:
+                          wait: bool, scope: str = "sim", user_id: Optional[int] = None) -> dict:
         if wait:
-            return {"plan": plan.to_dict(), "explanation": await muse.explain_rescue(plan, lang), "muse_pending": False}
-        instant = muse.rescue(plan, lang)
-        body = {"plan": plan.to_dict(), "explanation": instant.result, "muse_pending": instant.pending is not None}
+            explanation = await muse.explain_rescue(plan, lang)
+        else:
+            instant = muse.rescue(plan, lang)
+            explanation = instant.result
+        upgrade = None
+        if user_id is not None and ctx is not None and ctx.entitlements is not None:
+            upgrade = await ctx.entitlements.upgrade_hint(
+                user_id, lang, high_risk=plan.current.distance_pct <= 20 if plan.current else False,
+            )
+        if wait:
+            return {"plan": plan.to_dict(), "explanation": explanation, "muse_pending": False, "upgrade_hint": upgrade}
+        body = {"plan": plan.to_dict(), "explanation": explanation, "muse_pending": instant.pending is not None,
+                "upgrade_hint": upgrade}
         if instant.pending is not None:
             key = {"scope": scope, "symbol": position.symbol, "venue": position.venue.value}
             body["request_id"] = follow_up(sim, instant.pending, "rescue_muse",
@@ -611,6 +675,7 @@ def create_app(
                 "escalations": [a.to_dict() for a in ctx.escalations.pending_for(claims.user_id) if a.acknowledged_at is None],
                 "actions": await ctx.storage.list_audit(claims.user_id, limit=50),
                 "protect_enabled": ctx.actions.is_enabled(),
+                "billing": (await ctx.entitlements.get_status(claims.user_id)).to_dict() if ctx.entitlements else {"tier": "free", "is_pro": False},
             })
 
         @app.post("/api/me/live/ack", dependencies=[Depends(require_csrf)])
@@ -642,8 +707,218 @@ def create_app(
             )
             lang = normalize(user.language)
             body = await rescue_body(ctx.muse, lambda: ctx.simulations.get_or_create(claims.user_id), plan, position, lang,
-                                     wait, scope="live")
+                                     wait, scope="live", user_id=claims.user_id)
             return JSONResponse(localize(lang, body))
+
+        # ---------------------------------------------------------------- billing & subscriptions
+
+        paypal = None
+        entitlements = ctx.entitlements
+        if ctx.settings.paypal_enabled:
+            paypal = PayPalClient(
+                ctx.settings.paypal_client_id,
+                ctx.settings.paypal_client_secret,
+                ctx.settings.paypal_api_base,
+                ctx.settings.paypal_webhook_id,
+            )
+
+        def _billing_notify(telegram_id: int, kind: str, resource_id: str) -> None:
+            sim = ctx.simulations.get(telegram_id)
+            if sim is None:
+                return
+            event = {"type": "billing", "kind": kind, "resource_id": resource_id}
+            asyncio.create_task(hubs.for_simulation(sim).broadcast(event))
+
+        webhook_handler = WebhookHandler(
+            event_store=ctx.storage,
+            subscription_store=ctx.storage,
+            notify=_billing_notify,
+        )
+        app.state.paypal = paypal
+        app.state.entitlements = entitlements
+
+        @app.get("/api/me/billing")
+        async def my_billing(claims: SessionClaims = Depends(auth.required)):
+            """Get user's billing status and subscription info. Free-tier JSON when PayPal is unset."""
+            if entitlements is None or not ctx.settings.paypal_enabled:
+                return {"enabled": False, "tier": "free", "is_pro": False, "subscriptions": []}
+
+            status = await entitlements.get_status(claims.user_id)
+            subscriptions = await ctx.storage.list_subscriptions(claims.user_id)
+            agent_actions = await ctx.storage.list_agent_actions(claims.user_id)
+
+            return {
+                "enabled": True,
+                **status.to_dict(),
+                "subscriptions": subscriptions,
+                "plan_id": ctx.settings.paypal_plan_id,
+                "agent_actions": agent_actions,
+            }
+
+        @app.post("/api/me/billing/subscribe", dependencies=[Depends(require_csrf)])
+        async def create_subscription(claims: SessionClaims = Depends(auth.required)):
+            """Create a PayPal subscription checkout session."""
+            if paypal is None or not ctx.settings.paypal_plan_id:
+                raise HTTPException(503, "PayPal billing not configured")
+
+            return_url = f"{ctx.settings.dashboard_url}/api/me/billing/return"
+            cancel_url = f"{ctx.settings.dashboard_url}/me"
+
+            try:
+                result = await paypal.create_subscription(
+                    plan_id=ctx.settings.paypal_plan_id,
+                    return_url=return_url,
+                    cancel_url=cancel_url,
+                    custom_id=str(claims.user_id),
+                    subscriber_email=None,
+                )
+                await ctx.storage.save_subscription(
+                    claims.user_id,
+                    result["subscription_id"],
+                    ctx.settings.paypal_plan_id,
+                    "PENDING",
+                )
+                return {"approve_url": result["approve_url"], "subscription_id": result["subscription_id"]}
+            except PayPalError as e:
+                logger.error("Failed to create subscription: %s", e)
+                raise HTTPException(502, "PayPal error")
+
+        @app.get("/api/me/billing/return")
+        async def billing_return(
+            subscription_id: str = Query(...),
+            claims: SessionClaims = Depends(auth.optional),
+        ):
+            """Handle PayPal subscription return (user approved)."""
+            if paypal is None:
+                return RedirectResponse("/me?billing=error", status_code=303)
+
+            try:
+                details = await paypal.get_subscription(subscription_id)
+                if details.is_active() and claims is not None:
+                    await ctx.storage.save_subscription(
+                        claims.user_id,
+                        subscription_id,
+                        details.plan_id,
+                        "ACTIVE",
+                        payer_email=details.payer_email,
+                    )
+                    return RedirectResponse("/me?billing=success", status_code=303)
+            except PayPalError as e:
+                logger.error("Failed to verify subscription: %s", e)
+
+            return RedirectResponse("/me?billing=pending", status_code=303)
+
+        @app.post("/api/me/billing/cancel", dependencies=[Depends(require_csrf)])
+        async def cancel_subscription_endpoint(claims: SessionClaims = Depends(auth.required)):
+            """Cancel user's active subscription."""
+            if paypal is None or entitlements is None:
+                raise HTTPException(503, "PayPal billing not configured")
+
+            status = await entitlements.get_status(claims.user_id)
+            if not status.subscription_id:
+                raise HTTPException(404, "No active subscription")
+
+            success = await paypal.cancel_subscription(status.subscription_id, "User requested")
+            if success:
+                await ctx.storage.update_subscription_status(status.subscription_id, "CANCELLED")
+            return {"cancelled": success}
+
+        @app.post("/api/me/billing/agent", dependencies=[Depends(require_csrf)])
+        async def agent_checkout_endpoint(
+            body: AgentCheckoutRequest, claims: SessionClaims = Depends(auth.required),
+        ):
+            """Muse PayPal Agent Toolkit checkout: Rescue Pass order or Pro subscription only."""
+            if paypal is None:
+                raise HTTPException(503, "PayPal billing not configured")
+            from liqguard.payments.agent import run_checkout
+
+            product = body.product if body.product in ("pro", "rescue") else None
+            text = (body.text or "").strip() or (
+                "get me a Rescue Pass" if product == "rescue" else "upgrade to Pro"
+            )
+            checkout = await run_checkout(
+                paypal, ctx.llm, user_id=claims.user_id, text=text, lang="en",
+                plan_id=ctx.settings.paypal_plan_id, dashboard_url=ctx.settings.dashboard_url,
+                product=product, store=ctx.storage,
+                default_product="pro" if product is None else None,
+            )
+            return checkout.to_dict()
+
+        @app.post("/api/me/billing/rescue-pass", dependencies=[Depends(require_csrf)])
+        async def purchase_rescue_pass(claims: SessionClaims = Depends(auth.required)):
+            """Create a one-time Rescue Pass purchase."""
+            if paypal is None:
+                raise HTTPException(503, "PayPal billing not configured")
+
+            return_url = f"{ctx.settings.dashboard_url}/api/me/billing/rescue-return"
+            cancel_url = f"{ctx.settings.dashboard_url}/me"
+
+            try:
+                result = await paypal.create_order(
+                    amount_usd="2.99",
+                    description="LiqGuard Rescue Pass",
+                    return_url=return_url,
+                    cancel_url=cancel_url,
+                    custom_id=str(claims.user_id),
+                )
+                return {"approve_url": result["approve_url"], "order_id": result["order_id"]}
+            except PayPalError as e:
+                logger.error("Failed to create rescue pass order: %s", e)
+                raise HTTPException(502, "PayPal error")
+
+        @app.get("/api/me/billing/rescue-return")
+        async def rescue_pass_return(
+            token: str = Query(...),
+            claims: SessionClaims = Depends(auth.optional),
+        ):
+            """Handle Rescue Pass payment return (capture the order)."""
+            if paypal is None:
+                return RedirectResponse("/me?rescue=error", status_code=303)
+
+            try:
+                capture = await paypal.capture_order(token)
+                if capture.get("status") == "COMPLETED" and claims is not None:
+                    await ctx.storage.add_rescue_passes(claims.user_id, 1)
+                    return RedirectResponse("/me?rescue=success", status_code=303)
+            except PayPalError as e:
+                logger.error("Failed to capture rescue pass order: %s", e)
+
+            return RedirectResponse("/me?rescue=error", status_code=303)
+
+        # ---------------------------------------------------------------- PayPal webhooks
+
+        @app.post("/webhooks/paypal")
+        async def paypal_webhook(request: Request):
+            """Handle PayPal subscription lifecycle webhooks."""
+            if webhook_handler is None or paypal is None or not paypal.webhook_id:
+                logger.error("PayPal webhook rejected: client or PAYPAL_WEBHOOK_ID missing")
+                raise HTTPException(503, "PayPal webhooks not configured")
+
+            headers = extract_webhook_headers(dict(request.headers))
+            body_bytes = await request.body()
+
+            try:
+                event = json.loads(body_bytes)
+            except json.JSONDecodeError:
+                raise HTTPException(400, "Invalid JSON")
+
+            verified = await paypal.verify_webhook_online(
+                headers["transmission_id"],
+                headers["transmission_time"],
+                headers["cert_url"],
+                headers["auth_algo"],
+                headers["transmission_sig"],
+                event,
+            )
+
+            if not verified:
+                logger.warning("Webhook signature verification failed")
+                raise HTTPException(401, "Invalid signature")
+
+            result = await webhook_handler.process_event(event)
+            logger.info("Processed webhook %s: %s", result.event_type, result.message)
+
+            return {"status": "ok", "event_id": result.event_id, "processed": result.success}
 
     # ---------------------------------------------------------------- websockets
 

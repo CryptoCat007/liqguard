@@ -21,10 +21,11 @@ from .conftest import ALICE, fake_message
 from .test_telegram_ui import enable_demo, has_chinese
 from .zh_scan import english_words
 
-SIDE_EFFECTS = frozenset({"ls", "ss", "bb", "bh", "bx", "by", "bc", "ds", "dx", "do", "aa", "az", "ak", "ay", "an", "db"})
+SIDE_EFFECTS = frozenset({"ls", "ss", "bb", "bh", "bx", "by", "bc", "ds", "dx", "do", "aa", "az", "ak", "ay", "an", "db",
+                          "pu", "pm", "rp"})
 """Buttons the crawl records but does not tap: they change state, start a flow or mint a login link."""
 
-ZH_KEEPS = {"Demo", "Language", "English", "seed", "phrase", "Meta", "muse", "spark"}
+ZH_KEEPS = {"Demo", "Language", "English", "seed", "phrase", "Meta", "muse", "spark", "Pro", "PayPal"}
 """English the zh-Hant UI shows on purpose: the 🎬 Demo name, the "🌐 Language / 語言" picker with its 🇬🇧 English choice, the
 「助記詞（seed phrase）」 gloss in the security note and the model name (Meta, muse-spark-1.3) in ❓ Help."""
 

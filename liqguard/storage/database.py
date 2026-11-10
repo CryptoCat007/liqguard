@@ -9,7 +9,7 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -69,6 +69,58 @@ CREATE TABLE IF NOT EXISTS login_tokens (
     used_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_login_tokens_user ON login_tokens(telegram_id);
+
+-- PayPal subscriptions for LiqGuard Pro
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    subscription_id TEXT NOT NULL UNIQUE,
+    plan_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    payer_email TEXT,
+    activated_at TEXT,
+    cancelled_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(telegram_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
+
+-- One-time Rescue Passes
+CREATE TABLE IF NOT EXISTS rescue_passes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    remaining INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rescue_passes_user ON rescue_passes(telegram_id);
+
+-- Webhook events for idempotency
+CREATE TABLE IF NOT EXISTS payment_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    resource_id TEXT,
+    telegram_id INTEGER,
+    payload_json TEXT,
+    processed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_payment_events_type ON payment_events(event_type);
+
+-- Muse PayPal agent tool calls (create_order / create_subscription)
+CREATE TABLE IF NOT EXISTS agent_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    tool TEXT,
+    product TEXT,
+    source TEXT NOT NULL,
+    resource_id TEXT,
+    approve_url TEXT,
+    status TEXT NOT NULL,
+    message TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_actions_user ON agent_actions(telegram_id, id);
 """
 
 

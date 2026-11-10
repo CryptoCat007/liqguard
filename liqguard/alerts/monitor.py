@@ -158,6 +158,7 @@ class PositionMonitor:
         escalation: Optional[EscalationService] = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         demo_window: Optional[DemoAlertWindow] = None,
+        entitlements: Any = None,
     ):
         self._users = users
         self._positions = positions
@@ -177,6 +178,8 @@ class PositionMonitor:
         self.clock = clock
         self.demo_window = demo_window
         self._muse_followups: set[asyncio.Task] = set()
+        self.entitlements = entitlements
+        self._last_check: dict[int, float] = {}
 
     async def _notify(self, user: User, text: str, actions: Optional[list[Action]] = None) -> Any:
         return await self.notifier.notify(user.telegram_id, text, actions=actions, lang=user.language,
@@ -212,7 +215,8 @@ class PositionMonitor:
     async def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._loop())
-            logger.info("Position monitor started (interval: %ss)", self.poll_interval)
+            loop_s = self.entitlements.pro_poll_interval if self.entitlements and self.entitlements.paypal_enabled else self.poll_interval
+            logger.info("Position monitor started (interval: %ss)", loop_s)
 
     async def stop(self) -> None:
         if self._task:
@@ -223,13 +227,30 @@ class PositionMonitor:
                 pass
             self._task = None
 
+    def _loop_interval(self) -> int:
+        if self.entitlements is not None and self.entitlements.paypal_enabled:
+            return min(self.poll_interval, self.entitlements.pro_poll_interval)
+        return self.poll_interval
+
+    async def _due(self, user: User) -> bool:
+        """Pro users are polled faster; free users keep the default interval. No PayPal → no extra skip."""
+        if self.entitlements is None or not self.entitlements.paypal_enabled:
+            return True
+        now = self.clock().timestamp()
+        last = self._last_check.get(user.telegram_id, 0.0)
+        interval = self.entitlements.poll_interval_for(await self.entitlements.is_pro(user.telegram_id))
+        if now - last < interval:
+            return False
+        self._last_check[user.telegram_id] = now
+        return True
+
     async def _loop(self) -> None:
         while True:
             try:
                 await self.check_all_users()
             except Exception:
                 logger.exception("Monitor loop error")
-            await asyncio.sleep(self.poll_interval)
+            await asyncio.sleep(self._loop_interval())
 
     async def check_all_users(self) -> None:
         for user in await self._users():
@@ -249,6 +270,8 @@ class PositionMonitor:
         fire once quiet hours end).
         """
         if user.is_demo_mode and self.demo_window is not None and not self.demo_window.allows(user.telegram_id):
+            return 0
+        if not await self._due(user):
             return 0
         quiet = user.threshold.in_quiet_hours(self.clock())
         result = await self._positions(user)

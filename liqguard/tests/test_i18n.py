@@ -21,6 +21,7 @@ SAME_IN_BOTH = {
     "common.side.None", "common.venue.binance", "common.venue.hyperliquid", "tools.title",
     "tools.funding.drift_item", "commands.lang", "kb.demo", "kb.language", "kb.lang_en", "kb.lang_zh",
     "alert.muse", "alert.muse_mark", "alert.recommend", "alert.recommend_plain", "web.muse_mark", "account.pending_row", "ask.answer", "stopcheck.button", "web.cnt_adl", "audit.action", "sim.source.telegram",
+    "pro.tier_pro", "pro.badge", "web.tier_pro_label",
 }
 
 # English strings that deliberately show 中文 (the language picker and its labels).

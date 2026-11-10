@@ -10,8 +10,9 @@ from fastapi import HTTPException, Request
 BASE_CSP = (
     "default-src 'self'; "
     "script-src 'self' https://cdn.jsdelivr.net; "
-    "style-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
     "img-src 'self' data:; "
+    "font-src 'self' data:; "
     "connect-src 'self' ws: wss:; "
     "frame-ancestors 'none'; "
     "base-uri 'none'; "

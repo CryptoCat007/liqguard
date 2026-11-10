@@ -21,10 +21,14 @@ from .crypto import (
 )
 from .database import SCHEMA, SCHEMA_VERSION, Database
 from .repositories import (
+    AgentActionRepository,
     AuditRepository,
     BindingRepository,
     LoginTokenRepository,
+    PaymentEventRepository,
+    RescuePassRepository,
     SqliteAuditSink,
+    SubscriptionRepository,
     UserKeyring,
     UserRepository,
 )
@@ -56,6 +60,10 @@ class EncryptedStorage:
         self.bindings = BindingRepository(self.db, self.keyring)
         self.audit = AuditRepository(self.db)
         self.login_tokens = LoginTokenRepository(self.db)
+        self.subscriptions = SubscriptionRepository(self.db)
+        self.rescue_passes = RescuePassRepository(self.db)
+        self.payment_events = PaymentEventRepository(self.db)
+        self.agent_actions = AgentActionRepository(self.db)
         self._initialized = False
 
     def __repr__(self) -> str:
@@ -218,6 +226,84 @@ class EncryptedStorage:
             return decrypt_with(dek, token)
         except InvalidToken as e:
             raise EncryptionKeyError("Ciphertext does not belong to this user") from e
+
+    # ------------------------------------------------------------- subscriptions & payments
+
+    async def get_active_subscription(self, telegram_id: int) -> Optional[dict]:
+        await self.initialize()
+        return await self.subscriptions.get_active_subscription(telegram_id)
+
+    async def get_user_by_subscription(self, subscription_id: str) -> Optional[int]:
+        await self.initialize()
+        return await self.subscriptions.get_user_by_subscription(subscription_id)
+
+    async def get_user_by_custom_id(self, custom_id: str) -> Optional[int]:
+        await self.initialize()
+        return await self.subscriptions.get_user_by_custom_id(custom_id)
+
+    async def save_subscription(
+        self, telegram_id: int, subscription_id: str, plan_id: str, status: str, **kwargs
+    ) -> None:
+        await self.initialize()
+        await self.subscriptions.save_subscription(telegram_id, subscription_id, plan_id, status, **kwargs)
+
+    async def update_subscription_status(self, subscription_id: str, status: str) -> None:
+        await self.initialize()
+        await self.subscriptions.update_subscription_status(subscription_id, status)
+
+    async def list_subscriptions(self, telegram_id: int) -> list[dict]:
+        await self.initialize()
+        return await self.subscriptions.list_for_user(telegram_id)
+
+    async def get_rescue_passes(self, telegram_id: int) -> int:
+        await self.initialize()
+        return await self.rescue_passes.get_passes(telegram_id)
+
+    async def use_rescue_pass(self, telegram_id: int) -> bool:
+        await self.initialize()
+        return await self.rescue_passes.use_pass(telegram_id)
+
+    async def add_rescue_passes(self, telegram_id: int, count: int) -> None:
+        await self.initialize()
+        await self.rescue_passes.add_passes(telegram_id, count)
+
+    async def has_payment_event(self, event_id: str) -> bool:
+        await self.initialize()
+        return await self.payment_events.has_event(event_id)
+
+    async def save_payment_event(
+        self, event_id: str, event_type: str, resource_id: str, telegram_id: Optional[int], payload: dict
+    ) -> None:
+        await self.initialize()
+        await self.payment_events.save_event(event_id, event_type, resource_id, telegram_id, payload)
+
+    async def has_event(self, event_id: str) -> bool:
+        """PaymentEventStore protocol alias used by the PayPal webhook handler."""
+        return await self.has_payment_event(event_id)
+
+    async def save_event(
+        self, event_id: str, event_type: str, resource_id: str, telegram_id: Optional[int], payload: dict
+    ) -> None:
+        """PaymentEventStore protocol alias used by the PayPal webhook handler."""
+        await self.save_payment_event(event_id, event_type, resource_id, telegram_id, payload)
+
+    async def save_agent_action(self, telegram_id: int, checkout) -> None:
+        data = checkout.to_dict() if hasattr(checkout, "to_dict") else dict(checkout)
+        await self.initialize()
+        await self.agent_actions.save(
+            telegram_id,
+            tool=data.get("tool"),
+            product=data.get("product"),
+            source=data.get("source") or "rules",
+            resource_id=data.get("resource_id"),
+            approve_url=data.get("approve_url"),
+            status=data.get("status") or "created",
+            message=data.get("message") or "",
+        )
+
+    async def list_agent_actions(self, telegram_id: int, limit: int = 20) -> list[dict]:
+        await self.initialize()
+        return await self.agent_actions.list_for_user(telegram_id, limit)
 
     async def close(self) -> None:
         """Connections are per-operation; nothing to close."""

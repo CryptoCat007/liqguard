@@ -354,6 +354,76 @@ async def restart_is_quiet(s: Session) -> None:
     await s.assert_quiet(s.tg.mark(), "after a restart in demo mode")
 
 
+async def pro_billing(s: Session) -> None:
+    """Account + Dashboard 💎 Pro / manage / Rescue Pass when PayPal is unset: handled, bilingual, no error toast."""
+    menu = await s.main_menu()
+    check(len(s.actions(menu)) == 14, f"main menu has {len(s.actions(menu))} actions, want 14")
+
+    account = await s.tap_action(menu, "ac", "🧾 Account")
+    check("pu" in s.actions(account), f"account keyboard missing 💎 Pro: {s.actions(account)}")
+    check("px" in s.actions(account), f"account keyboard missing 🤖 Muse checkout: {s.actions(account)}")
+    s.assert_language(account, "account")
+    agent = await s.tap_action(account, "px", "🤖 Muse checkout from account")
+    check(agent is not None, "🤖 Muse checkout from account: nothing shown")
+    s.assert_language(agent, "🤖 Muse checkout from account")
+    check(s.T("pro.disabled") in agent.text, f"PayPal-unset Muse checkout: {agent.text[:160]}")
+    account = await s.tap_action(await s.main_menu(), "ac", "🧾 Account again")
+    pro = await s.tap_action(account, "pu", "💎 Pro from account")
+    check(pro is not None, "💎 Pro from account: nothing shown")
+    s.assert_language(pro, "💎 Pro from account")
+    check(s.T("pro.disabled") in pro.text, f"PayPal-unset Pro screen: {pro.text[:160]}")
+
+    dash_menu = await s.main_menu()
+    dash = await s.tap_action(dash_menu, "db", "🖥️ Dashboard")
+    check("pu" in s.actions(dash), f"dashboard keyboard missing 💎 Pro: {s.actions(dash)}")
+    s.assert_language(dash, "dashboard")
+    pro2 = await s.tap_action(dash, "pu", "💎 Pro from dashboard")
+    check(pro2 is not None, "💎 Pro from dashboard: nothing shown")
+    s.assert_language(pro2, "💎 Pro from dashboard")
+    check(s.T("pro.disabled") in pro2.text, f"PayPal-unset Pro from dashboard: {pro2.text[:160]}")
+
+    # pm / rp are only drawn when PayPal is on; still dispatch them so the handlers stay live.
+    host = await s.main_menu()
+    sign = s.tg.app.ui.signer(USER)
+    for action, args, what in (("pm", (), "manage billing"), ("rp", (), "Rescue Pass"), ("px", ("auto",), "Muse checkout")):
+        shown = await s.tap(host, sign(action, *args), what)
+        check(shown is not None, f"{what}: nothing shown")
+        s.assert_language(shown, what)
+        check(s.T("pro.disabled") in shown.text, f"{what} with PayPal unset: {shown.text[:160]}")
+
+
+CRAWL_SKIP = frozenset({"bb", "bh", "by", "ls", "ds"})
+"""Bind FSM, unbind-confirm, language apply and demo-scenario start: covered by dedicated scenarios."""
+
+
+async def crawl_buttons(s: Session) -> None:
+    """Tap every reachable inline callback from 🏠 Main menu (PayPal-unset Pro included)."""
+    menu = await s.main_menu()
+    check(len(s.actions(menu)) == 14, f"main menu has {len(s.actions(menu))} actions, want 14")
+    codec = s.tg.app.ui.codec
+    seen: set[str] = set()
+    visited: set[str] = set()
+    queue = [menu]
+    taps = 0
+    while queue and taps < 250:
+        msg = queue.pop(0)
+        for label, data in msg.buttons():
+            if not data or data in visited or not is_ui_payload(data):
+                continue
+            visited.add(data)
+            action = codec.decode(USER, data).action
+            seen.add(action)
+            if action in CRAWL_SKIP:
+                continue
+            nxt = await s.tap(msg, data, f"crawl {label} ({action})")
+            taps += 1
+            if nxt is not None:
+                queue.append(nxt)
+    check("pu" in seen, f"💎 Pro never appeared on a keyboard; saw {sorted(seen)}")
+    check("px" in seen, f"🤖 Muse checkout never appeared on a keyboard; saw {sorted(seen)}")
+    check(taps > 20, f"crawl only tapped {taps} buttons")
+
+
 SCENARIOS: dict[str, Callable[[Session], Awaitable[None]]] = {
     "menu-buttons": menu_buttons,
     "language-switch": language_switch,
@@ -369,6 +439,8 @@ SCENARIOS: dict[str, Callable[[Session], Awaitable[None]]] = {
     "book-stopdemo-command": silence_the_demo_book("/stopdemo"),
     "reminder-stop-button": reminder_has_stop_button,
     "restart-is-quiet": restart_is_quiet,
+    "pro-billing": pro_billing,
+    "crawl-buttons": crawl_buttons,
 }
 
 

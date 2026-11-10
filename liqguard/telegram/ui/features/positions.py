@@ -105,8 +105,17 @@ async def _tool(req: Request, tool: str, code: str) -> Screen:
             live = await pending
             return text(live) if live else None
 
-    return Screen(text(note.result if note else None),
-                  kb.position_tools(req.T, req.sign, found.source, found.position.symbol, current=code), later=later)
+    body = text(note.result if note else None)
+    show_upgrade = False
+    if tool == "rescue":
+        hint = await req.services.muse_upgrade_hint(req.user_id, req.T.lang, distance_pct=protection.distance_pct)
+        if hint:
+            body = body + "\n\n" + hint
+            show_upgrade = True
+    markup = (kb.rescue_with_upgrade(req.T, req.sign, found.source, found.position.symbol, show_upgrade)
+              if show_upgrade else
+              kb.position_tools(req.T, req.sign, found.source, found.position.symbol, current=code))
+    return Screen(body, markup, later=later)
 
 
 async def rescue(req: Request) -> Screen:

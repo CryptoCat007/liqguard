@@ -128,6 +128,8 @@ def account(T: Translator, sign: Signer, pending: Sequence[tuple[str, str]], kil
                         callback_data=sign("ak", "off" if kill_active else "on"))])
     rows.append([Button(text=T("kb.settings"), callback_data=sign("se")), Button(text=T("kb.binding"), callback_data=sign("b"))])
     rows.append([Button(text=T("kb.refresh"), callback_data=sign("ac"))])
+    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+    rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))])
     rows.append(back_row(T, sign))
     return _kb(rows)
 
@@ -226,6 +228,66 @@ def dashboard(T: Translator, sign: Signer, url: Optional[str]) -> InlineKeyboard
     rows: Rows = []
     if url and url.startswith("https://"):
         rows.append([Button(text=T("kb.open_dashboard"), url=url)])
+    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+    rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def pro_upgrade(T: Translator, sign: Signer, checkout_url: Optional[str] = None,
+                manage: bool = False) -> InlineKeyboardMarkup:
+    """Pro upgrade / billing keyboard. PayPal URL buttons charge only after the user taps them."""
+    rows: Rows = []
+    if checkout_url:
+        rows.append([Button(text=T("pro.kb.upgrade"), url=checkout_url)])
+    if manage:
+        rows.append([Button(text=T("pro.cancel_cta"), callback_data=sign("pm"))])
+    else:
+        rows.append([Button(text=T("pro.kb.rescue_pass"), callback_data=sign("rp"))])
+        rows.append([Button(text=T("pro.kb.manage"), callback_data=sign("pm"))])
+    rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def pro_manage(T: Translator, sign: Signer, checkout_url: Optional[str] = None) -> InlineKeyboardMarkup:
+    rows: Rows = []
+    if checkout_url:
+        rows.append([Button(text=T("pro.kb.upgrade"), url=checkout_url)])
+    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def rescue_pass(T: Translator, sign: Signer, checkout_url: Optional[str] = None) -> InlineKeyboardMarkup:
+    rows: Rows = []
+    if checkout_url:
+        rows.append([Button(text=T("pro.kb.rescue_pass"), url=checkout_url)])
+    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+    rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def agent_checkout(T: Translator, sign: Signer, checkout_url: Optional[str] = None,
+                   product: Optional[str] = None) -> InlineKeyboardMarkup:
+    """Approve-on-PayPal URL plus the rest of the billing keyboard. Never auto-charges."""
+    rows: Rows = []
+    if checkout_url:
+        label = T("pro.kb.rescue_pass") if product == "rescue" else T("pro.kb.upgrade")
+        rows.append([Button(text=label, url=checkout_url)])
+    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu")),
+                 Button(text=T("pro.kb.rescue_pass"), callback_data=sign("rp"))])
+    rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
+def rescue_with_upgrade(T: Translator, sign: Signer, source: str, symbol: str, show_upgrade: bool = False) -> InlineKeyboardMarkup:
+    """Rescue sim keyboard with optional Pro upgrade hint."""
+    rows: Rows = [tool_row(T, sign, source, symbol, skip="pr")]
+    if show_upgrade:
+        rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+    rows.append([Button(text=T("kb.back_positions"), callback_data=sign("pl"))])
     rows.append(back_row(T, sign))
     return _kb(rows)
 
@@ -257,10 +319,12 @@ def demo_started(T: Translator, sign: Signer) -> InlineKeyboardMarkup:
 
 
 def alert_rows(T: Translator, sign: Signer, source: Optional[str], symbol: Optional[str], ack_id: Optional[str],
-               demo: bool = False) -> Rows:
+               demo: bool = False, agent: bool = False) -> Rows:
     rows: Rows = []
     if source and symbol:
         rows.append([Button(text=T("kb.alert_rescue"), callback_data=sign("pr", source, symbol))])
+    if agent:
+        rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "rescue"))])
     if ack_id:
         rows.append([Button(text=T("kb.alert_awake"), callback_data=sign("aa", ack_id)),
                      Button(text=T("kb.alert_snooze_demo" if demo else "kb.alert_snooze"), callback_data=sign("az", ack_id))])
@@ -270,8 +334,8 @@ def alert_rows(T: Translator, sign: Signer, source: Optional[str], symbol: Optio
 
 
 def alert_keyboard(T: Translator, sign: Signer, source: Optional[str], symbol: Optional[str],
-                   ack_id: Optional[str], demo: bool = False) -> Optional[InlineKeyboardMarkup]:
-    rows = alert_rows(T, sign, source, symbol, ack_id, demo)
+                   ack_id: Optional[str], demo: bool = False, agent: bool = False) -> Optional[InlineKeyboardMarkup]:
+    rows = alert_rows(T, sign, source, symbol, ack_id, demo, agent=agent)
     return _kb(rows) if rows else None
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
-NAMES = {"Binance", "Hyperliquid", "Muse", "LiqGuard", "Telegram"}
+NAMES = {"Binance", "Hyperliquid", "Muse", "LiqGuard", "Telegram", "PayPal", "Pro"}
 WORD = re.compile(r"[A-Za-z][A-Za-z']*")
 COMMAND = re.compile(r"/[a-z_]+|@\w+")
 IDENTIFIER = re.compile(r"^[a-z0-9_]+$|^\d{4}-\d\d-\d\dT")

@@ -11,6 +11,7 @@ from liqguard.alerts import DEMO_VENUE, AlertManager, DemoAlertWindow, Escalatio
 from liqguard.auth import LoginLinkService, SessionSigner
 from liqguard.config import Settings
 from liqguard.i18n import normalize
+from liqguard.payments import EntitlementService
 from liqguard.protect import (
     AuditLogger,
     ExecutionTier,
@@ -45,6 +46,7 @@ class AppContext:
     escalations: EscalationTracker
     demo_alerts: DemoAlertWindow = field(default_factory=DemoAlertWindow)
     muse: Optional[MuseService] = None
+    entitlements: Optional[EntitlementService] = None
 
     def __post_init__(self) -> None:
         if self.muse is None:
@@ -87,6 +89,12 @@ class AppContext:
         }
 
         muse = MuseService(llm)
+        entitlements = EntitlementService(
+            store=storage if settings.paypal_enabled else None,
+            paypal_enabled=settings.paypal_enabled,
+            pro_poll_interval=settings.pro_poll_interval,
+            free_poll_interval=settings.poll_interval,
+        )
 
         def make_simulation(owner_id: Optional[int]) -> MarketSimulation:
             return MarketSimulation(muse, owner_id=owner_id, **{"open_at_warning": owner_id is None, **options})
@@ -119,6 +127,7 @@ class AppContext:
             wicks=wicks,
             escalations=EscalationTracker(),
             muse=muse,
+            entitlements=entitlements,
         )
 
     async def mute_demo(self, user_id: int, source: str, stop: bool = False) -> bool:

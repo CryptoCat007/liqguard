@@ -23,6 +23,7 @@ LANGUAGE = re.compile(r"^(en|zh)$")
 QUESTION = re.compile(r"^(risk|first|pnl)$")
 ON_OFF = re.compile(r"^(on|off)$")
 ACTION_ID = re.compile(r"^pa_[0-9a-f]{12}$")
+CHECKOUT = re.compile(r"^(pro|rescue|auto)$")
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,10 @@ ACTIONS: dict[str, ActionSpec] = {
     "by": ActionSpec("binding", (VENUE, NETWORK), ttl=2 * MINUTE, description="Do unbind"),
     "bc": ActionSpec("binding", ttl=DAY, description="Cancel binding"),
     "db": ActionSpec("dashboard", description="🖥️ Dashboard"),
+    "pu": ActionSpec("billing", description="💎 Pro / billing"),
+    "pm": ActionSpec("billing", ttl=DAY, description="Manage Pro subscription"),
+    "rp": ActionSpec("billing", ttl=DAY, description="Buy a Rescue Pass"),
+    "px": ActionSpec("billing", (CHECKOUT,), ttl=DAY, description="Muse PayPal checkout"),
     "ac": ActionSpec("account", description="🧾 Account & actions"),
     "ak": ActionSpec("account", (ON_OFF,), ttl=HOUR, description="Set the kill switch"),
     "ay": ActionSpec("account", (ACTION_ID,), ttl=HOUR, description="Confirm a protective action (testnet)"),

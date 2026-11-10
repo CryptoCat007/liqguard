@@ -86,6 +86,7 @@ const S = {
   minutesPerStep: null, wallets: {}, fundingEvents: [], fundingSteps: {}, rescue: null,
   protection: {}, session: null, escalation: null, pending: {}, stopMuse: {},
   insights: null, scenario: null, scenarios: [], openSym: null, adviceBySym: {}, adviceCount: 0, auditCount: 0,
+  alerts: [],
 };
 let chart = null;
 let ws = null;
@@ -236,6 +237,7 @@ function applySnapshot(snap) {
   renderChannels(snap.channels || []);
 
   $("timeline").replaceChildren();
+  S.alerts = [];
   (snap.alerts || []).forEach((a) => addAlert(a, { quiet: true }));
   (snap.escalation_log || []).forEach((e) => addEscalation(e, { quiet: true }));
   if (!snap.alerts?.length) $("timeline").append(empty("🔕", L("empty_alerts"), L("empty_alerts_hint")));
@@ -261,6 +263,7 @@ function applySnapshot(snap) {
   buildRescueTabs();
   renderRescue();
   setStatus({ state: snap.state, step: snap.step, total_steps: snap.total_steps });
+  renderDataGrids();
 }
 
 /** The badge says "live" only after Muse really answered; otherwise the rule-based text is what users see. */
@@ -321,6 +324,9 @@ function handle(msg) {
       break;
     case "report_muse":
       updateToolReport(data);
+      break;
+    case "billing":
+      refreshBilling();
       break;
     case "summary":
       if (data && data.step != null && S.step != null && data.step !== S.step) break;
@@ -674,6 +680,9 @@ function addFundingAlert(a, opts) {
 }
 
 function addAlert(a, opts = {}) {
+  S.alerts = S.alerts || [];
+  S.alerts.push(a);
+  if (!opts.quiet) renderDataGrids();
   const box = $("timeline");
   clearEmpty(box);
   S.counts[a.level] = (S.counts[a.level] || 0) + 1;
@@ -1514,7 +1523,8 @@ async function awaitMuseRescue(url, symbol, opts) {
 }
 
 function showRescue(symbol, data, opts = {}) {
-  S.rescue = { symbol, plan: data.plan, explanation: data.explanation, auto: !!opts.auto, live: !!opts.live };
+  S.rescue = { symbol, plan: data.plan, explanation: data.explanation, auto: !!opts.auto, live: !!opts.live,
+    upgrade_hint: data.upgrade_hint || null };
   buildRescueTabs();
   renderRescue();
 }
@@ -1578,6 +1588,11 @@ function renderRescue() {
       ? empty("✅", L("rescue_safe", { target: plan.target_distance_pct }), L("rescue_safe_hint"))
       : el("div", { class: "rs-grid" }, ...cols),
     ex?.caveat ? el("div", { class: "rs-caveat" }, ex.caveat) : null,
+    r.upgrade_hint ? el("div", { class: "muse-upgrade-hint" },
+      el("span", { class: "hint-icon" }, "💎"),
+      el("span", {}, r.upgrade_hint),
+      el("button", { class: "btn btn-primary btn-sm", type: "button", onclick: () => startCheckout("subscribe") }, L("paypal_checkout")),
+    ) : null,
     el("div", { class: "adv-foot" }, L("rescue_foot")),
   );
 }
@@ -2207,6 +2222,7 @@ async function bootstrap() {
     rememberLanguage(I18N.lang);
   } catch (err) { /* keep the built-in English text */ }
   if (!(await setupScope())) return;
+  refreshBilling();
   try {
     const r = await fetch(api("/snapshot"), { credentials: "same-origin" });
     if (r.status === 401) { toLogin(); return; }
@@ -2237,5 +2253,268 @@ document.addEventListener("DOMContentLoaded", () => {
     $(id).addEventListener("click", (ev) => { if (ev.target === ev.currentTarget) ev.currentTarget.close(); });
   }
   setInterval(() => { if (ws && ws.readyState === 1) ws.send("ping"); }, 25000);
+  const upgrade = () => startCheckout("subscribe");
+  $("upgradeBtn")?.addEventListener("click", upgrade);
+  $("bannerUpgradeBtn")?.addEventListener("click", upgrade);
+  $("rescuePassBtn")?.addEventListener("click", () => startCheckout("rescue-pass"));
+  $("agentCheckoutBtn")?.addEventListener("click", startAgentCheckout);
+  $("cancelSubBtn")?.addEventListener("click", cancelSubscription);
+  $("gridFilter")?.addEventListener("input", () => { clearTimeout(gridFilterTimer); gridFilterTimer = setTimeout(applyGridFilter, 250); });
   bootstrap();
 });
+
+/* ---------------- AG Grid Community + PayPal billing ---------------- */
+
+const GRIDS = {};
+
+let gridFilterTimer = 0;
+let gridFilterSpec = {};
+let gridChart = null;
+
+function distanceTone(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "safe";
+  if (n <= 5) return "emergency";
+  if (n <= 10) return "critical";
+  if (n <= 20) return "warning";
+  return "safe";
+}
+
+function distanceCellRenderer(p) {
+  if (p.value == null || p.value === "") return L("none");
+  const n = Number(p.value);
+  const span = document.createElement("span");
+  span.className = `dist-cell dist-${distanceTone(n)}`;
+  span.textContent = `${n.toFixed(1)}%`;
+  return span;
+}
+
+function createOrUpdateGrid(id, columnDefs, rowData, extra = {}) {
+  const host = $(id);
+  if (!host || typeof agGrid === "undefined") return;
+  if (GRIDS[id]) {
+    GRIDS[id].setGridOption("columnDefs", columnDefs);
+    GRIDS[id].setGridOption("rowData", rowData);
+    if (extra.isExternalFilterPresent) {
+      GRIDS[id].setGridOption("isExternalFilterPresent", extra.isExternalFilterPresent);
+      GRIDS[id].setGridOption("doesExternalFilterPass", extra.doesExternalFilterPass);
+      GRIDS[id].onFilterChanged();
+    }
+    return;
+  }
+  GRIDS[id] = agGrid.createGrid(host, {
+    columnDefs,
+    rowData,
+    defaultColDef: { sortable: true, filter: true, resizable: true, flex: 1, minWidth: 90 },
+    animateRows: true,
+    suppressCellFocus: true,
+    domLayout: "normal",
+    ...extra,
+  });
+}
+
+function positionPassesFilter(pos) {
+  const spec = gridFilterSpec || {};
+  if (spec.max_distance_pct != null && Number(pos.distance_to_liquidation_pct) > Number(spec.max_distance_pct)) return false;
+  if (spec.side && String(pos.side || "").toLowerCase() !== String(spec.side).toLowerCase()) return false;
+  if (spec.symbol && String(pos.symbol || "").toUpperCase() !== String(spec.symbol).toUpperCase()) return false;
+  if (spec.level && distanceTone(pos.distance_to_liquidation_pct) !== spec.level) return false;
+  return true;
+}
+
+function renderGridSummary(positions) {
+  const host = $("gridSummary");
+  if (!host) return;
+  const n = positions.length;
+  let closest = null;
+  let hot = 0;
+  for (const p of positions) {
+    const d = p.distance_to_liquidation_pct;
+    if (d == null) continue;
+    if (closest == null || d < closest) closest = d;
+    if (d <= 5) hot += 1;
+  }
+  host.textContent = L("grid_summary", {
+    n,
+    closest: closest == null ? L("none") : `${Number(closest).toFixed(1)}%`,
+    hot,
+  });
+}
+
+function renderGridChart(positions, alerts) {
+  const host = $("gridChart");
+  if (!host) return;
+  const rows = (positions || []).slice(0, 8).map((p) => ({
+    symbol: p.symbol,
+    distance: Number(p.distance_to_liquidation_pct) || 0,
+  }));
+  if (typeof agCharts !== "undefined" && agCharts.AgCharts) {
+    const options = {
+      container: host,
+      background: { fill: "transparent" },
+      theme: "ag-default-dark",
+      title: { text: L("grid_chart"), color: "#8a96ab", fontSize: 12 },
+      data: rows,
+      series: [{ type: "bar", xKey: "symbol", yKey: "distance", fill: "#6366f1" }],
+      axes: [
+        { type: "category", position: "bottom", label: { color: "#8a96ab" } },
+        { type: "number", position: "left", label: { color: "#8a96ab" }, title: { text: "%" } },
+      ],
+    };
+    if (gridChart) {
+      gridChart.update(options);
+    } else {
+      gridChart = agCharts.AgCharts.create(options);
+    }
+    return;
+  }
+  host.replaceChildren();
+  for (const row of rows) {
+    const tone = distanceTone(row.distance);
+    host.append(el("div", { class: "grid-chart-row" },
+      el("span", { class: "sym" }, row.symbol),
+      el("span", { class: `dist-cell dist-${tone}` }, `${row.distance.toFixed(1)}%`),
+    ));
+  }
+}
+
+function renderDataGrids() {
+  const positions = S.overview?.positions || [];
+  renderGridSummary(positions);
+  createOrUpdateGrid("positionsGrid", [
+    { field: "symbol", headerName: L("col_symbol") },
+    { field: "venue", headerName: L("col_exchange") },
+    { field: "side", headerName: L("col_side") },
+    {
+      field: "distance_to_liquidation_pct",
+      headerName: L("col_distance"),
+      cellRenderer: distanceCellRenderer,
+      comparator: (a, b) => (Number(a) || 0) - (Number(b) || 0),
+    },
+    { field: "unrealized_pnl", headerName: L("kpi_pnl"), valueFormatter: (p) => p.value == null ? L("none") : Number(p.value).toFixed(2) },
+  ], positions, {
+    isExternalFilterPresent: () => Object.keys(gridFilterSpec).some((k) => k !== "query" && k !== "source" && gridFilterSpec[k] != null && gridFilterSpec[k] !== ""),
+    doesExternalFilterPass: (node) => positionPassesFilter(node.data || {}),
+  });
+
+  const alerts = S.alerts || [];
+  createOrUpdateGrid("alertsGrid", [
+    { field: "level", headerName: L("col_risk") },
+    { field: "symbol", headerName: L("col_symbol") },
+    { field: "message", headerName: L("timeline_title") },
+    { field: "time", headerName: L("col_when") },
+  ], alerts.map((a) => ({
+    level: a.level || a.severity || "",
+    symbol: a.symbol || "",
+    message: a.title || a.message || a.level || "",
+    time: a.timestamp != null ? clock(a.timestamp) : (a.time || ""),
+  })));
+  renderGridChart(positions, alerts);
+}
+
+async function applyGridFilter() {
+  const q = ($("gridFilter") && $("gridFilter").value) || "";
+  try {
+    const r = await fetch(`/api/grid-filter?q=${encodeURIComponent(q)}`);
+    gridFilterSpec = r.ok ? await r.json() : {};
+  } catch (err) {
+    gridFilterSpec = {};
+  }
+  if (GRIDS.positionsGrid) GRIDS.positionsGrid.onFilterChanged();
+}
+
+async function refreshBilling() {
+  let billing = { enabled: false, tier: "free", is_pro: false, subscriptions: [] };
+  try {
+    if (MODE === "me") {
+      const r = await fetch("/api/me/billing", { credentials: "same-origin" });
+      if (r.ok) billing = await r.json();
+    } else {
+      const r = await fetch("/api/billing/status");
+      if (r.ok) {
+        const s = await r.json();
+        billing = { enabled: s.enabled, tier: "free", is_pro: false, plan_id: s.plan_id, subscriptions: [] };
+      }
+    }
+  } catch (err) { /* keep free demo row */ }
+
+  const pro = !!billing.is_pro;
+  $("tierBadge").textContent = L(pro ? "tier_pro_label" : "tier_free_label");
+  $("tierBadge").className = `tier-badge ${pro ? "tier-pro" : "tier-free"}`;
+  $("tierDescription").textContent = !billing.enabled ? L("billing_disabled") : L(pro ? "pro_active" : "pro_banner");
+  $("proBanner").hidden = pro || !billing.enabled;
+  $("upgradeBtn").hidden = pro || !billing.enabled;
+  $("rescuePassBtn").hidden = pro || !billing.enabled;
+  if ($("agentCheckoutBtn")) $("agentCheckoutBtn").hidden = !billing.enabled;
+  $("cancelSubBtn").hidden = !pro || !billing.enabled;
+
+  const rows = (billing.subscriptions || []).map((s) => ({
+    plan: s.plan_id || billing.plan_id || L("tier_pro_label"),
+    status: s.status || (pro ? "ACTIVE" : "FREE"),
+    next_bill: s.activated_at || s.updated_at || "",
+    subscription_id: s.subscription_id || "",
+  }));
+  if (!rows.length) {
+    rows.push({
+      plan: L("tier_free_label"),
+      status: billing.enabled ? L("tier_free_label") : L("tier_free_label"),
+      next_bill: "",
+      subscription_id: "",
+    });
+  }
+  createOrUpdateGrid("billingGrid", [
+    { field: "plan", headerName: L("col_plan") },
+    { field: "status", headerName: L("col_status") },
+    { field: "next_bill", headerName: L("col_next_bill") },
+    { field: "subscription_id", headerName: L("col_subscription_id") },
+  ], rows);
+
+  const actions = billing.agent_actions || [];
+  const agentRows = actions.map((a) => ({
+    tool: a.tool || "",
+    product: a.product || "",
+    source: a.source || "",
+    status: a.status || "",
+    resource_id: a.resource_id || "",
+  }));
+  if (!agentRows.length) {
+    agentRows.push({ tool: L("agent_none"), product: "", source: "", status: "", resource_id: "" });
+  }
+  createOrUpdateGrid("agentGrid", [
+    { field: "tool", headerName: L("col_tool") },
+    { field: "product", headerName: L("col_product") },
+    { field: "source", headerName: L("col_source") },
+    { field: "status", headerName: L("col_status") },
+    { field: "resource_id", headerName: L("col_subscription_id") },
+  ], agentRows);
+}
+
+async function startCheckout(kind) {
+  if (MODE !== "me") { location.assign("/login"); return; }
+  const path = kind === "rescue-pass" ? "/api/me/billing/rescue-pass" : "/api/me/billing/subscribe";
+  $("billingMsg").textContent = L("paypal_loading");
+  const res = await sendJson(path, {});
+  if (res.ok && res.data?.approve_url) {
+    location.assign(res.data.approve_url);
+    return;
+  }
+  $("billingMsg").textContent = L("paypal_error");
+}
+
+async function startAgentCheckout() {
+  if (MODE !== "me") { location.assign("/login"); return; }
+  $("billingMsg").textContent = L("paypal_loading");
+  const res = await sendJson("/api/me/billing/agent", { product: "auto" });
+  if (res.ok && res.data?.approve_url) {
+    location.assign(res.data.approve_url);
+    return;
+  }
+  $("billingMsg").textContent = (res.data && res.data.message) || L("paypal_error");
+  refreshBilling();
+}
+
+async function cancelSubscription() {
+  const res = await sendJson("/api/me/billing/cancel", {});
+  $("billingMsg").textContent = res.ok ? L("pro_active") : L("paypal_error");
+  if (res.ok) refreshBilling();
+}

@@ -1115,6 +1115,12 @@ process: look for a second bot instance polling the same token.
 | `LIQGUARD_ESCALATION_MAX_REMINDERS` | No | Default reminder cap for new users (default: 5) |
 | `LIQGUARD_RISK_PER_TRADE_PCT` | No | Default max loss per position at its exit, % of equity, for new users (default: 2, range 0.1–20) |
 | `LIQGUARD_MAX_MARGIN_PCT` | No | Default max margin per position, % of equity, for new users (default: 25, range 1–100) |
+| `PAYPAL_CLIENT_ID` | No | PayPal REST app Client ID (sandbox). Unset = free tier only, Meta demo unchanged |
+| `PAYPAL_CLIENT_SECRET` | No | PayPal REST app secret. Never commit a real value |
+| `PAYPAL_WEBHOOK_ID` | No | Webhook id for `POST /webhooks/paypal` signature verification. **Required when PayPal is on** — missing id returns HTTP 503; verification is never skipped |
+| `PAYPAL_ENV` | No | `sandbox` (default) or `live` (the create-plan helper refuses live) |
+| `PAYPAL_PLAN_ID` | No | Billing plan id (`python3 -m liqguard.payments.create_plan`) |
+| `LIQGUARD_PRO_POLL_INTERVAL` | No | Pro-tier monitor interval in seconds (default: 10, minimum 5) |
 
 ## Demo Video Script
 

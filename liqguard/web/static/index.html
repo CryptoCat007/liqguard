@@ -6,6 +6,12 @@
   <title data-i18n="title">LiqGuard · Liquidation early-warning</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
   <link rel="stylesheet" href="/static/app.css">
+  <!-- AG Grid Community (MIT) for data tables -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.0.3/styles/ag-grid.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.0.3/styles/ag-theme-alpine.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@31.0.3/styles/ag-theme-alpine-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@31.0.3/dist/ag-grid-community.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/ag-charts-community@10.3.3/dist/umd/ag-charts-community.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
@@ -121,6 +127,40 @@
       </div>
     </details>
 
+    <details class="fold card" id="foldBilling" open>
+      <summary class="fold-head">
+        <span class="fold-icon" aria-hidden="true">💳</span>
+        <span class="fold-text">
+          <span class="card-title" data-i18n="billing_title">Billing &amp; Subscription</span>
+          <span class="card-sub" data-i18n="billing_sub">Manage your LiqGuard Pro subscription via PayPal</span>
+        </span>
+        <span class="fold-chev" aria-hidden="true"></span>
+      </summary>
+      <div class="fold-body">
+        <div class="pro-banner" id="proBanner" hidden>
+          <span class="pro-banner-text" data-i18n="pro_banner">Upgrade to Pro for faster alerts and unlimited Muse advice</span>
+          <button class="btn btn-primary btn-sm" id="bannerUpgradeBtn" type="button" data-i18n="paypal_checkout">Subscribe with PayPal</button>
+        </div>
+        <div id="billingStatus" class="billing-status">
+          <div class="billing-tier">
+            <span class="tier-badge tier-free" id="tierBadge" data-i18n="tier_free_label">Free</span>
+            <span id="tierDescription"></span>
+          </div>
+          <div class="billing-features" id="billingFeatures"></div>
+        </div>
+        <div id="billingGrid" class="ag-theme-alpine-dark billing-grid data-grid" style="height: 140px; width: 100%;"></div>
+        <div class="card-sub" data-i18n="agent_log" style="margin-top:12px">Muse PayPal actions</div>
+        <div id="agentGrid" class="ag-theme-alpine-dark billing-grid data-grid" style="height: 140px; width: 100%;"></div>
+        <div class="billing-actions" id="billingActions">
+          <button class="btn btn-primary btn-sm" id="upgradeBtn" type="button" data-i18n="paypal_checkout" hidden>Subscribe with PayPal</button>
+          <button class="btn btn-ghost btn-sm" id="rescuePassBtn" type="button" data-i18n="rescue_pass_cta" hidden>Buy Rescue Pass</button>
+          <button class="btn btn-primary btn-sm" id="agentCheckoutBtn" type="button" data-i18n="agent_checkout_cta" hidden>Ask Muse to check out</button>
+          <button class="btn btn-ghost btn-sm" id="cancelSubBtn" type="button" data-i18n="cancel_subscription" hidden>Cancel subscription</button>
+        </div>
+        <div class="panel-msg" id="billingMsg" role="status"></div>
+      </div>
+    </details>
+
     <section class="wake card" id="wake" hidden aria-live="assertive">
       <div class="wake-icon">⏰</div>
       <div class="wake-body">
@@ -188,6 +228,13 @@
         <span data-i18n="col_risk">Risk</span>
       </div>
       <div class="plist" id="positions"></div>
+      <div class="grid-toolbar">
+        <label class="grid-filter-label" for="gridFilter" data-i18n="grid_filter">Filter</label>
+        <input id="gridFilter" class="field" type="search" data-i18n-placeholder="grid_filter_ph" placeholder="e.g. positions within 5% of liquidation" autocomplete="off">
+      </div>
+      <div id="gridSummary" class="grid-summary" role="status"></div>
+      <div id="positionsGrid" class="ag-theme-alpine-dark data-grid" style="height: 240px; width: 100%; margin-top: 12px;"></div>
+      <div id="gridChart" class="grid-chart" data-i18n-aria="grid_chart" aria-label="Distance / alerts"></div>
     </section>
 
     <div class="group-head">
@@ -357,7 +404,10 @@
         </span>
         <span class="fold-chev" aria-hidden="true"></span>
       </summary>
-      <div class="fold-body"><ol class="timeline scroll" id="timeline"></ol></div>
+      <div class="fold-body">
+        <ol class="timeline scroll" id="timeline"></ol>
+        <div id="alertsGrid" class="ag-theme-alpine-dark data-grid" style="height: 220px; width: 100%; margin-top: 12px;"></div>
+      </div>
     </details>
 
     <details class="fold card" id="foldAdvice">

@@ -29,10 +29,11 @@ from liqguard.i18n import EN, LANGUAGES, TELEGRAM_CODES, Translator, t
 
 from . import keyboards
 from .codec import CallbackCodec, derive_secret, is_ui_payload
+from .features import billing as billing_feature
 from .features import binding as binding_feature
 from .features import dispatch_table
 from .router import CallbackRouter, send
-from .screen import Screen, Signer
+from .screen import Request, Screen, Signer
 from .services import UIServices
 
 logger = logging.getLogger(__name__)
@@ -69,11 +70,13 @@ class TelegramUI:
         r = self.aiogram_router
         r.message.register(self.on_command, CommandStart())
         r.message.register(self.on_command, Command(*COMMAND_ACTIONS))
+        r.message.register(self.on_ask_checkout, Command("ask"))
         r.message.register(
             self.on_bind_message,
             StateFilter(*binding_feature.BindStates.__states__),
             F.text,
         )
+        r.message.register(self.on_agent_text, F.chat.type == "private", F.text)
         r.callback_query.register(self.on_callback, F.data.func(is_ui_payload))
         dp.include_router(r)
 
@@ -112,6 +115,36 @@ class TelegramUI:
         screen = await binding_feature.on_message(self.services, message, state, self.signer(message.from_user.id), T)
         await send(message.bot, message.chat.id, None, screen)
 
+    async def on_ask_checkout(self, message: Message, state: FSMContext, command: Optional[CommandObject] = None) -> None:
+        question = ((command.args if command else None) or "").strip()
+        if not question:
+            question = (message.text or "").replace("/ask", "", 1).strip()
+        from liqguard.payments.agent import intent_from_text
+
+        if intent_from_text(question) is None:
+            raise SkipHandler()
+        await self._send_agent_checkout(message, state, question)
+
+    async def on_agent_text(self, message: Message, state: FSMContext) -> None:
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            raise SkipHandler()
+        from liqguard.payments.agent import intent_from_text
+
+        if intent_from_text(text) is None:
+            raise SkipHandler()
+        await self._send_agent_checkout(message, state, text)
+
+    async def _send_agent_checkout(self, message: Message, state: FSMContext, text: str) -> None:
+        T = await self.translator_for(message)
+        req = Request(
+            user_id=message.from_user.id, action="px", args=("auto",), services=self.services,
+            sign=self.signer(message.from_user.id), chat_type=str(message.chat.type),
+            state=state, message=message, extra={"text": text}, T=T,
+        )
+        screen = await billing_feature.agent_checkout_screen(req)
+        await send(message.bot, message.chat.id, None, screen)
+
     # ------------------------------------------------------------------ alert buttons
 
     def alert_markup(self, user_id: int, actions: list[tuple[str, str]], lang: str = EN, demo: bool = False) -> Any:
@@ -130,7 +163,10 @@ class TelegramUI:
             else:
                 rest.append((label, data))
         try:
-            rows = keyboards.alert_rows(Translator(lang), self.signer(user_id), source, symbol, ack_id, demo)
+            rows = keyboards.alert_rows(
+                Translator(lang), self.signer(user_id), source, symbol, ack_id, demo,
+                agent=self.ctx.settings.paypal_enabled,
+            )
         except ValueError:
             return None
         rows += [[keyboards.Button(text=label, callback_data=data)] for label, data in rest]

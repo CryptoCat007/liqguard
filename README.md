@@ -268,6 +268,50 @@ The full reference (formulas, every command, the dashboard API, all environment 
 [docs/technical-reference.md](docs/technical-reference.md). The 3-minute demo walkthrough is in
 [docs/demo-script.md](docs/demo-script.md).
 
+## What's new since Oct 1 (PayPal AI Hackathon)
+
+LiqGuard now uses **PayPal as the payment rail and Muse as the payment agent**, not two parallel tracks.
+
+- **Agentic checkout (Best Use of Agentic Commerce):** on a liquidation alert, or when the user says (EN / 繁體中文) “get me a Rescue Pass” / “upgrade to Pro” — or taps **🤖 Muse checkout** — Muse calls PayPal Agent Toolkit–aligned tools (`create_order`, `create_subscription`). The host fills **fixed sandbox prices** (Rescue Pass $2.99, Pro via `PAYPAL_PLAN_ID`). The model never chooses an amount. The user must tap the PayPal approve URL; nothing is captured in the bot. Each tool call is logged (`agent_actions`) and shown on the web billing grid. PayPal is never used to fund a trading account or buy crypto.
+- **Webhook security:** if `PAYPAL_WEBHOOK_ID` is missing, `POST /webhooks/paypal` **rejects with 503**. Verification is never skipped.
+- **AG Grid polish:** alpine-dark theme, liquidation-distance color scale, summary bar, AG Charts Community (Chart.js fallback) for distance, and a natural-language filter (“positions within 5% of liquidation”) with a deterministic parser and optional Muse refinement.
+- **Unchanged:** Meta Muse demo and free tier still work with PayPal unset. Sandbox only for this submission.
+
+## What's new for PayPal hackathon
+
+This branch keeps the Meta Muse demo path and adds a **PayPal sandbox Pro subscription**
+plus an **AG Grid Community** dashboard. PayPal env vars are optional: if they are unset,
+everyone stays on the free tier and Telegram / the public demo still work.
+
+| vs the Meta version | What changed |
+|---|---|
+| Muse | Still Meta Muse (`muse-spark-1.3`). Numbers stay in `liqguard/risk/`; Muse writes the words. When PayPal is configured and risk is high, Muse also suggests **Upgrade to Pro** or a one-time **Rescue Pass**. |
+| Monetization | None before. Now a single sandbox **PayPal Subscriptions** plan (Orders v2 one-time fallback for Rescue Pass). Payment starts only after the user taps a PayPal button (Telegram URL button or dashboard checkout). |
+| Tiers | **Free:** basic alerts, limited Muse when PayPal is on. **Pro:** 10s polling (vs 30s), multi-account headroom, unlimited Muse rescue advice. |
+| Activation | `POST /webhooks/paypal` verifies the signature (PayPal verify API), is idempotent (`payment_events.event_id`), and activates / cancels / suspends Pro. Telegram and the signed-in dashboard pick up the change immediately (billing WebSocket event + next poll). |
+| Web tables | Three **AG Grid Community (MIT, jsDelivr CDN)** grids: Positions, Alert history, Billing (plan / status / next bill / subscription id). Public demo uses the existing `/api/demo/snapshot` and `/api/demo/alerts` data. |
+| Config | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, `PAYPAL_ENV=sandbox`, `PAYPAL_PLAN_ID`. Placeholders only in `.env.example`. Never commit real secrets. |
+
+### Manual sandbox flow
+
+1. Create a sandbox app at [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox). Copy Client ID and Secret into `.env` (not the repo).
+2. Create a monthly plan:
+   ```bash
+   python3 -m liqguard.payments.create_plan   # prints PAYPAL_PLAN_ID=P-...
+   ```
+   Or create the product/plan in the dashboard and set `PAYPAL_PLAN_ID`.
+3. Expose the dashboard with HTTPS (`LIQGUARD_PUBLIC_URL=https://<domain>`). Create a webhook pointing to:
+   ```
+   https://<your-domain>/webhooks/paypal
+   ```
+   Subscribe to `BILLING.SUBSCRIPTION.ACTIVATED`, `BILLING.SUBSCRIPTION.CANCELLED`,
+   `BILLING.SUBSCRIPTION.SUSPENDED`, `BILLING.SUBSCRIPTION.PAYMENT.FAILED`,
+   `PAYMENT.CAPTURE.COMPLETED`. Set `PAYPAL_WEBHOOK_ID`.
+4. Sign in with `/dashboard`, open **Billing**, tap **Subscribe with PayPal**, approve in the sandbox window. Or tap **💎 Pro** in Telegram (same checkout URL pattern as the login link).
+5. The webhook flips the user to Pro; `/api/me/billing` and Telegram 🧾 / 💎 show Active + subscription id. Cancel from the same screens.
+
+Without those env vars, `/api/billing/status` returns `enabled: false` and Muse is not gated.
+
 ## Roadmap
 
 - [x] Binance USDⓈ-M and Hyperliquid, read-only

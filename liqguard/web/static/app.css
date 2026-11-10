@@ -862,3 +862,43 @@ html[lang^="zh"] .tag, html[lang^="zh"] .side, html[lang^="zh"] .lvl, html[lang^
   .fold-head .tag-ro, .fold .tier-counts { display: none; }
   .fold-body { padding: 0 12px 14px; }
 }
+
+/* ---------------- Pro tier & billing (PayPal AI Hackathon) ---------------- */
+.account-grid-1 { grid-template-columns: 1fr; border-top: 1px solid var(--line); padding-top: 16px; }
+.billing-status { display: grid; gap: 12px; padding: 12px 0; }
+.billing-tier { display: flex; align-items: center; gap: 10px; }
+.tier-badge { display: inline-flex; align-items: center; justify-content: center; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.tier-badge.tier-free { background: var(--line); color: var(--muted); }
+.tier-badge.tier-pro { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; }
+.billing-features { display: flex; flex-wrap: wrap; gap: 8px; }
+.billing-features .feature { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 8px; background: rgba(99, 102, 241, 0.1); font-size: 12px; color: var(--text); }
+.billing-features .feature.locked { opacity: 0.5; background: var(--line); }
+.billing-grid { margin: 12px 0; border-radius: 8px; overflow: hidden; }
+.billing-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#paypalButtonContainer { min-width: 200px; max-width: 300px; }
+
+/* AG Grid theme overrides for dark mode */
+.ag-theme-alpine, .ag-theme-alpine-dark { --ag-background-color: rgba(15, 23, 42, 0.5); --ag-header-background-color: rgba(30, 41, 59, 0.8); --ag-odd-row-background-color: rgba(30, 41, 59, 0.3); --ag-row-hover-color: rgba(99, 102, 241, 0.15); --ag-selected-row-background-color: rgba(99, 102, 241, 0.25); --ag-foreground-color: var(--text); --ag-secondary-foreground-color: var(--muted); --ag-border-color: var(--line); --ag-header-foreground-color: var(--text); --ag-font-size: 13px; --ag-font-family: var(--sans); }
+.ag-theme-alpine .ag-header-cell, .ag-theme-alpine-dark .ag-header-cell { font-weight: 600; }
+.ag-theme-alpine .ag-cell, .ag-theme-alpine-dark .ag-cell { padding: 8px 12px; }
+.dist-cell { display: inline-flex; align-items: center; font-variant-numeric: tabular-nums; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.dist-emergency { background: rgba(244, 63, 94, 0.22); color: #fb7185; }
+.dist-critical { background: rgba(251, 146, 60, 0.22); color: #fb923c; }
+.dist-warning { background: rgba(251, 191, 36, 0.22); color: #fbbf24; }
+.dist-safe { background: rgba(52, 211, 153, 0.18); color: #34d399; }
+.grid-toolbar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.grid-filter-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.grid-toolbar .field { flex: 1; min-width: 0; }
+.grid-summary { margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.grid-chart { height: 160px; margin-top: 12px; }
+
+/* Pro upgrade banner */
+.pro-banner { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; margin: 8px 0; border-radius: 10px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.1)); border: 1px solid rgba(99, 102, 241, 0.3); }
+.pro-banner-text { font-size: 13px; color: var(--text); }
+.pro-banner-text b { color: #a5b4fc; }
+.pro-banner .btn { flex-shrink: 0; margin-left: 16px; }
+
+/* Muse upgrade hint in rescue advice */
+.muse-upgrade-hint { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin-top: 12px; border-radius: 8px; background: rgba(99, 102, 241, 0.1); border: 1px dashed rgba(99, 102, 241, 0.3); font-size: 12.5px; color: var(--muted); }
+.muse-upgrade-hint .hint-icon { font-size: 16px; }
+.muse-upgrade-hint a { color: #a5b4fc; font-weight: 600; }

@@ -46,5 +46,6 @@ def wire_bot(ctx: AppContext, bot: Bot, escalation_check_seconds: float = 5.0) -
         prefunding_lead_minutes=ctx.settings.prefunding_lead_minutes,
         escalation=escalation,
         demo_window=ctx.demo_alerts,
+        entitlements=ctx.entitlements,
     )
     return BotApp(dp, ui, notifier, escalation, monitor)
