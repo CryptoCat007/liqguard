@@ -11,6 +11,7 @@ is captured here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ logger = logging.getLogger("liqguard.payments.agent")
 RESCUE_PASS_USD = "2.99"
 RESCUE_PASS_DESCRIPTION = "LiqGuard Rescue Pass"
 ALLOWED_TOOLS = frozenset({"create_order", "create_subscription"})
+MUSE_CHECKOUT_TIMEOUT = 8.0
 
 # PayPal Agent Toolkit–compatible OpenAI function tools. Amounts are omitted on
 # purpose: the host fills them in from RESCUE_PASS_USD / PAYPAL_PLAN_ID.
@@ -86,16 +88,26 @@ _PRO = re.compile(
 
 
 @dataclass
+class MusePick:
+    """Muse (or rules) choice for which PayPal tool to run."""
+
+    product: Optional[str]
+    source: str  # muse | rules | timeout
+    note: str = ""
+
+
+@dataclass
 class AgentCheckout:
     """Result of one agent tool call (or a deterministic fallback)."""
 
     tool: Optional[str]
     product: Optional[str]  # rescue | pro
-    source: str  # muse | rules
+    source: str  # muse | rules | timeout
     approve_url: Optional[str] = None
     resource_id: Optional[str] = None
     status: str = "created"  # created | error | none | rejected
     message: str = ""
+    note: str = ""
     model_args: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -107,6 +119,7 @@ class AgentCheckout:
             "resource_id": self.resource_id,
             "status": self.status,
             "message": self.message,
+            "note": self.note,
         }
 
 
@@ -136,19 +149,32 @@ def _log(user_id: int, checkout: AgentCheckout) -> None:
     )
 
 
-async def muse_pick_tool(llm: Any, text: str, lang: str) -> tuple[Optional[str], str]:
+def _muse_note(content: Optional[str]) -> str:
+    note = " ".join((content or "").split())
+    if len(note) > 240:
+        return note[:237] + "..."
+    return note
+
+
+async def muse_pick_tool(llm: Any, text: str, lang: str) -> MusePick:
     """
     Ask Muse which PayPal Agent Toolkit tool to call.
 
-    Returns (product, source) where product is rescue|pro|None and source is muse|rules.
+    Returns MusePick(product, source, note) where product is rescue|pro|None
+    and source is muse|rules.
     """
     fallback = intent_from_text(text)
-    if llm is None or getattr(llm, "is_mock", True) or getattr(llm, "client", None) is None:
-        return fallback, "rules"
+    if llm is None or getattr(llm, "is_mock", True):
+        return MusePick(fallback, "rules")
+    if not hasattr(llm, "_create") and getattr(llm, "client", None) is None:
+        return MusePick(fallback, "rules")
     system = (
         "You are LiqGuard's payment agent. You may only call PayPal tools for "
         "LiqGuard's own Rescue Pass (create_order) or Pro subscription "
         "(create_subscription). Never send money to a trading account or buy crypto. "
+        "If the user tapped Rescue Pass on a liquidation-risk alert, call create_order "
+        "and write one short line on why Rescue Pass fits now. "
+        "If they tapped Pro, call create_subscription and write one short line. "
         "If the user is not asking to pay, do not call a tool. "
         f"Reply in {'Traditional Chinese' if str(lang).startswith('zh') else 'English'}."
     )
@@ -169,24 +195,25 @@ async def muse_pick_tool(llm: Any, text: str, lang: str) -> tuple[Optional[str],
         else:
             response = await llm.client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
+        note = _muse_note(getattr(msg, "content", None))
         calls = getattr(msg, "tool_calls", None) or []
         if calls:
             name = calls[0].function.name
             if name not in ALLOWED_TOOLS:
                 logger.warning("PayPal agent refused unknown Muse tool %s", name)
-                return None, "muse"
+                return MusePick(None, "muse", note)
             if name == "create_order":
-                return "rescue", "muse"
+                return MusePick("rescue", "muse", note)
             if name == "create_subscription":
-                return "pro", "muse"
+                return MusePick("pro", "muse", note)
         content = (msg.content or "").lower()
         if "create_order" in content or "rescue" in content:
-            return "rescue", "muse"
+            return MusePick("rescue", "muse", note)
         if "create_subscription" in content or "pro" in content:
-            return "pro", "muse"
+            return MusePick("pro", "muse", note)
     except Exception as e:
         logger.warning("Muse PayPal tool choice failed (%s); using rules", type(e).__name__)
-    return fallback, "rules"
+    return MusePick(fallback, "rules")
 
 
 async def execute_tool(
@@ -280,21 +307,37 @@ async def run_checkout(
     store: Any = None,
     default_product: Optional[str] = None,
 ) -> AgentCheckout:
-    """Pick a tool (Muse or rules) and execute it. `product` short-circuits intent."""
-    source = "rules"
-    if product not in ("rescue", "pro"):
-        product, source = await muse_pick_tool(llm, text, lang)
-    if product is None and default_product in ("rescue", "pro"):
-        product, source = default_product, "rules"
+    """Pick a tool (Muse or rules) and execute it.
+
+    `product` still forces Rescue Pass / Pro (prices stay server-side), but Muse
+    is always asked so px/rescue and px/pro record source=muse when it answers.
+    """
+    pick = MusePick(intent_from_text(text), "rules")
+    try:
+        pick = await asyncio.wait_for(muse_pick_tool(llm, text, lang), MUSE_CHECKOUT_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("Muse PayPal tool choice timed out after %.0fs", MUSE_CHECKOUT_TIMEOUT)
+        pick = MusePick(intent_from_text(text), "timeout")
+    except Exception as e:
+        logger.warning("Muse PayPal tool choice failed (%s); using rules", type(e).__name__)
+        pick = MusePick(intent_from_text(text), "rules")
+
+    forced = product in ("rescue", "pro")
+    if not forced:
+        product = pick.product
+        if product is None and default_product in ("rescue", "pro"):
+            product = default_product
+    source = pick.source if pick.source in ("muse", "timeout") else "rules"
+    note = pick.note if source == "muse" else ""
     if product is None:
         checkout = AgentCheckout(tool=None, product=None, source=source, status="none",
-                                 message="No LiqGuard PayPal checkout requested")
+                                 message="No LiqGuard PayPal checkout requested", note=note)
         _log(user_id, checkout)
         return checkout
     if paypal is None:
         checkout = AgentCheckout(
             tool=tool_for_product(product), product=product, source=source, status="error",
-            message="PayPal is not configured",
+            message="PayPal is not configured", note=note,
         )
         _log(user_id, checkout)
         if store is not None:
@@ -307,6 +350,7 @@ async def run_checkout(
         return_url=return_url, cancel_url=f"{base}/me",
     )
     checkout.source = source
+    checkout.note = note
     if store is not None:
         await store.save_agent_action(user_id, checkout)
     return checkout

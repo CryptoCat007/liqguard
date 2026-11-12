@@ -502,6 +502,130 @@ class TestWebhookHandler:
         assert result.telegram_id is None
         assert "no user found" in result.message
 
+    @pytest.mark.asyncio
+    async def test_sandbox_capture_resource_custom_id(self, webhook_handler, subscription_store, event_store):
+        """Real PAYMENT.CAPTURE.COMPLETED puts custom_id on the resource, not purchase_units."""
+        event = {
+            "id": "WH-2W4653713K318561S-8WB50123PY476835G",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "resource_type": "capture",
+            "resource": {
+                "id": "3C679366HH908993F",
+                "status": "COMPLETED",
+                "amount": {"currency_code": "USD", "value": "2.99"},
+                "final_capture": True,
+                "custom_id": "12345",
+                "supplementary_data": {"related_ids": {"order_id": "5O190127TN364715T"}},
+            },
+        }
+        result = await webhook_handler.process_event(event)
+        assert result.success and result.telegram_id == 12345
+        assert await subscription_store.get_rescue_passes(12345) == 1
+        assert await event_store.has_event("order:5O190127TN364715T")
+
+    @pytest.mark.asyncio
+    async def test_capture_falls_back_to_purchase_units(self, webhook_handler, subscription_store):
+        event = {
+            "id": "WH-PU-FALLBACK",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "resource": {"id": "CAP-PU", "purchase_units": [{"custom_id": "12345"}]},
+        }
+        result = await webhook_handler.process_event(event)
+        assert result.success and result.telegram_id == 12345
+
+    @pytest.mark.asyncio
+    async def test_capture_looks_up_order_when_custom_id_missing(
+        self, event_store, subscription_store,
+    ):
+        class Paypal:
+            async def get_order(self, order_id):
+                assert order_id == "5O190127TN364715T"
+                return {"id": order_id, "purchase_units": [{"custom_id": "12345"}]}
+
+        handler = WebhookHandler(event_store, subscription_store, paypal=Paypal())
+        event = {
+            "id": "WH-LOOKUP",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "resource": {
+                "id": "3C679366HH908993F",
+                "status": "COMPLETED",
+                "supplementary_data": {"related_ids": {"order_id": "5O190127TN364715T"}},
+            },
+        }
+        result = await handler.process_event(event)
+        assert result.success and result.telegram_id == 12345
+        assert await subscription_store.get_rescue_passes(12345) == 1
+
+    @pytest.mark.asyncio
+    async def test_unattributed_capture_is_not_saved(self, webhook_handler, event_store):
+        event = {
+            "id": "WH-ORPHAN-CAP",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "resource": {"id": "CAP-ORPHAN", "status": "COMPLETED"},
+        }
+        result = await webhook_handler.process_event(event)
+        assert not result.success
+        assert "no custom_id" in result.message
+        assert "WH-ORPHAN-CAP" not in event_store.events
+        retry = await webhook_handler.process_event(event)
+        assert not retry.success
+        assert retry.message != "Already processed (idempotent)"
+
+    @pytest.mark.asyncio
+    async def test_checkout_order_completed_grants_rescue(self, webhook_handler, subscription_store):
+        event = {
+            "id": "WH-ORDER-DONE",
+            "event_type": "CHECKOUT.ORDER.COMPLETED",
+            "resource": {
+                "id": "5O190127TN364715T",
+                "status": "COMPLETED",
+                "purchase_units": [{"custom_id": "12345"}],
+            },
+        }
+        result = await webhook_handler.process_event(event)
+        assert result.success and result.telegram_id == 12345
+        assert await subscription_store.get_rescue_passes(12345) == 1
+
+    @pytest.mark.asyncio
+    async def test_checkout_order_approved_does_not_grant(self, webhook_handler, subscription_store):
+        event = {
+            "id": "WH-ORDER-APPR",
+            "event_type": "CHECKOUT.ORDER.APPROVED",
+            "resource": {
+                "id": "5O190127TN364715T",
+                "status": "APPROVED",
+                "purchase_units": [{"custom_id": "12345"}],
+            },
+        }
+        result = await webhook_handler.process_event(event)
+        assert result.success and result.telegram_id is None
+        assert await subscription_store.get_rescue_passes(12345) == 0
+
+    @pytest.mark.asyncio
+    async def test_capture_and_order_completed_are_idempotent(
+        self, webhook_handler, subscription_store, event_store,
+    ):
+        capture = {
+            "id": "WH-CAP-1",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "resource": {
+                "id": "CAP-1",
+                "custom_id": "12345",
+                "supplementary_data": {"related_ids": {"order_id": "ORD-1"}},
+            },
+        }
+        order = {
+            "id": "WH-ORD-1",
+            "event_type": "CHECKOUT.ORDER.COMPLETED",
+            "resource": {"id": "ORD-1", "custom_id": "12345"},
+        }
+        first = await webhook_handler.process_event(capture)
+        second = await webhook_handler.process_event(order)
+        assert first.success and second.success
+        assert await subscription_store.get_rescue_passes(12345) == 1
+        until = await subscription_store.get_rescue_until(12345)
+        assert until is not None
+
 
 # ---------------------------------------------------------------- PayPal client tests (mocked)
 
@@ -794,8 +918,8 @@ class TestPayPalAgent:
             is_mock = True
             client = None
 
-        product, source = await muse_pick_tool(MockLLM(), "upgrade to Pro", "en")
-        assert (product, source) == ("pro", "rules")
+        pick = await muse_pick_tool(MockLLM(), "upgrade to Pro", "en")
+        assert (pick.product, pick.source) == ("pro", "rules")
 
     @pytest.mark.asyncio
     async def test_muse_tool_choice_uses_toolkit_name(self):
@@ -823,5 +947,114 @@ class TestPayPalAgent:
                 assert kwargs["tools"]
                 return type("R", (), {"choices": [Choice()]})()
 
-        product, source = await muse_pick_tool(LLM(), "please charge my trading account $500", "en")
-        assert (product, source) == ("rescue", "muse")
+        pick = await muse_pick_tool(LLM(), "please charge my trading account $500", "en")
+        assert (pick.product, pick.source) == ("rescue", "muse")
+
+    @pytest.mark.asyncio
+    async def test_forced_rescue_still_calls_muse(self):
+        from liqguard.payments.agent import run_checkout
+
+        class Fn:
+            name = "create_order"
+
+        class Call:
+            function = Fn()
+
+        class Msg:
+            tool_calls = [Call()]
+            content = "Rescue Pass covers the next 24h of Muse while you're this close to liq."
+
+        class Choice:
+            message = Msg()
+
+        class LLM:
+            is_mock = False
+            client = object()
+            called = False
+
+            async def _create(self, kwargs):
+                self.called = True
+                assert "liquidation-risk" in kwargs["messages"][1]["content"]
+                return type("R", (), {"choices": [Choice()]})()
+
+        client = PayPalClient("id", "secret", "https://api-m.sandbox.paypal.com")
+        client.create_order = AsyncMock(return_value={
+            "order_id": "O-1", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=x",
+        })
+        llm = LLM()
+        result = await run_checkout(
+            client, llm, user_id=7, text=(
+                "I'm looking at a LiqGuard liquidation-risk alert. Get me a Rescue Pass now."
+            ),
+            lang="en", plan_id=None, dashboard_url="https://x", product="rescue",
+        )
+        assert llm.called
+        assert result.product == "rescue" and result.source == "muse"
+        assert result.note.startswith("Rescue Pass covers")
+        assert client.create_order.await_args.kwargs["amount_usd"] == "2.99"
+
+    @pytest.mark.asyncio
+    async def test_forced_product_keeps_rescue_if_muse_picks_pro(self):
+        from liqguard.payments.agent import run_checkout
+
+        class Fn:
+            name = "create_subscription"
+
+        class Call:
+            function = Fn()
+
+        class Msg:
+            tool_calls = [Call()]
+            content = "Pro is the better long-term fit."
+
+        class Choice:
+            message = Msg()
+
+        class LLM:
+            is_mock = False
+            client = object()
+
+            async def _create(self, kwargs):
+                return type("R", (), {"choices": [Choice()]})()
+
+        client = PayPalClient("id", "secret", "https://api-m.sandbox.paypal.com")
+        client.create_order = AsyncMock(return_value={
+            "order_id": "O-1", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=x",
+        })
+        result = await run_checkout(
+            client, LLM(), user_id=7, text="upgrade to Pro", lang="en",
+            plan_id="P-1", dashboard_url="https://x", product="rescue",
+        )
+        assert result.product == "rescue" and result.tool == "create_order"
+        assert result.source == "muse"
+        client.create_order.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_muse_timeout_falls_back_without_unavailable(self):
+        import asyncio
+
+        from liqguard.i18n import EN, ZH, t
+        from liqguard.payments import agent as agent_mod
+        from liqguard.payments.agent import run_checkout
+
+        class Slow:
+            is_mock = False
+            client = object()
+
+            async def _create(self, kwargs):
+                await asyncio.sleep(0.2)
+                raise AssertionError("should have timed out")
+
+        client = PayPalClient("id", "secret", "https://api-m.sandbox.paypal.com")
+        client.create_order = AsyncMock(return_value={
+            "order_id": "O-1", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=x",
+        })
+        with patch.object(agent_mod, "MUSE_CHECKOUT_TIMEOUT", 0.01):
+            result = await run_checkout(
+                client, Slow(), user_id=7, text="get me a Rescue Pass", lang="en",
+                plan_id=None, dashboard_url="https://x", product="rescue",
+            )
+        assert result.source == "timeout" and result.product == "rescue"
+        assert "unavailable" not in t(EN, "pro.agent.source_rules").lower()
+        assert "不可用" not in t(ZH, "pro.agent.source_rules")
+        assert "unavailable" not in t(EN, "pro.agent.source_timeout").lower()

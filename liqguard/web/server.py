@@ -43,7 +43,12 @@ from liqguard.core.user_settings import apply_setting, settings_dict
 from liqguard.i18n import localize, normalize, t, web_catalog
 from liqguard.models import Position, User
 from liqguard.payments import PayPalClient, PayPalError
-from liqguard.payments.webhooks import WebhookHandler, extract_webhook_headers
+from liqguard.payments.webhooks import (
+    WebhookHandler,
+    extract_webhook_headers,
+    fulfill_rescue_order,
+    parse_telegram_id,
+)
 from liqguard.risk import (
     RescueSimulator,
     position_protection,
@@ -51,7 +56,7 @@ from liqguard.risk import (
 from liqguard.simulation import SCENARIOS, MarketSimulation
 
 from .auth import SessionAuth, register_auth_routes
-from .pages import remember_language, render_login, request_language
+from .pages import remember_language, render_login, render_payment_received, request_language
 from .security import apply_security_headers, require_csrf
 
 logger = logging.getLogger(__name__)
@@ -767,24 +772,33 @@ def create_app(
                 ctx.settings.paypal_webhook_id,
             )
 
-        def _billing_notify(telegram_id: int, kind: str, resource_id: str) -> None:
-            async def run():
-                sim = ctx.simulations.get(telegram_id)
-                if sim is not None:
-                    event = {"type": "billing", "kind": kind, "resource_id": resource_id}
-                    await hubs.for_simulation(sim).broadcast(event)
-                hook = ctx.billing_notify
-                if hook is not None:
-                    result = hook(telegram_id, kind, resource_id)
-                    if asyncio.iscoroutine(result):
-                        await result
-            asyncio.create_task(run())
+        async def _billing_notify(telegram_id: int, kind: str, resource_id: str) -> None:
+            sim = ctx.simulations.get(telegram_id)
+            if sim is not None:
+                event = {"type": "billing", "kind": kind, "resource_id": resource_id}
+                await hubs.for_simulation(sim).broadcast(event)
+            hook = ctx.billing_notify
+            if hook is not None:
+                result = hook(telegram_id, kind, resource_id)
+                if asyncio.iscoroutine(result):
+                    await result
 
         webhook_handler = WebhookHandler(
             event_store=ctx.storage,
             subscription_store=ctx.storage,
             notify=_billing_notify,
+            paypal=paypal,
         )
+
+        def _paid_page(request: Request, claims: Optional[SessionClaims], *, kind: str, ok: bool):
+            if claims is not None:
+                if kind == "rescue":
+                    q = "rescue=success" if ok else "rescue=error"
+                else:
+                    q = "billing=success" if ok else "billing=error"
+                return RedirectResponse(f"/me?{q}", status_code=303)
+            page_kind = "pro" if kind.startswith("pro") else "rescue"
+            return HTMLResponse(render_payment_received(request_language(request), kind=page_kind, ok=ok))
         app.state.paypal = paypal
         app.state.entitlements = entitlements
 
@@ -836,28 +850,42 @@ def create_app(
 
         @app.get("/api/me/billing/return")
         async def billing_return(
+            request: Request,
             subscription_id: str = Query(...),
             claims: SessionClaims = Depends(auth.optional),
         ):
-            """Handle PayPal subscription return (user approved)."""
+            """Handle PayPal subscription return (user approved). Session is optional."""
             if paypal is None:
-                return RedirectResponse("/me?billing=error", status_code=303)
+                return _paid_page(request, claims, kind="pro", ok=False)
 
             try:
                 details = await paypal.get_subscription(subscription_id)
-                if details.is_active() and claims is not None:
+            except PayPalError as e:
+                logger.error("Failed to verify subscription: %s", e)
+                return _paid_page(request, claims, kind="pro", ok=False)
+
+            telegram_id = claims.user_id if claims is not None else parse_telegram_id(details.custom_id or "")
+            if telegram_id is None and details.custom_id:
+                telegram_id = await ctx.storage.get_user_by_custom_id(str(details.custom_id))
+            if details.is_active() and telegram_id is not None:
+                key = f"sub:{subscription_id}"
+                if not await ctx.storage.has_event(key):
                     await ctx.storage.save_subscription(
-                        claims.user_id,
+                        telegram_id,
                         subscription_id,
                         details.plan_id,
                         "ACTIVE",
                         payer_email=details.payer_email,
                     )
-                    return RedirectResponse("/me?billing=success", status_code=303)
-            except PayPalError as e:
-                logger.error("Failed to verify subscription: %s", e)
+                    await ctx.storage.save_event(
+                        key, "PRO_ACTIVATED", subscription_id, telegram_id, {"source": "return"},
+                    )
+                    await _billing_notify(telegram_id, "pro_activated", subscription_id)
+                return _paid_page(request, claims, kind="pro", ok=True)
 
-            return RedirectResponse("/me?billing=pending", status_code=303)
+            if claims is not None:
+                return RedirectResponse("/me?billing=pending", status_code=303)
+            return HTMLResponse(render_payment_received(request_language(request), kind="pro", ok=False))
 
         @app.post("/api/me/billing/cancel", dependencies=[Depends(require_csrf)])
         async def cancel_subscription_endpoint(claims: SessionClaims = Depends(auth.required)):
@@ -919,35 +947,43 @@ def create_app(
 
         @app.get("/api/me/billing/rescue-return")
         async def rescue_pass_return(
+            request: Request,
             token: str = Query(...),
             claims: SessionClaims = Depends(auth.optional),
         ):
-            """Handle Rescue Pass payment return (capture the order)."""
+            """Capture the Rescue Pass order and activate Rescue Mode without a dashboard session."""
             if paypal is None:
-                return RedirectResponse("/me?rescue=error", status_code=303)
+                return _paid_page(request, claims, kind="rescue", ok=False)
 
+            capture: dict = {}
+            captured = False
             try:
                 capture = await paypal.capture_order(token)
-                if capture.get("status") == "COMPLETED" and claims is not None:
-                    if ctx.entitlements is not None:
-                        await ctx.entitlements.activate_rescue_mode(claims.user_id)
-                    else:
-                        await ctx.storage.activate_rescue_mode(claims.user_id)
-                    await ctx.storage.save_agent_action(claims.user_id, {
-                        "tool": "rescue_mode", "product": "rescue", "source": "return",
-                        "status": "rescue_mode", "resource_id": token,
-                        "message": "Rescue Mode activated",
-                    })
-                    hook = ctx.billing_notify
-                    if hook is not None:
-                        result = hook(claims.user_id, "rescue_pass_purchased", token)
-                        if asyncio.iscoroutine(result):
-                            asyncio.create_task(result)
-                    return RedirectResponse("/me?rescue=success", status_code=303)
+                captured = capture.get("status") == "COMPLETED"
             except PayPalError as e:
-                logger.error("Failed to capture rescue pass order: %s", e)
+                if e.is_already_captured():
+                    captured = True
+                    try:
+                        capture = await paypal.get_order(token)
+                    except PayPalError as lookup_err:
+                        logger.error("GET order after already-captured failed: %s", lookup_err)
+                        capture = {}
+                else:
+                    logger.error("Failed to capture rescue pass order: %s", e)
+                    return _paid_page(request, claims, kind="rescue", ok=False)
 
-            return RedirectResponse("/me?rescue=error", status_code=303)
+            if not captured:
+                return _paid_page(request, claims, kind="rescue", ok=False)
+
+            telegram_id, _granted, _until = await fulfill_rescue_order(
+                ctx.storage, ctx.storage,
+                order_id=token, payload=capture, paypal=paypal,
+                notify=_billing_notify, source="return",
+            )
+            if telegram_id is None:
+                logger.warning("Rescue return for %s captured but not attributed", token)
+                return _paid_page(request, claims, kind="rescue", ok=False)
+            return _paid_page(request, claims, kind="rescue", ok=True)
 
         # ---------------------------------------------------------------- PayPal webhooks
 
@@ -981,6 +1017,9 @@ def create_app(
 
             result = await webhook_handler.process_event(event)
             logger.info("Processed webhook %s: %s", result.event_type, result.message)
+            if not result.success:
+                # Unattributed captures must not be acked — PayPal retries.
+                raise HTTPException(503, result.message)
 
             return {"status": "ok", "event_id": result.event_id, "processed": result.success}
 

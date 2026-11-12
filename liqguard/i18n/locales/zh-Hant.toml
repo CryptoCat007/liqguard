@@ -1419,4 +1419,13 @@ pro_ready = "Pro 訂閱已建立。點 PayPal 按鈕核准——核准前不會�
 none = "我可以幫你開啟 LiqGuard 救援通行證或 Pro 結帳。試試「給我救援通行證」或「升級至 Pro」。"
 error = "無法開始 PayPal 結帳。請改用 💎 升級至 Pro 或 🎟️ 救援通行證。"
 source_muse = "Muse 選擇了這個 PayPal 工具。"
-source_rules = "以固定 LiqGuard 結帳啟動（Muse 不可用）。"
+source_rules = "以固定 LiqGuard 結帳啟動。"
+source_timeout = "Muse 未及時回應；已依你的點擊開始結帳。"
+
+[pro.return]
+title = "已收到付款"
+body = "已收到付款 — 請返回 Telegram"
+rescue = "救援模式已開啟。可關閉此分頁，回到 Telegram 的 LiqGuard。"
+pro = "LiqGuard Pro 已開啟。可關閉此分頁，回到 Telegram 的 LiqGuard。"
+error_title = "尚未確認付款"
+error_body = "目前無法確認這筆付款。若已扣款，請返回 Telegram 再試一次。"

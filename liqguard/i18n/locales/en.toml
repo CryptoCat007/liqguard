@@ -1419,4 +1419,13 @@ pro_ready = "Pro subscription created. Tap the PayPal button to approve — noth
 none = "I can start a LiqGuard Rescue Pass or Pro checkout. Try “get me a Rescue Pass” or “upgrade to Pro”."
 error = "Could not start PayPal checkout. Try 💎 Upgrade to Pro or 🎟️ Rescue Pass."
 source_muse = "Muse chose this PayPal tool."
-source_rules = "Started from a fixed LiqGuard checkout (Muse unavailable)."
+source_rules = "Started from a fixed LiqGuard checkout."
+source_timeout = "Muse didn't answer in time; checkout started from your tap."
+
+[pro.return]
+title = "Payment received"
+body = "Payment received — return to Telegram"
+rescue = "Rescue Mode is on. You can close this tab and go back to LiqGuard in Telegram."
+pro = "LiqGuard Pro is on. You can close this tab and go back to LiqGuard in Telegram."
+error_title = "Payment not confirmed"
+error_body = "We could not confirm this payment yet. Return to Telegram and try again if you were charged."

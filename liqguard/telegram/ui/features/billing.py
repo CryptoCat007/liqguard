@@ -116,8 +116,11 @@ async def agent_checkout_screen(req: Request) -> Screen:
     text = (req.extra.get("text") or "").strip()
     if not text:
         text = {
-            "rescue": "get me a Rescue Pass",
-            "pro": "upgrade to Pro",
+            "rescue": (
+                "I'm looking at a LiqGuard liquidation-risk alert. "
+                "Get me a Rescue Pass now. In one short line, say why Rescue Pass fits this moment."
+            ),
+            "pro": "upgrade to Pro. In one short line, say why Pro fits now.",
             "auto": "upgrade to Pro",
         }.get(kind, "upgrade to Pro")
     checkout = await req.services.agent_checkout(req.user_id, text, T.lang, product=product,
@@ -130,9 +133,17 @@ async def agent_checkout_screen(req: Request) -> Screen:
             body += "\n\n" + checkout.message
         return Screen(body, kb.agent_checkout(T, req.sign))
     ready = T("pro.agent.rescue_ready") if checkout.product == "rescue" else T("pro.agent.pro_ready")
-    source = T("pro.agent.source_muse") if checkout.source == "muse" else T("pro.agent.source_rules")
-    text_body = T("pro.agent.title") + "\n\n" + ready + "\n" + source
-    return Screen(text_body, kb.agent_checkout(T, req.sign, checkout.approve_url, checkout.product),
+    if checkout.source == "muse":
+        source = T("pro.agent.source_muse")
+    elif checkout.source == "timeout":
+        source = T("pro.agent.source_timeout")
+    else:
+        source = T("pro.agent.source_rules")
+    lines = [T("pro.agent.title"), "", ready]
+    if checkout.note:
+        lines.append(checkout.note)
+    lines.append(source)
+    return Screen("\n".join(lines), kb.agent_checkout(T, req.sign, checkout.approve_url, checkout.product),
                   new_message=True)
 
 

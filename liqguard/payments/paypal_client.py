@@ -27,6 +27,16 @@ class PayPalError(Exception):
         self.status_code = status_code
         self.details = details or {}
 
+    def is_already_captured(self) -> bool:
+        """True when capture is a 422 ORDER_ALREADY_CAPTURED (return vs webhook race)."""
+        issues = []
+        extra = self.details.get("details") if isinstance(self.details, dict) else None
+        if isinstance(extra, list):
+            issues.extend(str(item.get("issue") or "") for item in extra if isinstance(item, dict))
+        name = str(self.details.get("name") or "") if isinstance(self.details, dict) else ""
+        blob = " ".join([str(self), name, *issues]).upper()
+        return "ORDER_ALREADY_CAPTURED" in blob or ("ALREADY" in blob and "CAPTURED" in blob)
+
 
 @dataclass
 class SubscriptionDetails:
@@ -38,6 +48,7 @@ class SubscriptionDetails:
     payer_email: Optional[str] = None
     next_billing_time: Optional[str] = None
     start_time: Optional[str] = None
+    custom_id: Optional[str] = None
 
     @classmethod
     def from_api(cls, data: dict) -> "SubscriptionDetails":
@@ -50,6 +61,7 @@ class SubscriptionDetails:
             payer_email=subscriber.get("email_address"),
             next_billing_time=billing_info.get("next_billing_time"),
             start_time=data.get("start_time"),
+            custom_id=data.get("custom_id"),
         )
 
     def is_active(self) -> bool:
@@ -459,3 +471,7 @@ class PayPalClient:
     async def capture_order(self, order_id: str) -> dict:
         """Capture an approved order. Returns capture details."""
         return await self._request("POST", f"/v2/checkout/orders/{order_id}/capture")
+
+    async def get_order(self, order_id: str) -> dict:
+        """GET /v2/checkout/orders/{id} — used to recover custom_id after capture."""
+        return await self._request("GET", f"/v2/checkout/orders/{order_id}")

@@ -56,6 +56,40 @@ def _fill(lang: str, key: str, html: Optional[dict[str, str]] = None, **params) 
     return text
 
 
+def render_payment_received(lang: str, kind: str = "rescue", ok: bool = True) -> str:
+    """Sessionless PayPal return: tell the user to go back to Telegram."""
+    lang = normalize(lang)
+    if ok:
+        title = _fill(lang, "pro.return.title")
+        heading = _fill(lang, "pro.return.body")
+        detail_key = "pro.return.rescue" if kind == "rescue" else "pro.return.pro"
+        detail = _fill(lang, detail_key)
+    else:
+        title = _fill(lang, "pro.return.error_title")
+        heading = _fill(lang, "pro.return.error_body")
+        detail = ""
+    extra = f"<p>{detail}</p>" if detail else ""
+    return f"""<!DOCTYPE html>
+<html lang="{"zh-Hant-TW" if lang == ZH else "en"}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="login-wrap">
+    <section class="card login-card">
+      <h1>{heading}</h1>
+      {extra}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
 def render_login(lang: str, settings: Optional[Settings], error: Optional[str], notice: Optional[str]) -> str:
     lang = normalize(lang)
     other = EN if lang == ZH else ZH

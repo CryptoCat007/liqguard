@@ -7,8 +7,11 @@ Handles:
 - BILLING.SUBSCRIPTION.SUSPENDED
 - BILLING.SUBSCRIPTION.PAYMENT.FAILED
 - PAYMENT.CAPTURE.COMPLETED (for Rescue Pass)
+- CHECKOUT.ORDER.COMPLETED (Rescue Pass, same grant as capture)
+- CHECKOUT.ORDER.APPROVED (ack only; wait for capture)
 
 All handlers are idempotent: processing the same event twice is safe.
+Unattributed capture/order-completed events are NOT stored, so PayPal can retry.
 """
 
 from __future__ import annotations
@@ -17,9 +20,15 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 logger = logging.getLogger(__name__)
+
+# Events that must be attributed to a telegram user before they are acked.
+_GRANT_EVENTS = frozenset({
+    "PAYMENT.CAPTURE.COMPLETED",
+    "CHECKOUT.ORDER.COMPLETED",
+})
 
 
 class PaymentEventStore(Protocol):
@@ -77,6 +86,152 @@ class WebhookResult:
 NotifyCallback = Callable[[int, str, str], None]
 
 
+def extract_custom_id(resource: dict) -> str:
+    """
+    custom_id from a PayPal capture, order, or nested purchase_unit.
+
+    Real PAYMENT.CAPTURE.COMPLETED payloads put it on resource.custom_id and
+    often omit purchase_units. Orders v2 and some sandbox events still use
+    purchase_units[0].custom_id (or a nested capture).
+    """
+    if not isinstance(resource, dict):
+        return ""
+    cid = resource.get("custom_id") or ""
+    if cid:
+        return str(cid)
+    units = resource.get("purchase_units") or []
+    if units and isinstance(units[0], dict):
+        cid = units[0].get("custom_id") or ""
+        if cid:
+            return str(cid)
+        payments = units[0].get("payments") or {}
+        captures = payments.get("captures") or []
+        if captures and isinstance(captures[0], dict):
+            cid = captures[0].get("custom_id") or ""
+            if cid:
+                return str(cid)
+    payments = resource.get("payments") or {}
+    captures = payments.get("captures") or []
+    if captures and isinstance(captures[0], dict):
+        cid = captures[0].get("custom_id") or ""
+        if cid:
+            return str(cid)
+    return ""
+
+
+def extract_order_id(resource: dict, event_type: str = "") -> str:
+    """Order id for grant idempotency. Capture resources use related_ids, not resource.id."""
+    if not isinstance(resource, dict):
+        return ""
+    related = (resource.get("supplementary_data") or {}).get("related_ids") or {}
+    oid = related.get("order_id") or ""
+    if oid:
+        return str(oid)
+    if str(event_type).startswith("CHECKOUT.ORDER"):
+        return str(resource.get("id") or "")
+    return ""
+
+
+def parse_telegram_id(custom_id: str) -> Optional[int]:
+    """custom_id is our own telegram user id (string)."""
+    if custom_id is None or custom_id == "":
+        return None
+    try:
+        return int(str(custom_id).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def rescue_grant_key(order_id: str, capture_id: str = "") -> str:
+    if order_id:
+        return f"order:{order_id}"
+    if capture_id:
+        return f"capture:{capture_id}"
+    return ""
+
+
+async def grant_rescue_once(
+    event_store: PaymentEventStore,
+    subscription_store: SubscriptionStore,
+    telegram_id: int,
+    *,
+    order_id: str,
+    source: str,
+    notify: Optional[NotifyCallback] = None,
+    capture_id: str = "",
+) -> tuple[bool, Optional[datetime]]:
+    """
+    Activate Rescue Mode at most once per PayPal order (or capture) id.
+
+    Shared by the webhook and the browser return URL so a capture COMPLETED
+    plus a return hit cannot stack two 24h windows.
+    """
+    key = rescue_grant_key(order_id, capture_id)
+    until = None
+    if hasattr(subscription_store, "get_rescue_until"):
+        until = await subscription_store.get_rescue_until(telegram_id)
+    if key and await event_store.has_event(key):
+        return False, until
+    if hasattr(subscription_store, "activate_rescue_mode"):
+        until = await subscription_store.activate_rescue_mode(telegram_id)
+    else:
+        await subscription_store.add_rescue_passes(telegram_id, 1)
+    if key:
+        await event_store.save_event(
+            key, "RESCUE_MODE", order_id or capture_id, telegram_id,
+            {"source": source, "order_id": order_id, "capture_id": capture_id},
+        )
+    if hasattr(subscription_store, "save_agent_action"):
+        message = f"Rescue Mode until {until.isoformat()}" if until is not None else "Rescue Mode activated"
+        await subscription_store.save_agent_action(telegram_id, {
+            "tool": "rescue_mode",
+            "product": "rescue",
+            "source": source,
+            "status": "rescue_mode",
+            "resource_id": order_id or capture_id,
+            "message": message,
+        })
+    if notify is not None:
+        result = notify(telegram_id, "rescue_pass_purchased", order_id or capture_id)
+        if asyncio.iscoroutine(result):
+            await result
+    return True, until
+
+
+async def fulfill_rescue_order(
+    event_store: PaymentEventStore,
+    subscription_store: SubscriptionStore,
+    *,
+    order_id: str,
+    payload: Optional[dict] = None,
+    paypal: Any = None,
+    notify: Optional[NotifyCallback] = None,
+    source: str = "return",
+    capture_id: str = "",
+) -> tuple[Optional[int], bool, Optional[datetime]]:
+    """Attribute an order/capture to a user and grant Rescue Mode once."""
+    payload = payload or {}
+    custom_id = extract_custom_id(payload)
+    resolved_order = extract_order_id(payload, "CHECKOUT.ORDER.COMPLETED") or order_id
+    if not custom_id and paypal is not None and resolved_order:
+        try:
+            order = await paypal.get_order(resolved_order)
+            custom_id = extract_custom_id(order)
+            resolved_order = str(order.get("id") or resolved_order)
+        except Exception as e:
+            logger.warning("PayPal GET order %s failed: %s", resolved_order, e)
+    telegram_id = parse_telegram_id(custom_id)
+    if telegram_id is None and custom_id and hasattr(subscription_store, "get_user_by_custom_id"):
+        telegram_id = await subscription_store.get_user_by_custom_id(custom_id)
+    if telegram_id is None:
+        return None, False, None
+    granted, until = await grant_rescue_once(
+        event_store, subscription_store, telegram_id,
+        order_id=resolved_order, source=source, notify=notify, capture_id=capture_id,
+    )
+    return telegram_id, granted, until
+
+
 class WebhookHandler:
     """
     PayPal webhook event handler.
@@ -90,10 +245,12 @@ class WebhookHandler:
         event_store: PaymentEventStore,
         subscription_store: SubscriptionStore,
         notify: Optional[NotifyCallback] = None,
+        paypal: Any = None,
     ):
         self.event_store = event_store
         self.subscription_store = subscription_store
         self.notify = notify
+        self.paypal = paypal
 
     async def process_event(self, event: dict) -> WebhookResult:
         """
@@ -134,6 +291,17 @@ class WebhookHandler:
 
         try:
             telegram_id, message = await handler(resource, event)
+            if telegram_id is None and event_type in _GRANT_EVENTS:
+                # Do not ack-and-forget: PayPal must be able to retry once we can
+                # look the order up or the payload is retried with custom_id.
+                logger.warning("Unattributed %s %s: %s", event_type, event_id, message)
+                return WebhookResult(
+                    success=False,
+                    event_id=event_id,
+                    event_type=event_type,
+                    message=message,
+                    telegram_id=None,
+                )
             await self.event_store.save_event(
                 event_id, event_type, resource.get("id", ""), telegram_id, event
             )
@@ -160,8 +328,24 @@ class WebhookHandler:
             "BILLING.SUBSCRIPTION.SUSPENDED": self._handle_subscription_suspended,
             "BILLING.SUBSCRIPTION.PAYMENT.FAILED": self._handle_payment_failed,
             "PAYMENT.CAPTURE.COMPLETED": self._handle_capture_completed,
+            "CHECKOUT.ORDER.COMPLETED": self._handle_order_completed,
+            "CHECKOUT.ORDER.APPROVED": self._handle_order_approved,
         }
         return handlers.get(event_type)
+
+    async def _resolve_custom_id(self, resource: dict, event_type: str) -> tuple[str, str]:
+        custom_id = extract_custom_id(resource)
+        order_id = extract_order_id(resource, event_type)
+        if custom_id:
+            return custom_id, order_id
+        if self.paypal is not None and order_id:
+            try:
+                order = await self.paypal.get_order(order_id)
+                custom_id = extract_custom_id(order)
+                order_id = str(order.get("id") or order_id)
+            except Exception as e:
+                logger.warning("PayPal GET order %s failed: %s", order_id, e)
+        return custom_id, order_id
 
     async def _handle_subscription_activated(self, resource: dict, event: dict) -> tuple[Optional[int], str]:
         """Handle subscription activation: grant Pro tier."""
@@ -238,43 +422,41 @@ class WebhookHandler:
 
         return telegram_id, f"Payment failed notification sent to user {telegram_id}"
 
+    async def _grant_rescue(self, resource: dict, event: dict) -> tuple[Optional[int], str]:
+        event_type = event.get("event_type", "")
+        capture_id = str(resource.get("id") or "")
+        custom_id, order_id = await self._resolve_custom_id(resource, event_type)
+        label = order_id or capture_id
+        if not custom_id:
+            return None, f"Capture {label} completed but no custom_id"
+        telegram_id = parse_telegram_id(custom_id)
+        if telegram_id is None:
+            telegram_id = await self.subscription_store.get_user_by_custom_id(custom_id)
+        if telegram_id is None:
+            return None, f"Capture {label} completed but invalid custom_id"
+        granted, _until = await grant_rescue_once(
+            self.event_store, self.subscription_store, telegram_id,
+            order_id=order_id, source="webhook", notify=self.notify, capture_id=capture_id,
+        )
+        if granted:
+            return telegram_id, f"Rescue Mode activated for user {telegram_id}"
+        return telegram_id, f"Rescue Mode already recorded for order {label}"
+
     async def _handle_capture_completed(self, resource: dict, event: dict) -> tuple[Optional[int], str]:
         """Handle one-time payment capture: activate 24h Rescue Mode (extends if already active)."""
-        order_id = resource.get("id", "")
-        custom_id = ""
+        return await self._grant_rescue(resource, event)
 
-        purchase_units = resource.get("purchase_units", [])
-        if purchase_units:
-            custom_id = purchase_units[0].get("custom_id", "")
+    async def _handle_order_completed(self, resource: dict, event: dict) -> tuple[Optional[int], str]:
+        """CHECKOUT.ORDER.COMPLETED uses the same Rescue Mode grant, keyed by order id."""
+        return await self._grant_rescue(resource, event)
 
-        if not custom_id:
-            return None, f"Capture {order_id} completed but no custom_id"
-
-        try:
-            telegram_id = int(custom_id)
-        except (ValueError, TypeError):
-            return None, f"Capture {order_id} completed but invalid custom_id"
-
-        until = None
-        if hasattr(self.subscription_store, "activate_rescue_mode"):
-            until = await self.subscription_store.activate_rescue_mode(telegram_id)
-        else:
-            await self.subscription_store.add_rescue_passes(telegram_id, 1)
-
-        if hasattr(self.subscription_store, "save_agent_action"):
-            message = f"Rescue Mode until {until.isoformat()}" if until is not None else "Rescue Mode activated"
-            await self.subscription_store.save_agent_action(telegram_id, {
-                "tool": "rescue_mode",
-                "product": "rescue",
-                "source": "webhook",
-                "status": "rescue_mode",
-                "resource_id": order_id,
-                "message": message,
-            })
-
-        await self._notify(telegram_id, "rescue_pass_purchased", order_id)
-
-        return telegram_id, f"Rescue Mode activated for user {telegram_id}"
+    async def _handle_order_approved(self, resource: dict, event: dict) -> tuple[Optional[int], str]:
+        """APPROVED is not captured — parse custom_id for logs, wait for COMPLETED."""
+        custom_id, order_id = await self._resolve_custom_id(resource, event.get("event_type", ""))
+        return None, (
+            f"Order {order_id or resource.get('id', '')} approved "
+            f"(waiting for capture); custom_id={'yes' if custom_id else 'no'}"
+        )
 
     async def _notify(self, telegram_id: int, kind: str, resource_id: str) -> None:
         if self.notify is None:
