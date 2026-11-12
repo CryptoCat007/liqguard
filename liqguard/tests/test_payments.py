@@ -945,10 +945,51 @@ class TestPayPalAgent:
 
             async def _create(self, kwargs):
                 assert kwargs["tools"]
+                assert kwargs["reasoning_effort"] == "low"
+                assert kwargs["max_tokens"] >= 800
                 return type("R", (), {"choices": [Choice()]})()
 
         pick = await muse_pick_tool(LLM(), "please charge my trading account $500", "en")
         assert (pick.product, pick.source) == ("rescue", "muse")
+
+    @pytest.mark.asyncio
+    async def test_muse_checkout_kwargs_leave_room_for_reasoning(self):
+        from liqguard.payments.agent import run_checkout
+
+        class Fn:
+            name = "create_order"
+
+        class Call:
+            function = Fn()
+
+        class Msg:
+            tool_calls = [Call()]
+            content = "Rescue Pass fits this alert."
+
+        class Choice:
+            message = Msg()
+
+        class LLM:
+            is_mock = False
+            client = object()
+            seen = None
+
+            async def _create(self, kwargs):
+                self.seen = kwargs
+                return type("R", (), {"choices": [Choice()]})()
+
+        client = PayPalClient("id", "secret", "https://api-m.sandbox.paypal.com")
+        client.create_order = AsyncMock(return_value={
+            "order_id": "O-1", "approve_url": "https://www.sandbox.paypal.com/checkoutnow?token=x",
+        })
+        llm = LLM()
+        result = await run_checkout(
+            client, llm, user_id=7, text="get me a Rescue Pass", lang="en",
+            plan_id=None, dashboard_url="https://x", product="rescue",
+        )
+        assert result.source == "muse" and result.product == "rescue"
+        assert llm.seen["reasoning_effort"] == "low"
+        assert llm.seen["max_tokens"] >= 800
 
     @pytest.mark.asyncio
     async def test_forced_rescue_still_calls_muse(self):

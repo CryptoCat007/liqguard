@@ -313,6 +313,7 @@ def create_app(
                         ],
                         json_mode=True,
                         temperature=0,
+                        effort="low",
                     ),
                     2.0,
                 )

@@ -188,7 +188,8 @@ async def muse_pick_tool(llm: Any, text: str, lang: str) -> MusePick:
             "tools": OPENAI_TOOLS,
             "tool_choice": "auto",
             "temperature": 0,
-            "max_tokens": 400,
+            "max_tokens": 800,
+            "reasoning_effort": "low",
         }
         if hasattr(llm, "_create"):
             response = await llm._create(kwargs)
