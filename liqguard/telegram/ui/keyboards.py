@@ -38,7 +38,8 @@ def back_row(T: Translator, sign: Signer) -> list[Button]:
 def main_menu(T: Translator, sign: Signer, demo_running: bool = False) -> InlineKeyboardMarkup:
     return _kb([
         [Button(text=T("kb.sim_stop"), callback_data=sign("dx"))] if demo_running else [],
-        [Button(text=T("kb.risk_overview"), callback_data=sign("ro"))],
+        [Button(text=T("kb.risk_overview"), callback_data=sign("ro")),
+         Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))],
         [Button(text=T("kb.positions"), callback_data=sign("pl")), Button(text=T("kb.stop_check"), callback_data=sign("sc"))],
         [Button(text=T("kb.triage"), callback_data=sign("tr")), Button(text=T("kb.stress"), callback_data=sign("st"))],
         [Button(text=T("kb.funding"), callback_data=sign("ff")), Button(text=T("kb.ask"), callback_data=sign("qa"))],
@@ -234,16 +235,28 @@ def dashboard(T: Translator, sign: Signer, url: Optional[str]) -> InlineKeyboard
     return _kb(rows)
 
 
+def upsell(T: Translator, sign: Signer, *, back: bool = True) -> InlineKeyboardMarkup:
+    """Free-tier limit hit: Upgrade to Pro ($9.99/mo) and Rescue Pass ($2.99 / 24h)."""
+    rows: Rows = [
+        [Button(text=T("pro.kb.upgrade_price"), callback_data=sign("pu"))],
+        [Button(text=T("pro.kb.rescue_pass_price"), callback_data=sign("rp"))],
+    ]
+    if back:
+        rows.append(back_row(T, sign))
+    return _kb(rows)
+
+
 def pro_upgrade(T: Translator, sign: Signer, checkout_url: Optional[str] = None,
                 manage: bool = False) -> InlineKeyboardMarkup:
     """Pro upgrade / billing keyboard. PayPal URL buttons charge only after the user taps them."""
     rows: Rows = []
     if checkout_url:
-        rows.append([Button(text=T("pro.kb.upgrade"), url=checkout_url)])
+        rows.append([Button(text=T("pro.kb.upgrade_price"), url=checkout_url)])
     if manage:
         rows.append([Button(text=T("pro.cancel_cta"), callback_data=sign("pm"))])
     else:
-        rows.append([Button(text=T("pro.kb.rescue_pass"), callback_data=sign("rp"))])
+        rows.append([Button(text=T("pro.kb.upgrade_price"), callback_data=sign("pu"))])
+        rows.append([Button(text=T("pro.kb.rescue_pass_price"), callback_data=sign("rp"))])
         rows.append([Button(text=T("pro.kb.manage"), callback_data=sign("pm"))])
     rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))])
     rows.append(back_row(T, sign))
@@ -262,8 +275,8 @@ def pro_manage(T: Translator, sign: Signer, checkout_url: Optional[str] = None) 
 def rescue_pass(T: Translator, sign: Signer, checkout_url: Optional[str] = None) -> InlineKeyboardMarkup:
     rows: Rows = []
     if checkout_url:
-        rows.append([Button(text=T("pro.kb.rescue_pass"), url=checkout_url)])
-    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+        rows.append([Button(text=T("pro.kb.rescue_pass_price"), url=checkout_url)])
+    rows.append([Button(text=T("pro.kb.upgrade_price"), callback_data=sign("pu"))])
     rows.append([Button(text=T("pro.kb.agent"), callback_data=sign("px", "auto"))])
     rows.append(back_row(T, sign))
     return _kb(rows)
@@ -276,8 +289,8 @@ def agent_checkout(T: Translator, sign: Signer, checkout_url: Optional[str] = No
     if checkout_url:
         label = T("pro.kb.rescue_pass") if product == "rescue" else T("pro.kb.upgrade")
         rows.append([Button(text=label, url=checkout_url)])
-    rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu")),
-                 Button(text=T("pro.kb.rescue_pass"), callback_data=sign("rp"))])
+    rows.append([Button(text=T("pro.kb.upgrade_price"), callback_data=sign("pu")),
+                 Button(text=T("pro.kb.rescue_pass_price"), callback_data=sign("rp"))])
     rows.append(back_row(T, sign))
     return _kb(rows)
 
@@ -286,7 +299,8 @@ def rescue_with_upgrade(T: Translator, sign: Signer, source: str, symbol: str, s
     """Rescue sim keyboard with optional Pro upgrade hint."""
     rows: Rows = [tool_row(T, sign, source, symbol, skip="pr")]
     if show_upgrade:
-        rows.append([Button(text=T("pro.kb.upgrade"), callback_data=sign("pu"))])
+        rows.append([Button(text=T("pro.kb.upgrade_price"), callback_data=sign("pu"))])
+        rows.append([Button(text=T("pro.kb.rescue_pass_price"), callback_data=sign("rp"))])
     rows.append([Button(text=T("kb.back_positions"), callback_data=sign("pl"))])
     rows.append(back_row(T, sign))
     return _kb(rows)

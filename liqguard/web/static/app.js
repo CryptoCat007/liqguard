@@ -2442,6 +2442,21 @@ async function refreshBilling() {
   $("tierBadge").textContent = L(pro ? "tier_pro_label" : "tier_free_label");
   $("tierBadge").className = `tier-badge ${pro ? "tier-pro" : "tier-free"}`;
   $("tierDescription").textContent = !billing.enabled ? L("billing_disabled") : L(pro ? "pro_active" : "pro_banner");
+  const feats = $("billingFeatures");
+  if (feats) {
+    if (!billing.enabled) {
+      feats.textContent = "";
+    } else {
+      const parts = [L("plan_compare")];
+      if (billing.is_rescue && billing.rescue_until_taipei) {
+        parts.push(L("rescue_until").replace("{until}", billing.rescue_until_taipei));
+      }
+      if (typeof billing.muse_limit === "number" && billing.muse_limit >= 0) {
+        parts.push(L("muse_today").replace("{used}", String(billing.muse_used ?? 0)).replace("{limit}", String(billing.muse_limit)));
+      }
+      feats.textContent = parts.join(" · ");
+    }
+  }
   $("proBanner").hidden = pro || !billing.enabled;
   $("upgradeBtn").hidden = pro || !billing.enabled;
   $("rescuePassBtn").hidden = pro || !billing.enabled;

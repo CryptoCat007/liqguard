@@ -9,7 +9,7 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -86,14 +86,23 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
 
--- One-time Rescue Passes
+-- One-time Rescue Passes → 24h Rescue Mode (expires_at)
 CREATE TABLE IF NOT EXISTS rescue_passes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     remaining INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rescue_passes_user ON rescue_passes(telegram_id);
+
+-- Muse daily usage (Taipei calendar day)
+CREATE TABLE IF NOT EXISTS muse_usage (
+    telegram_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (telegram_id, day)
+);
 
 -- Webhook events for idempotency
 CREATE TABLE IF NOT EXISTS payment_events (

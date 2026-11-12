@@ -13,6 +13,7 @@ All handlers are idempotent: processing the same event twice is safe.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -58,6 +59,8 @@ class SubscriptionStore(Protocol):
     async def update_subscription_status(self, subscription_id: str, status: str) -> None: ...
 
     async def add_rescue_passes(self, telegram_id: int, count: int) -> None: ...
+
+    async def activate_rescue_mode(self, telegram_id: int, hours: int = 24, now=None): ...
 
 
 @dataclass
@@ -191,8 +194,7 @@ class WebhookHandler:
             activated_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        if self.notify:
-            self.notify(telegram_id, "pro_activated", subscription_id)
+        await self._notify(telegram_id, "pro_activated", subscription_id)
 
         return telegram_id, f"Pro activated for user {telegram_id}"
 
@@ -206,8 +208,7 @@ class WebhookHandler:
 
         await self.subscription_store.update_subscription_status(subscription_id, "CANCELLED")
 
-        if self.notify:
-            self.notify(telegram_id, "pro_cancelled", subscription_id)
+        await self._notify(telegram_id, "pro_cancelled", subscription_id)
 
         return telegram_id, f"Pro cancelled for user {telegram_id}"
 
@@ -221,8 +222,7 @@ class WebhookHandler:
 
         await self.subscription_store.update_subscription_status(subscription_id, "SUSPENDED")
 
-        if self.notify:
-            self.notify(telegram_id, "pro_suspended", subscription_id)
+        await self._notify(telegram_id, "pro_suspended", subscription_id)
 
         return telegram_id, f"Pro suspended for user {telegram_id}"
 
@@ -234,13 +234,12 @@ class WebhookHandler:
         if telegram_id is None:
             return None, f"Payment failed for {subscription_id} but no user found"
 
-        if self.notify:
-            self.notify(telegram_id, "payment_failed", subscription_id)
+        await self._notify(telegram_id, "payment_failed", subscription_id)
 
         return telegram_id, f"Payment failed notification sent to user {telegram_id}"
 
     async def _handle_capture_completed(self, resource: dict, event: dict) -> tuple[Optional[int], str]:
-        """Handle one-time payment capture: grant Rescue Pass."""
+        """Handle one-time payment capture: activate 24h Rescue Mode (extends if already active)."""
         order_id = resource.get("id", "")
         custom_id = ""
 
@@ -256,12 +255,33 @@ class WebhookHandler:
         except (ValueError, TypeError):
             return None, f"Capture {order_id} completed but invalid custom_id"
 
-        await self.subscription_store.add_rescue_passes(telegram_id, 1)
+        until = None
+        if hasattr(self.subscription_store, "activate_rescue_mode"):
+            until = await self.subscription_store.activate_rescue_mode(telegram_id)
+        else:
+            await self.subscription_store.add_rescue_passes(telegram_id, 1)
 
-        if self.notify:
-            self.notify(telegram_id, "rescue_pass_purchased", order_id)
+        if hasattr(self.subscription_store, "save_agent_action"):
+            message = f"Rescue Mode until {until.isoformat()}" if until is not None else "Rescue Mode activated"
+            await self.subscription_store.save_agent_action(telegram_id, {
+                "tool": "rescue_mode",
+                "product": "rescue",
+                "source": "webhook",
+                "status": "rescue_mode",
+                "resource_id": order_id,
+                "message": message,
+            })
 
-        return telegram_id, f"Rescue Pass granted to user {telegram_id}"
+        await self._notify(telegram_id, "rescue_pass_purchased", order_id)
+
+        return telegram_id, f"Rescue Mode activated for user {telegram_id}"
+
+    async def _notify(self, telegram_id: int, kind: str, resource_id: str) -> None:
+        if self.notify is None:
+            return
+        result = self.notify(telegram_id, kind, resource_id)
+        if asyncio.iscoroutine(result):
+            await result
 
 
 def extract_webhook_headers(headers: dict) -> dict:

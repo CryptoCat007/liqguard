@@ -82,14 +82,27 @@ async def _tool(req: Request, tool: str, code: str) -> Screen:
     found = await _found(req)
     if found is None:
         return _gone(req)
+    s, T = req.services, req.T
     built = None
     if tool == "rescue":
-        built = req.services.rescue_plan(found)
+        built = s.rescue_plan(found)
         if built is None:
             return _gone(req)
+        if not await s.can_use_full_rescue(req.user_id):
+            protection = s.protection_check(found)
+            demo = found.source in ("sim", "demo")
+            data = report(tool, found.position, found.snapshot.context, protection.to_dict(),
+                          built.to_dict(), demo=demo, lang=T.lang, muse=None)
+            preview = "\n".join(data["lines"][:3]).strip()
+            body = data["title"] + "\n\n" + preview + "\n\n" + T("pro.upgrade.rescue_locked")
+            return Screen(body, kb.rescue_with_upgrade(T, req.sign, found.source, found.position.symbol, True))
+    blocked = await s.deny_muse(req)
+    if blocked is not None:
+        return blocked
     plan = built.to_dict() if built is not None else None
-    protection = req.services.protection_check(found)
-    note = req.services.muse.tool_note(tool, req.T.lang, plan=built, check=protection.stop)
+    protection = s.protection_check(found)
+    note = s.muse.tool_note(tool, T.lang, plan=built, check=protection.stop)
+    await s.record_muse(req.user_id)
     demo = found.source in ("sim", "demo")
 
     def text(muse: Optional[dict]) -> str:

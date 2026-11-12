@@ -58,10 +58,16 @@ async def _start(req: Request, state: State, guide: str) -> Screen:
 
 
 async def start_binance(req: Request) -> Screen:
+    blocked = await req.services.account_limit_screen(req, "binance")
+    if blocked is not None:
+        return blocked
     return await _start(req, BindStates.binance_key, "binding.guide_binance")
 
 
 async def start_hyperliquid(req: Request) -> Screen:
+    blocked = await req.services.account_limit_screen(req, "hyperliquid")
+    if blocked is not None:
+        return blocked
     return await _start(req, BindStates.hyperliquid_address, "binding.guide_hyperliquid")
 
 
@@ -134,6 +140,9 @@ async def on_message(services, message, state, sign, T: Translator) -> Screen:
         if result.ok:
             await state.clear()
             return Screen(f"{deleted}{result.message}", kb.binding_back(T, sign), new_message=True)
+        if result.code == "account_limit":
+            await state.clear()
+            return Screen(f"{deleted}{result.message}", kb.upsell(T, sign), new_message=True)
         return Screen(f"{deleted}{result.message}\n\n{T('binding.retry_wallet')}", kb.binding_waiting(T, sign), new_message=True)
 
     if current == BindStates.binance_key.state:
@@ -160,6 +169,9 @@ async def on_message(services, message, state, sign, T: Translator) -> Screen:
     if result.ok:
         await state.clear()
         return Screen(f"{deleted}{result.message}\n\n{T('binding.see_positions')}", kb.binding_back(T, sign), new_message=True)
+    if result.code == "account_limit":
+        await state.clear()
+        return Screen(f"{deleted}{result.message}", kb.upsell(T, sign), new_message=True)
     await state.set_state(BindStates.binance_key)
     return Screen(f"{deleted}{result.message}\n\n{T('binding.retry_binance')}", kb.binding_waiting(T, sign), new_message=True)
 

@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+from liqguard.payments.entitlements import format_taipei_hm
+
 from .. import keyboards as kb
 from ..screen import Request, Screen
+
+
+def _rescue_line(T, status) -> str:
+    if status.is_rescue and status.rescue_until is not None:
+        return T("pro.rescue_mode_until", until=format_taipei_hm(status.rescue_until))
+    return T("pro.rescue_mode_off")
 
 
 async def upgrade(req: Request) -> Screen:
@@ -14,6 +22,7 @@ async def upgrade(req: Request) -> Screen:
         return Screen(T("pro.disabled"), kb.back_only(T, req.sign))
 
     status = await req.services.billing_status(req.user_id)
+    rescue = _rescue_line(T, status)
     if status.is_pro:
         status_key = {
             "ACTIVE": "pro.status_active",
@@ -25,25 +34,22 @@ async def upgrade(req: Request) -> Screen:
             plan=T("pro.billing.plan", plan=status.plan_id or T("pro.tier_pro")),
             status=T(status_key),
             subscription=T("pro.billing.subscription_id", id=status.subscription_id or T("common.na")),
-            passes=T("pro.rescue_pass_remaining", n=status.rescue_passes_remaining),
             muse_unlimited=T("pro.limits.muse_unlimited"),
+            not_needed=T("pro.rescue_not_needed"),
+            rescue=rescue,
         )
         return Screen(text, kb.pro_upgrade(T, req.sign, manage=True))
 
-    allowed, used, limit = (True, 0, -1)
     entitlements = req.services.ctx.entitlements
+    allowed, used, limit = (True, 0, -1)
     if entitlements is not None:
         allowed, used, limit = await entitlements.check_muse_limit(req.user_id)
-    limits = T("pro.limits.muse_unlimited") if limit < 0 else T("pro.limits.muse_daily", used=used, limit=limit)
-    text = T(
-        "pro.screen_free",
-        hint=T("pro.upgrade_hint"),
-        polling=T("pro.features.polling"),
-        accounts=T("pro.features.accounts"),
-        muse=T("pro.features.muse"),
-        priority=T("pro.features.priority"),
-        limits=limits,
-    )
+    if limit < 0:
+        limits = T("pro.limits.muse_unlimited")
+    else:
+        reset = entitlements.reset_label() if entitlements is not None else "00:00 Taipei"
+        limits = T("pro.limits.muse_daily", used=used, limit=limit) + f" · {reset}"
+    text = T("pro.screen_free", limits=limits, rescue=rescue)
     url = None
     extra = ""
     if req.services.ctx.settings.paypal_plan_id:
@@ -83,8 +89,15 @@ async def rescue_pass_screen(req: Request) -> Screen:
     if not req.services.paypal_enabled():
         return Screen(T("pro.disabled"), kb.back_only(T, req.sign))
 
+    status = await req.services.billing_status(req.user_id)
+    if status.is_pro:
+        return Screen(
+            T("pro.rescue_pass_title") + "\n\n" + T("pro.rescue_not_needed") + "\n" + _rescue_line(T, status),
+            kb.pro_upgrade(T, req.sign, manage=True),
+        )
+
     url = await req.services.create_rescue_pass_checkout(req.user_id)
-    text = T("pro.rescue_pass_title") + "\n\n" + T("pro.rescue_pass_hint")
+    text = T("pro.rescue_pass_title") + "\n\n" + T("pro.rescue_pass_hint") + "\n\n" + _rescue_line(T, status)
     if url:
         text += "\n\n" + T("pro.checkout_ready")
     return Screen(text, kb.rescue_pass(T, req.sign, url), new_message=bool(url))

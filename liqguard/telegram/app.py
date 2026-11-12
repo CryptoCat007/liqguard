@@ -27,7 +27,37 @@ class BotApp:
 
 def wire_bot(ctx: AppContext, bot: Bot, escalation_check_seconds: float = 5.0) -> BotApp:
     ui = build_ui(ctx)
+    ctx.ui = ui
     ctx.simulations.on_create(attach_bridges(bot, ui.alert_markup))
+
+    async def billing_notify(telegram_id: int, kind: str, resource_id: str) -> None:
+        if kind != "rescue_pass_purchased":
+            return
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        from liqguard.i18n import Translator
+        from liqguard.payments.entitlements import format_taipei_hm
+
+        user = await ctx.storage.get_user(telegram_id)
+        lang = user.language if user is not None else "en"
+        T = Translator(lang)
+        until_hm = "--:--"
+        if ctx.entitlements is not None:
+            status = await ctx.entitlements.get_status(telegram_id)
+            if status.rescue_until is not None:
+                until_hm = format_taipei_hm(status.rescue_until)
+        text = T("pro.notifications.rescue_mode_active", until=until_hm)
+        sign = ui.signer(telegram_id)
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=T("kb.risk_overview"), callback_data=sign("ro")),
+            InlineKeyboardButton(text=T("kb.ask"), callback_data=sign("qa")),
+        ]])
+        try:
+            await bot.send_message(telegram_id, text, reply_markup=markup)
+        except Exception:
+            pass
+
+    ctx.billing_notify = billing_notify
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.callback_query.outer_middleware(CallbackLogMiddleware(ui.codec))

@@ -6,12 +6,14 @@ All tests use mocked PayPal responses (no live API calls).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from liqguard.models import User
 from liqguard.payments import EntitlementService, PayPalClient, ProStatus, Tier
+from liqguard.payments.entitlements import TAIPEI, format_taipei_hm
 from liqguard.payments.webhooks import WebhookHandler
 
 # ---------------------------------------------------------------- fixtures
@@ -23,6 +25,9 @@ class MockSubscriptionStore:
     def __init__(self):
         self.subscriptions: dict[int, dict] = {}
         self.rescue_passes: dict[int, int] = {}
+        self.rescue_until: dict[int, datetime] = {}
+        self.muse_usage: dict[tuple[int, str], int] = {}
+        self.agent_actions: list = []
 
     async def get_active_subscription(self, telegram_id: int) -> dict | None:
         sub = self.subscriptions.get(telegram_id)
@@ -68,6 +73,30 @@ class MockSubscriptionStore:
 
     async def add_rescue_passes(self, telegram_id: int, count: int):
         self.rescue_passes[telegram_id] = self.rescue_passes.get(telegram_id, 0) + count
+
+    async def get_rescue_until(self, telegram_id: int):
+        return self.rescue_until.get(telegram_id)
+
+    async def activate_rescue_mode(self, telegram_id: int, hours: int = 24, now: datetime | None = None):
+        moment = now or datetime.now(timezone.utc)
+        current = self.rescue_until.get(telegram_id)
+        base = current if current is not None and current > moment else moment
+        until = base + timedelta(hours=hours)
+        self.rescue_until[telegram_id] = until
+        self.rescue_passes[telegram_id] = self.rescue_passes.get(telegram_id, 0) + 1
+        return until
+
+    async def get_muse_usage(self, telegram_id: int, day: str) -> int:
+        return self.muse_usage.get((telegram_id, day), 0)
+
+    async def increment_muse_usage(self, telegram_id: int, day: str) -> int:
+        key = (telegram_id, day)
+        self.muse_usage[key] = self.muse_usage.get(key, 0) + 1
+        return self.muse_usage[key]
+
+    async def save_agent_action(self, telegram_id: int, checkout):
+        data = checkout.to_dict() if hasattr(checkout, "to_dict") else dict(checkout)
+        self.agent_actions.append((telegram_id, data))
 
 
 class MockPaymentEventStore:
@@ -242,6 +271,84 @@ class TestEntitlementService:
         assert not status.is_pro
         allowed, used, limit = await service.check_muse_limit(12345)
         assert allowed and limit == -1
+
+    @pytest.mark.asyncio
+    async def test_muse_limit_hit_then_rescue_unlimited(self, entitlements):
+        """Free users are blocked after 5 Muse calls; Rescue Mode lifts the cap."""
+        uid = 12345
+        for _ in range(5):
+            allowed, used, limit = await entitlements.check_muse_limit(uid)
+            assert allowed and limit == 5
+            await entitlements.record_muse_usage(uid)
+        allowed, used, limit = await entitlements.check_muse_limit(uid)
+        assert not allowed and used == 5 and limit == 5
+
+        until = await entitlements.activate_rescue_mode(uid)
+        allowed, used, limit = await entitlements.check_muse_limit(uid)
+        assert allowed and limit == -1
+        assert until > entitlements._now()
+        status = await entitlements.get_status(uid)
+        assert status.is_rescue
+        assert format_taipei_hm(until) == until.astimezone(TAIPEI).strftime("%H:%M")
+
+    @pytest.mark.asyncio
+    async def test_rescue_mode_extends_and_expires(self, entitlements):
+        """A second purchase extends 24h; after expiry the user is free-tier again."""
+        uid = 99
+        first = await entitlements.activate_rescue_mode(uid)
+        second = await entitlements.activate_rescue_mode(uid)
+        assert second - first >= timedelta(hours=23, minutes=50)
+
+        entitlements.clock = lambda: second + timedelta(hours=1)
+        assert await entitlements.rescue_until(uid) is None
+        allowed, _, limit = await entitlements.check_muse_limit(uid)
+        assert allowed and limit == 5
+        assert await entitlements.poll_interval_for_user(uid) == 30
+
+    @pytest.mark.asyncio
+    async def test_poll_interval_during_rescue(self, entitlements, subscription_store):
+        """Rescue Mode uses the Pro 10s poll interval; free is 30s."""
+        uid = 12345
+        assert await entitlements.poll_interval_for_user(uid) == 30
+        await entitlements.activate_rescue_mode(uid)
+        assert await entitlements.poll_interval_for_user(uid) == 10
+        await subscription_store.save_subscription(uid, "sub_123", "plan_abc", "ACTIVE")
+        assert await entitlements.poll_interval_for_user(uid) == 10
+
+    @pytest.mark.asyncio
+    async def test_account_limit_free_vs_pro(self, entitlements, subscription_store):
+        """Free: 1 account. Replacing the same slot is allowed. Pro: 5."""
+        uid = 7
+        allowed, used, limit = await entitlements.check_account_limit(uid, 1, replacing=False)
+        assert not allowed and used == 1 and limit == 1
+        allowed, _, limit = await entitlements.check_account_limit(uid, 1, replacing=True)
+        assert allowed and limit == 1
+        await subscription_store.save_subscription(uid, "sub_123", "plan_abc", "ACTIVE")
+        allowed, used, limit = await entitlements.check_account_limit(uid, 1, replacing=False)
+        assert allowed and limit == 5
+        allowed, _, limit = await entitlements.check_account_limit(uid, 5, replacing=False)
+        assert not allowed and limit == 5
+
+    @pytest.mark.asyncio
+    async def test_full_rescue_locked_for_free(self, entitlements):
+        uid = 3
+        assert not await entitlements.can_use_full_rescue(uid)
+        await entitlements.activate_rescue_mode(uid)
+        assert await entitlements.can_use_full_rescue(uid)
+
+    @pytest.mark.asyncio
+    async def test_webhook_capture_activates_rescue_mode(self, webhook_handler, subscription_store):
+        event = {
+            "id": "evt_rescue_mode",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "resource": {"id": "order_rm", "purchase_units": [{"custom_id": "12345"}]},
+        }
+        result = await webhook_handler.process_event(event)
+        assert result.success and result.telegram_id == 12345
+        until = await subscription_store.get_rescue_until(12345)
+        assert until is not None and until > datetime.now(timezone.utc)
+        assert subscription_store.agent_actions
+        assert subscription_store.agent_actions[-1][1]["status"] == "rescue_mode"
 
 
 # ---------------------------------------------------------------- webhook tests

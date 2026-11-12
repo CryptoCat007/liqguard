@@ -26,6 +26,9 @@ from liqguard.risk import (
 )
 from liqguard.simulation import MarketSimulation
 
+from . import keyboards as kb
+from .screen import Screen
+
 
 @dataclass
 class Found:
@@ -41,7 +44,9 @@ MAX_PENDING_LANGUAGES = 10_000
 class UIServices:
     def __init__(self, ctx: AppContext, binding: Optional[BindingService] = None):
         self.ctx = ctx
-        self.binding = binding or BindingService(ctx.storage, default_threshold=ctx.settings.default_threshold)
+        self.binding = binding or BindingService(
+            ctx.storage, default_threshold=ctx.settings.default_threshold, entitlements=ctx.entitlements,
+        )
         self._first_language: dict[int, str] = {}
 
     async def user(self, user_id: int) -> User:
@@ -329,3 +334,59 @@ class UIServices:
             return None
         high_risk = distance_pct is not None and distance_pct <= 20
         return await entitlements.upgrade_hint(user_id, lang, high_risk=high_risk)
+
+    async def _log_limit(self, user_id: int, status: str, message: str, product: str = "muse") -> None:
+        if hasattr(self.ctx.storage, "save_agent_action"):
+            await self.ctx.storage.save_agent_action(user_id, {
+                "tool": status,
+                "product": product,
+                "source": "limit",
+                "status": status,
+                "message": message,
+            })
+
+    async def deny_muse(self, req) -> Optional[Screen]:
+        """If the free-tier Muse cap is hit, return the bilingual upsell screen; else None."""
+        entitlements = self.ctx.entitlements
+        if entitlements is None or not entitlements.paypal_enabled:
+            return None
+        allowed, used, limit = await entitlements.check_muse_limit(req.user_id)
+        if allowed:
+            return None
+        await self._log_limit(req.user_id, "muse_limit", f"{used}/{limit}")
+        reset = entitlements.reset_label()
+        T = req.T
+        return Screen(
+            T("pro.upgrade.limit_reached_full", used=used, limit=limit, reset=reset),
+            kb.upsell(T, req.sign),
+        )
+
+    async def record_muse(self, user_id: int) -> None:
+        entitlements = self.ctx.entitlements
+        if entitlements is None or not entitlements.paypal_enabled:
+            return
+        await entitlements.record_muse_usage(user_id)
+
+    async def account_limit_screen(self, req, venue: str, network: str = "mainnet") -> Optional[Screen]:
+        """Block starting a new bind when the account cap is full."""
+        entitlements = self.ctx.entitlements
+        if entitlements is None or not entitlements.paypal_enabled:
+            return None
+        bindings = await self.binding.list(req.user_id)
+        replacing = any(
+            b["venue"] == venue and (b.get("network") or "mainnet") == network for b in bindings
+        )
+        allowed, used, limit = await entitlements.check_account_limit(
+            req.user_id, len(bindings), replacing=replacing,
+        )
+        if allowed:
+            return None
+        await self._log_limit(req.user_id, "account_limit", f"{used}/{limit}", product="account")
+        T = req.T
+        return Screen(T("pro.upgrade.account_limit", used=used, limit=limit), kb.upsell(T, req.sign))
+
+    async def can_use_full_rescue(self, user_id: int) -> bool:
+        entitlements = self.ctx.entitlements
+        if entitlements is None or not entitlements.paypal_enabled:
+            return True
+        return await entitlements.can_use_full_rescue(user_id)

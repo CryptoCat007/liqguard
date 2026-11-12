@@ -200,6 +200,7 @@ def all_keyboards(T: Translator, sign: Signer) -> list:
         kb.pro_manage(T, sign),
         kb.rescue_pass(T, sign),
         kb.rescue_with_upgrade(T, sign, "sim", "BTCUSDT", show_upgrade=True),
+        kb.upsell(T, sign),
     ]
 
 
@@ -337,9 +338,14 @@ class TestKeyboards:
     @pytest.mark.parametrize("lang", LANGUAGES)
     def test_main_menu_has_every_feature_and_the_language_button(self, lang):
         T = Translator(lang)
-        keys = ["risk_overview", "positions", "stop_check", "triage", "stress", "funding", "ask", "settings", "binding",
+        keys = ["positions", "stop_check", "triage", "stress", "funding", "ask", "settings", "binding",
                 "account", "dashboard", "demo", "language", "help"]
-        assert labels(kb.main_menu(T, self.sign)) == [T(f"kb.{k}") for k in keys]
+        assert labels(kb.main_menu(T, self.sign)) == [
+            T("kb.risk_overview"), T("pro.kb.agent"), *(T(f"kb.{k}") for k in keys),
+        ]
+        rows = kb.main_menu(T, self.sign).inline_keyboard
+        assert all(len(row) == 2 for row in rows[:-1])
+        assert [b.text for b in rows[-1]] == [T("kb.help")]
         assert labels(kb.main_menu(T, self.sign, demo_running=True))[0] == T("kb.sim_stop")
         assert T("kb.language") == "🌐 Language / 語言"
 
@@ -566,7 +572,8 @@ class TestRouterDispatch:
         await ui.on_command(message, state_for(fsm_storage, ALICE), MagicMock(command="start", args=None))
         text, markup = message.answer.await_args.args[0], message.answer.await_args.kwargs["reply_markup"]
         assert text.split("\n")[0] == T("menu.text", status="").split("\n")[0]
-        assert len(labels(markup)) == 14 and T("kb.language") in labels(markup)
+        assert len(labels(markup)) == 15 and T("kb.language") in labels(markup)
+        assert T("pro.kb.agent") in labels(markup)
         assert labels(markup)[0] == T("kb.risk_overview") == {"en": "📊 Risk overview", "zh-Hant": "📊 風險總覽"}[lang]
 
     async def test_settings_with_arguments_falls_through_to_legacy(self, ui, fsm_storage):

@@ -30,7 +30,11 @@ async def overview(req: Request) -> Screen:
         return empty
     if not snapshot.positions:
         return Screen(f"{book_label(T, snapshot.label)}\n\n{T('positions.none')}", kb.refresh_back(T, req.sign, "ro"))
+    blocked = await s.deny_muse(req)
+    if blocked is not None:
+        return blocked
     book = s.muse.portfolio(user, snapshot, T.lang)
+    await s.record_muse(req.user_id)
     ov, insights = book.overview, book.insights
     infos = [(p, position_protection(p, snapshot.context, user.threshold).to_dict()) for p in snapshot.positions]
 

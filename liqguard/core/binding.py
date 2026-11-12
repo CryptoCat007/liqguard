@@ -71,11 +71,12 @@ def masked_bindings(user: Optional[User]) -> list[dict]:
 
 class BindingService:
     def __init__(self, storage, binance_factory: Callable = BinanceAdapter, hyperliquid_factory: Callable = HyperliquidAdapter,
-                 default_threshold: Optional[Callable] = None):
+                 default_threshold: Optional[Callable] = None, entitlements=None):
         self.storage = storage
         self.binance_factory = binance_factory
         self.hyperliquid_factory = hyperliquid_factory
         self.default_threshold = default_threshold
+        self.entitlements = entitlements
 
     async def _ensure_user(self, user_id: int) -> User:
         user = await self.storage.get_user(user_id)
@@ -85,6 +86,35 @@ class BindingService:
                 user.threshold = self.default_threshold()
             await self.storage.save_user(user)
         return user
+
+    async def _account_limit(self, user_id: int, venue: str, network: str, lang: str) -> Optional[BindResult]:
+        """Reject a new bind when the free/Pro account cap is already full. Replacing the same slot is allowed."""
+        entitlements = self.entitlements
+        if entitlements is None or not getattr(entitlements, "paypal_enabled", False):
+            return None
+        user = await self.storage.get_user(user_id)
+        bindings = [b for b in (user.bindings if user else []) if b.is_active]
+        replacing = any(
+            b.venue == venue and (b.network or MAINNET) == (network or MAINNET) for b in bindings
+        )
+        allowed, used, limit = await entitlements.check_account_limit(
+            user_id, len(bindings), replacing=replacing,
+        )
+        if allowed:
+            return None
+        if hasattr(self.storage, "save_agent_action"):
+            await self.storage.save_agent_action(user_id, {
+                "tool": "account_limit",
+                "product": "account",
+                "source": "bind",
+                "status": "account_limit",
+                "message": f"{used}/{limit}",
+            })
+        return BindResult(
+            False,
+            "account_limit",
+            t(lang, "pro.upgrade.account_limit", used=used, limit=limit),
+        )
 
     async def bind_binance(self, user_id: int, api_key: str, api_secret: str, network: str = MAINNET,
                            lang: str = EN) -> BindResult:
@@ -97,6 +127,9 @@ class BindingService:
             return BindResult(False, "invalid_format", t(lang, "binding.result.key_equals_secret"))
         if network not in (MAINNET, TESTNET):
             return BindResult(False, "invalid_format", t(lang, "binding.result.bad_network"))
+        blocked = await self._account_limit(user_id, "binance", network, lang)
+        if blocked is not None:
+            return blocked
         try:
             async with self.binance_factory(api_key, api_secret, network=network) as adapter:
                 check = await adapter.check_key()
@@ -129,6 +162,9 @@ class BindingService:
         if not WALLET.match(address):
             return BindResult(False, "invalid_format", t(lang, "binding.result.wallet_format"))
         address = address.lower()
+        blocked = await self._account_limit(user_id, "hyperliquid", MAINNET, lang)
+        if blocked is not None:
+            return blocked
         try:
             async with self.hyperliquid_factory(address) as adapter:
                 check = await adapter.check_key()

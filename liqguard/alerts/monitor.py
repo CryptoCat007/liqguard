@@ -238,7 +238,7 @@ class PositionMonitor:
             return True
         now = self.clock().timestamp()
         last = self._last_check.get(user.telegram_id, 0.0)
-        interval = self.entitlements.poll_interval_for(await self.entitlements.is_pro(user.telegram_id))
+        interval = await self.entitlements.poll_interval_for_user(user.telegram_id)
         if now - last < interval:
             return False
         self._last_check[user.telegram_id] = now

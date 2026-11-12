@@ -890,11 +890,31 @@ class BotHandlers:
         if not positions:
             await message.answer("No positions to analyze. Connect an exchange or enable demo mode.")
             return
+        entitlements = self.ctx.entitlements
+        if entitlements is not None and entitlements.paypal_enabled:
+            allowed, used, limit = await entitlements.check_muse_limit(user.telegram_id)
+            if not allowed:
+                from liqguard.i18n import Translator
+                from liqguard.telegram.ui import keyboards as kb
+                T = Translator(user.language)
+                text = T("pro.upgrade.limit_reached_full", used=used, limit=limit, reset=entitlements.reset_label())
+                markup = None
+                if self.ctx.ui is not None:
+                    markup = kb.upsell(T, self.ctx.ui.signer(user.telegram_id))
+                if hasattr(self.ctx.storage, "save_agent_action"):
+                    await self.ctx.storage.save_agent_action(user.telegram_id, {
+                        "tool": "muse_limit", "product": "muse", "source": "limit",
+                        "status": "muse_limit", "message": f"{used}/{limit}",
+                    })
+                await message.answer(text, reply_markup=markup)
+                return
         status_msg = await message.answer("🤔 Analyzing...")
         news = None
         if any(s in question.lower() for s in ["news", "market", "sentiment", "新聞", "市場"]):
             news = get_news_stub(positions[0].symbol)
         instant = self.muse.answer_now(positions, question, user.language, news)
+        if entitlements is not None and entitlements.paypal_enabled:
+            await entitlements.record_muse_usage(user.telegram_id)
         await status_msg.edit_text(instant.result)
         self._muse_followup(instant.pending, status_msg.edit_text)
 

@@ -512,7 +512,33 @@ def create_app(
     add_simulation_routes("/api/demo", public_simulation, public_simulation)
     if ctx is not None:
         add_simulation_routes("/api/me", my_simulation, my_simulation_configured)
-        app.state.binding = BindingService(ctx.storage, default_threshold=ctx.settings.default_threshold)
+        app.state.binding = BindingService(
+            ctx.storage, default_threshold=ctx.settings.default_threshold, entitlements=ctx.entitlements,
+        )
+
+        async def consume_muse_or_402(user_id: int) -> None:
+            """Check the free-tier Muse cap before a user-initiated Muse call; record after the caller returns."""
+            e = ctx.entitlements
+            if e is None or not e.paypal_enabled:
+                return
+            allowed, used, limit = await e.check_muse_limit(user_id)
+            if allowed:
+                return
+            await ctx.storage.save_agent_action(user_id, {
+                "tool": "muse_limit", "product": "muse", "source": "limit",
+                "status": "muse_limit", "message": f"{used}/{limit}",
+            })
+            raise HTTPException(402, {
+                "code": "muse_limit",
+                "used": used,
+                "limit": limit,
+                "reset": e.reset_label(),
+            })
+
+        async def record_muse(user_id: int) -> None:
+            e = ctx.entitlements
+            if e is not None and e.paypal_enabled:
+                await e.record_muse_usage(user_id)
 
         async def own_user(claims: SessionClaims):
             user = await ctx.storage.get_user(claims.user_id)
@@ -565,13 +591,15 @@ def create_app(
             """Read-only Binance key: checked with Binance, trade/withdraw permission rejected, stored encrypted."""
             api_key, api_secret = await _credential_fields(request, "api_key", "api_secret")
             result = await app.state.binding.bind_binance(claims.user_id, api_key, api_secret)
-            return JSONResponse(result.to_dict(), status_code=200 if result.ok else 400)
+            code = 200 if result.ok else (402 if result.code == "account_limit" else 400)
+            return JSONResponse(result.to_dict(), status_code=code)
 
         @app.post("/api/me/bindings/hyperliquid", dependencies=[Depends(require_csrf)])
         async def bind_hyperliquid(request: Request, claims: SessionClaims = Depends(auth.required)):
             (address,) = await _credential_fields(request, "address")
             result = await app.state.binding.bind_hyperliquid(claims.user_id, address)
-            return JSONResponse(result.to_dict(), status_code=200 if result.ok else 400)
+            code = 200 if result.ok else (402 if result.code == "account_limit" else 400)
+            return JSONResponse(result.to_dict(), status_code=code)
 
         @app.post("/api/me/bindings/unbind", dependencies=[Depends(require_csrf)])
         async def unbind(body: UnbindRequest, claims: SessionClaims = Depends(auth.required)):
@@ -605,14 +633,22 @@ def create_app(
             if position is None:
                 raise HTTPException(404, "No such position")
             c = snapshot.context
+            if tool == "rescue" and ctx.entitlements is not None and not await ctx.entitlements.can_use_full_rescue(claims.user_id):
+                raise HTTPException(402, {
+                    "code": "rescue_locked",
+                    "message": t(normalize(user.language), "pro.upgrade.rescue_locked"),
+                })
+            await consume_muse_or_402(claims.user_id)
             protection = position_protection(position, c, user.threshold)
             plan = None
             if tool == "rescue":
                 plan = RescueSimulator(c.fees, user.threshold.safety_target_pct).simulate(
                     position, c.account_for(position), c.funding_for(position), c.now)
-            return JSONResponse(quick_report(ctx.muse, lambda: ctx.simulations.get_or_create(claims.user_id), tool, position, c,
-                                             protection, plan, normalize(user.language), demo=venue == "demo",
-                                             scope="live"))
+            body = quick_report(ctx.muse, lambda: ctx.simulations.get_or_create(claims.user_id), tool, position, c,
+                                protection, plan, normalize(user.language), demo=venue == "demo",
+                                scope="live")
+            await record_muse(claims.user_id)
+            return JSONResponse(body)
 
         @app.get("/api/me/session")
         async def my_session(claims: SessionClaims = Depends(auth.required)):
@@ -660,10 +696,12 @@ def create_app(
             protection = [position_protection(p, snapshot.context, user.threshold).to_dict() for p in positions]
             overview = insights = muse = None
             if positions:
+                await consume_muse_or_402(claims.user_id)
                 book = ctx.muse.portfolio(user, snapshot, lang)
                 overview, insights = book.overview.to_dict(), book.insights.to_dict()
                 muse = account_muse(claims.user_id, user, snapshot, book, lang)
                 ctx.muse.warm_book(user, snapshot, book.insights, lang)
+                await record_muse(claims.user_id)
             return localize(lang, {
                 "bindings": [b.to_dict() for b in user.bindings],
                 "demo_mode": user.is_demo_mode,
@@ -706,8 +744,15 @@ def create_app(
                 position, context.account_for(position), context.funding_for(position), context.now
             )
             lang = normalize(user.language)
+            if ctx.entitlements is not None and not await ctx.entitlements.can_use_full_rescue(claims.user_id):
+                raise HTTPException(402, {
+                    "code": "rescue_locked",
+                    "message": t(lang, "pro.upgrade.rescue_locked"),
+                })
+            await consume_muse_or_402(claims.user_id)
             body = await rescue_body(ctx.muse, lambda: ctx.simulations.get_or_create(claims.user_id), plan, position, lang,
                                      wait, scope="live", user_id=claims.user_id)
+            await record_muse(claims.user_id)
             return JSONResponse(localize(lang, body))
 
         # ---------------------------------------------------------------- billing & subscriptions
@@ -723,11 +768,17 @@ def create_app(
             )
 
         def _billing_notify(telegram_id: int, kind: str, resource_id: str) -> None:
-            sim = ctx.simulations.get(telegram_id)
-            if sim is None:
-                return
-            event = {"type": "billing", "kind": kind, "resource_id": resource_id}
-            asyncio.create_task(hubs.for_simulation(sim).broadcast(event))
+            async def run():
+                sim = ctx.simulations.get(telegram_id)
+                if sim is not None:
+                    event = {"type": "billing", "kind": kind, "resource_id": resource_id}
+                    await hubs.for_simulation(sim).broadcast(event)
+                hook = ctx.billing_notify
+                if hook is not None:
+                    result = hook(telegram_id, kind, resource_id)
+                    if asyncio.iscoroutine(result):
+                        await result
+            asyncio.create_task(run())
 
         webhook_handler = WebhookHandler(
             event_store=ctx.storage,
@@ -878,7 +929,20 @@ def create_app(
             try:
                 capture = await paypal.capture_order(token)
                 if capture.get("status") == "COMPLETED" and claims is not None:
-                    await ctx.storage.add_rescue_passes(claims.user_id, 1)
+                    if ctx.entitlements is not None:
+                        await ctx.entitlements.activate_rescue_mode(claims.user_id)
+                    else:
+                        await ctx.storage.activate_rescue_mode(claims.user_id)
+                    await ctx.storage.save_agent_action(claims.user_id, {
+                        "tool": "rescue_mode", "product": "rescue", "source": "return",
+                        "status": "rescue_mode", "resource_id": token,
+                        "message": "Rescue Mode activated",
+                    })
+                    hook = ctx.billing_notify
+                    if hook is not None:
+                        result = hook(claims.user_id, "rescue_pass_purchased", token)
+                        if asyncio.iscoroutine(result):
+                            asyncio.create_task(result)
                     return RedirectResponse("/me?rescue=success", status_code=303)
             except PayPalError as e:
                 logger.error("Failed to capture rescue pass order: %s", e)

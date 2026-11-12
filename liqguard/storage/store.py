@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,7 @@ from .repositories import (
     AuditRepository,
     BindingRepository,
     LoginTokenRepository,
+    MuseUsageRepository,
     PaymentEventRepository,
     RescuePassRepository,
     SqliteAuditSink,
@@ -62,6 +64,7 @@ class EncryptedStorage:
         self.login_tokens = LoginTokenRepository(self.db)
         self.subscriptions = SubscriptionRepository(self.db)
         self.rescue_passes = RescuePassRepository(self.db)
+        self.muse_usage = MuseUsageRepository(self.db)
         self.payment_events = PaymentEventRepository(self.db)
         self.agent_actions = AgentActionRepository(self.db)
         self._initialized = False
@@ -106,6 +109,8 @@ class EncryptedStorage:
                 await conn.execute("ALTER TABLE users ADD COLUMN language_explicit INTEGER NOT NULL DEFAULT 0")
                 # Before v3 the only way to get a non-English language was choosing it with /language.
                 await conn.execute("UPDATE users SET language_explicit = 1, language = 'zh-Hant' WHERE language LIKE 'zh%'")
+            if "rescue_passes" in tables and "expires_at" not in await self.db.columns(conn, "rescue_passes"):
+                await conn.execute("ALTER TABLE rescue_passes ADD COLUMN expires_at TEXT")
             await conn.executescript(SCHEMA)
             if "bindings_legacy" in tables:
                 await self._migrate_legacy_bindings(conn)
@@ -266,6 +271,24 @@ class EncryptedStorage:
     async def add_rescue_passes(self, telegram_id: int, count: int) -> None:
         await self.initialize()
         await self.rescue_passes.add_passes(telegram_id, count)
+
+    async def get_rescue_until(self, telegram_id: int) -> Optional[datetime]:
+        await self.initialize()
+        return await self.rescue_passes.get_expires_at(telegram_id)
+
+    async def activate_rescue_mode(
+        self, telegram_id: int, hours: int = 24, now: Optional[datetime] = None,
+    ) -> datetime:
+        await self.initialize()
+        return await self.rescue_passes.activate_mode(telegram_id, hours=hours, now=now)
+
+    async def get_muse_usage(self, telegram_id: int, day: str) -> int:
+        await self.initialize()
+        return await self.muse_usage.get(telegram_id, day)
+
+    async def increment_muse_usage(self, telegram_id: int, day: str) -> int:
+        await self.initialize()
+        return await self.muse_usage.increment(telegram_id, day)
 
     async def has_payment_event(self, event_id: str) -> bool:
         await self.initialize()

@@ -416,6 +416,15 @@ class RescuePassRepository:
                 row = await cur.fetchone()
         return row["remaining"] if row else 0
 
+    async def get_expires_at(self, telegram_id: int) -> Optional[datetime]:
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT expires_at FROM rescue_passes WHERE telegram_id = ?",
+                (telegram_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        return _parse_dt(row["expires_at"]) if row and row["expires_at"] else None
+
     async def add_passes(self, telegram_id: int, count: int) -> None:
         """Add Rescue Passes to user account."""
         now = _now().isoformat()
@@ -432,6 +441,34 @@ class RescuePassRepository:
             )
             await conn.commit()
 
+    async def activate_mode(self, telegram_id: int, hours: int = 24, now: Optional[datetime] = None) -> datetime:
+        """Start or extend Rescue Mode by `hours` from now or the current expiry."""
+        from datetime import timedelta, timezone
+
+        moment = now or _now()
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        current = await self.get_expires_at(telegram_id)
+        if current is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        base = current if current is not None and current > moment else moment
+        until = base + timedelta(hours=hours)
+        stamp = moment.isoformat()
+        async with self.db.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO rescue_passes (telegram_id, remaining, expires_at, updated_at)
+                VALUES (?, 1, ?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET
+                    remaining = remaining + 1,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (telegram_id, until.isoformat(), stamp),
+            )
+            await conn.commit()
+        return until
+
     async def use_pass(self, telegram_id: int) -> bool:
         """Use one Rescue Pass. Returns True if successful."""
         now = _now().isoformat()
@@ -442,6 +479,34 @@ class RescuePassRepository:
             )
             await conn.commit()
             return cur.rowcount > 0
+
+
+class MuseUsageRepository:
+    """Taipei-day Muse request counters."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def get(self, telegram_id: int, day: str) -> int:
+        async with self.db.connect() as conn:
+            async with conn.execute(
+                "SELECT used FROM muse_usage WHERE telegram_id = ? AND day = ?",
+                (telegram_id, day),
+            ) as cur:
+                row = await cur.fetchone()
+        return int(row["used"]) if row else 0
+
+    async def increment(self, telegram_id: int, day: str) -> int:
+        async with self.db.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO muse_usage (telegram_id, day, used) VALUES (?, ?, 1)
+                ON CONFLICT(telegram_id, day) DO UPDATE SET used = used + 1
+                """,
+                (telegram_id, day),
+            )
+            await conn.commit()
+        return await self.get(telegram_id, day)
 
 
 class PaymentEventRepository:

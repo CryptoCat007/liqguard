@@ -47,6 +47,8 @@ class AppContext:
     demo_alerts: DemoAlertWindow = field(default_factory=DemoAlertWindow)
     muse: Optional[MuseService] = None
     entitlements: Optional[EntitlementService] = None
+    ui: Optional[object] = None
+    billing_notify: Optional[object] = None
 
     def __post_init__(self) -> None:
         if self.muse is None:

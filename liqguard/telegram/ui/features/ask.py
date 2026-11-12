@@ -22,8 +22,12 @@ async def answer(req: Request) -> Screen:
     snapshot = await s.snapshot(user)
     if not snapshot.positions:
         return Screen(T("ask.none"), kb.no_account(T, req.sign) if not snapshot.label else kb.ask_answer(T, req.sign))
+    blocked = await s.deny_muse(req)
+    if blocked is not None:
+        return blocked
     question = T(f"ask.q.{key}")
     instant = s.muse.answer_now(snapshot.positions, question, T.lang)
+    await s.record_muse(req.user_id)
 
     def text(reply: str, source: str) -> str:
         body = f"{T('ask.answer', question=question)}\n\n{str(reply).strip()}"

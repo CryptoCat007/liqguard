@@ -259,7 +259,11 @@ class TestWebMockedPayPal:
                 },
             })
             assert granted.status_code == 200 and granted.json()["processed"] is True
-            assert client.get("/api/me/billing").json()["rescue_passes_remaining"] >= 1
+            billed = client.get("/api/me/billing").json()
+            assert billed["rescue_passes_remaining"] >= 1
+            assert billed["is_rescue"] is True
+            assert billed["rescue_until"]
+            assert any(a.get("status") == "rescue_mode" for a in billed.get("agent_actions") or [])
 
             paypal.verify_webhook_online = AsyncMock(return_value=False)
             denied = client.post("/webhooks/paypal", headers=PAYPAL_HEADERS, json={

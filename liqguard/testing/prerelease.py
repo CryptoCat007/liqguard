@@ -28,6 +28,7 @@ from liqguard.core.wicks import WickService
 from liqguard.exchanges.base import KeyCheck
 from liqguard.i18n import EN, ZH, Translator, catalog
 from liqguard.models import ExchangeBinding
+from liqguard.payments.webhooks import WebhookHandler
 from liqguard.storage import EncryptedStorage
 from liqguard.telegram.ui.codec import is_ui_payload
 from liqguard.telegram.ui.router import ERROR, INVALID
@@ -98,7 +99,7 @@ class Session:
         self.tg = FakeTelegram.create(self.ctx)
         self.tg.app.ui.services.binding = BindingService(
             self.ctx.storage, binance_factory=ReadOnlyKeyAdapter, hyperliquid_factory=ReadOnlyKeyAdapter,
-            default_threshold=self.ctx.settings.default_threshold)
+            default_threshold=self.ctx.settings.default_threshold, entitlements=self.ctx.entitlements)
         await self.tg.__aenter__()
         return self
 
@@ -354,11 +355,72 @@ async def restart_is_quiet(s: Session) -> None:
     await s.assert_quiet(s.tg.mark(), "after a restart in demo mode")
 
 
+def _enable_tiers(s: Session) -> None:
+    """Turn on PayPal entitlements against the session DB (no live PayPal)."""
+    s.ctx.entitlements.paypal_enabled = True
+    s.ctx.entitlements.store = s.ctx.storage
+    s.tg.app.ui.services.binding.entitlements = s.ctx.entitlements
+
+
+async def tier_enforcement(s: Session) -> None:
+    """Free user hits Muse cap, simulated Rescue Pass capture starts Rescue Mode, Muse is unlimited again."""
+    _enable_tiers(s)
+    await s.start_simulation()
+    menu = await s.main_menu()
+    ask = await s.tap_action(menu, "qa", "Ask Muse")
+    for i in range(5):
+        shown = await s.tap_action(ask, "qq", f"Muse {i + 1}")
+        check(shown is not None, f"Muse {i + 1}: nothing shown")
+        s.assert_language(shown, f"Muse {i + 1}")
+        check("rp" not in s.actions(shown), f"Muse {i + 1}: unexpected Rescue Pass upsell")
+        ask = await s.tap_action(shown, "qa", "Ask more")
+    blocked = await s.tap_action(ask, "qq", "Muse over limit")
+    check(blocked is not None, "Muse over limit: nothing shown")
+    s.assert_language(blocked, "Muse over limit")
+    check("pu" in s.actions(blocked) and "rp" in s.actions(blocked), f"limit screen missing upsell: {s.actions(blocked)}")
+    check("$9.99" in blocked.text or "9.99" in "".join(t for t, _ in blocked.buttons()), "limit screen missing Pro price")
+
+    handler = WebhookHandler(s.ctx.storage, s.ctx.storage, notify=s.ctx.billing_notify)
+    result = await handler.process_event({
+        "id": "WH-TIER-RESCUE",
+        "event_type": "PAYMENT.CAPTURE.COMPLETED",
+        "resource": {"id": "ORDER-TIER", "purchase_units": [{"custom_id": str(USER)}]},
+    })
+    check(result.success, f"rescue webhook: {result.message}")
+    status = await s.ctx.entitlements.get_status(USER)
+    check(status.is_rescue, "Rescue Mode not active after capture")
+    check(await s.ctx.entitlements.poll_interval_for_user(USER) == 10, "Rescue Mode poll interval is not 10s")
+    prefix = s.T("pro.notifications.rescue_mode_active", until="XX").split("XX")[0]
+    confirm = next((m for m in s.tg.session.sent if prefix in (m.text or "")), None)
+    check(confirm is not None, "no Rescue Mode confirmation message")
+    s.assert_language(confirm, "Rescue Mode confirmation")
+    check("ro" in s.actions(confirm) and "qa" in s.actions(confirm), f"confirm buttons: {s.actions(confirm)}")
+
+    ask = await s.tap_action(await s.main_menu(), "qa", "Ask Muse after rescue")
+    shown = await s.tap_action(ask, "qq", "unlimited Muse")
+    check(shown is not None, "unlimited Muse: nothing shown")
+    s.assert_language(shown, "unlimited Muse")
+    check("rp" not in s.actions(shown), f"unlimited Muse still showing upsell: {s.actions(shown)}")
+
+    await s.bind_wallet()
+    bind = await s.tap_action(await s.main_menu(), "b", "bind after one account")
+    over = await s.tap_action(bind, "bb", "second account")
+    check(over is not None, "account limit: nothing shown")
+    s.assert_language(over, "account limit")
+    check("pu" in s.actions(over) and "rp" in s.actions(over), f"account limit missing upsell: {s.actions(over)}")
+
+
 async def pro_billing(s: Session) -> None:
     """Account + Dashboard 💎 Pro / manage / Rescue Pass when PayPal is unset: handled, bilingual, no error toast."""
     menu = await s.main_menu()
-    check(len(s.actions(menu)) == 14, f"main menu has {len(s.actions(menu))} actions, want 14")
+    check(len(s.actions(menu)) == 15, f"main menu has {len(s.actions(menu))} actions, want 15")
+    check("px" in s.actions(menu), f"main menu missing 🤖 Muse checkout: {s.actions(menu)}")
+    agent_main = await s.tap_action(menu, "px", "🤖 Muse checkout from main menu")
+    check(agent_main is not None, "🤖 Muse checkout from main menu: nothing shown")
+    s.assert_language(agent_main, "🤖 Muse checkout from main menu")
+    check(s.T("pro.disabled") in agent_main.text, f"PayPal-unset Muse checkout from main: {agent_main.text[:160]}")
 
+    menu = await s.main_menu()
     account = await s.tap_action(menu, "ac", "🧾 Account")
     check("pu" in s.actions(account), f"account keyboard missing 💎 Pro: {s.actions(account)}")
     check("px" in s.actions(account), f"account keyboard missing 🤖 Muse checkout: {s.actions(account)}")
@@ -399,7 +461,8 @@ CRAWL_SKIP = frozenset({"bb", "bh", "by", "ls", "ds"})
 async def crawl_buttons(s: Session) -> None:
     """Tap every reachable inline callback from 🏠 Main menu (PayPal-unset Pro included)."""
     menu = await s.main_menu()
-    check(len(s.actions(menu)) == 14, f"main menu has {len(s.actions(menu))} actions, want 14")
+    check(len(s.actions(menu)) == 15, f"main menu has {len(s.actions(menu))} actions, want 15")
+    check("px" in s.actions(menu), f"main menu missing 🤖 Muse checkout: {s.actions(menu)}")
     codec = s.tg.app.ui.codec
     seen: set[str] = set()
     visited: set[str] = set()
@@ -441,6 +504,7 @@ SCENARIOS: dict[str, Callable[[Session], Awaitable[None]]] = {
     "restart-is-quiet": restart_is_quiet,
     "pro-billing": pro_billing,
     "crawl-buttons": crawl_buttons,
+    "tier-enforcement": tier_enforcement,
 }
 
 

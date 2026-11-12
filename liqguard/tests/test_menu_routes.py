@@ -109,7 +109,10 @@ class TestEveryCommandHasAButton:
         T = Translator(lang)
         screen = await app.ui.router.run(ALICE, "m", T=T)
         rows = [[b.text for b in row] for row in screen.keyboard.inline_keyboard]
-        assert rows[0] == [{"en": "📊 Risk overview", "zh-Hant": "📊 風險總覽"}[lang]]
+        assert rows[0] == [
+            {"en": "📊 Risk overview", "zh-Hant": "📊 風險總覽"}[lang],
+            {"en": "🤖 Muse checkout", "zh-Hant": "🤖 Muse 結帳"}[lang],
+        ]
         assert {"en": "🛡 Stop-loss check", "zh-Hant": "🛡 停損檢查"}[lang] in rows[1]
 
 
