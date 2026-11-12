@@ -36,7 +36,7 @@ def wire_bot(ctx: AppContext, bot: Bot, escalation_check_seconds: float = 5.0) -
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
         from liqguard.i18n import Translator
-        from liqguard.payments.entitlements import format_taipei_hm
+        from liqguard.payments.entitlements import format_taipei_expiry
 
         user = await ctx.storage.get_user(telegram_id)
         lang = user.language if user is not None else "en"
@@ -45,7 +45,7 @@ def wire_bot(ctx: AppContext, bot: Bot, escalation_check_seconds: float = 5.0) -
         if ctx.entitlements is not None:
             status = await ctx.entitlements.get_status(telegram_id)
             if status.rescue_until is not None:
-                until_hm = format_taipei_hm(status.rescue_until)
+                until_hm = format_taipei_expiry(status.rescue_until, lang)
         text = T("pro.notifications.rescue_mode_active", until=until_hm)
         sign = ui.signer(telegram_id)
         markup = InlineKeyboardMarkup(inline_keyboard=[[

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from liqguard.payments.entitlements import format_taipei_hm
+from liqguard.payments.entitlements import format_taipei_expiry
 
 from .. import keyboards as kb
 from ..screen import Request, Screen
@@ -10,7 +10,7 @@ from ..screen import Request, Screen
 
 def _rescue_line(T, status) -> str:
     if status.is_rescue and status.rescue_until is not None:
-        return T("pro.rescue_mode_until", until=format_taipei_hm(status.rescue_until))
+        return T("pro.rescue_mode_until", until=format_taipei_expiry(status.rescue_until, T.lang))
     return T("pro.rescue_mode_off")
 
 

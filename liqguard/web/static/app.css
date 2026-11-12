@@ -322,6 +322,7 @@ a.btn { text-decoration: none; }
 .login-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .login-top .brand-sub { white-space: normal; }
 .login-notice { padding: 10px 12px; border-radius: 10px; font-size: 13px; color: #ccfbf1; background: rgba(94, 234, 212, 0.1); border: 1px solid rgba(94, 234, 212, 0.35); }
+#paymentNotice { margin: 0 0 12px; }
 .login-error a, .login-notice a { color: inherit; }
 
 

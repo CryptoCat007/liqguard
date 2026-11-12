@@ -56,14 +56,17 @@ def _fill(lang: str, key: str, html: Optional[dict[str, str]] = None, **params) 
     return text
 
 
-def render_payment_received(lang: str, kind: str = "rescue", ok: bool = True) -> str:
+def render_payment_received(lang: str, kind: str = "rescue", ok: bool = True, until: str = "") -> str:
     """Sessionless PayPal return: tell the user to go back to Telegram."""
     lang = normalize(lang)
     if ok:
         title = _fill(lang, "pro.return.title")
         heading = _fill(lang, "pro.return.body")
-        detail_key = "pro.return.rescue" if kind == "rescue" else "pro.return.pro"
-        detail = _fill(lang, detail_key)
+        if kind == "rescue" and until:
+            detail = _fill(lang, "pro.return.rescue_until", until=until)
+        else:
+            detail_key = "pro.return.rescue" if kind == "rescue" else "pro.return.pro"
+            detail = _fill(lang, detail_key)
     else:
         title = _fill(lang, "pro.return.error_title")
         heading = _fill(lang, "pro.return.error_body")

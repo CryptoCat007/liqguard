@@ -2423,6 +2423,32 @@ async function applyGridFilter() {
   if (GRIDS.positionsGrid) GRIDS.positionsGrid.onFilterChanged();
 }
 
+function rescueUntilLabel(billing) {
+  if (!billing) return "";
+  if (I18N.lang === "zh-Hant") return billing.rescue_until_taipei_zh || billing.rescue_until_taipei || "";
+  return billing.rescue_until_taipei || "";
+}
+
+function showPaymentReturnNotice(billing) {
+  const box = $("paymentNotice");
+  if (!box) return;
+  const params = new URLSearchParams(location.search);
+  const rescueOk = params.get("rescue") === "success";
+  const billingOk = params.get("billing") === "success";
+  if (!rescueOk && !billingOk) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  if (rescueOk) {
+    const until = rescueUntilLabel(billing);
+    box.textContent = until ? L("rescue_paid", { until }) : L("rescue_paid", { until: "—" });
+  } else {
+    box.textContent = L("pro_paid");
+  }
+  box.hidden = false;
+}
+
 async function refreshBilling() {
   let billing = { enabled: false, tier: "free", is_pro: false, subscriptions: [] };
   try {
@@ -2448,8 +2474,9 @@ async function refreshBilling() {
       feats.textContent = "";
     } else {
       const parts = [L("plan_compare")];
-      if (billing.is_rescue && billing.rescue_until_taipei) {
-        parts.push(L("rescue_until").replace("{until}", billing.rescue_until_taipei));
+      const until = rescueUntilLabel(billing);
+      if (billing.is_rescue && until) {
+        parts.push(L("rescue_until", { until }));
       }
       if (typeof billing.muse_limit === "number" && billing.muse_limit >= 0) {
         parts.push(L("muse_today").replace("{used}", String(billing.muse_used ?? 0)).replace("{limit}", String(billing.muse_limit)));
@@ -2462,6 +2489,7 @@ async function refreshBilling() {
   $("rescuePassBtn").hidden = pro || !billing.enabled;
   if ($("agentCheckoutBtn")) $("agentCheckoutBtn").hidden = !billing.enabled;
   $("cancelSubBtn").hidden = !pro || !billing.enabled;
+  showPaymentReturnNotice(billing);
 
   const rows = (billing.subscriptions || []).map((s) => ({
     plan: s.plan_id || billing.plan_id || L("tier_pro_label"),

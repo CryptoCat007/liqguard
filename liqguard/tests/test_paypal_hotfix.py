@@ -127,12 +127,14 @@ class TestSessionlessReturn:
             resp = client.get("/api/me/billing/rescue-return", params={"token": "5O190127TN364715T"})
             assert resp.status_code == 200
             assert t(EN, "pro.return.body") in resp.text
-            assert t(EN, "pro.return.rescue") in resp.text
             assert notified == [(ALICE, "rescue_pass_purchased", "5O190127TN364715T")]
 
             client.cookies.set(SESSION_COOKIE, paypal_ctx.sessions.issue(ALICE, 0))
             billed = client.get("/api/me/billing").json()
             assert billed["is_rescue"] is True
+            assert billed["rescue_until_taipei"] in resp.text
+            assert "," in billed["rescue_until_taipei"]
+            assert "/" in billed["rescue_until_taipei_zh"]
             until, remaining = billed["rescue_until"], billed["rescue_passes_remaining"]
 
             again = client.post("/webhooks/paypal", headers=PAYPAL_HEADERS, json=SANDBOX_CAPTURE)
@@ -175,6 +177,26 @@ class TestSessionlessReturn:
             client.cookies.set(SESSION_COOKIE, paypal_ctx.sessions.issue(ALICE, 0))
             billed = client.get("/api/me/billing").json()
             assert billed["is_pro"] is True and billed["subscription_id"] == "I-HOTFIX"
+
+    @pytest.mark.asyncio
+    async def test_rescue_return_with_session_redirects_to_dashboard_notice(self, paypal_ctx):
+        with _client(paypal_ctx) as client:
+            client.cookies.set(SESSION_COOKIE, paypal_ctx.sessions.issue(ALICE, 0))
+            paypal = client.app.state.paypal
+            paypal.capture_order = AsyncMock(return_value={
+                "id": "ORD-SESS",
+                "status": "COMPLETED",
+                "purchase_units": [{"custom_id": str(ALICE)}],
+            })
+            resp = client.get("/api/me/billing/rescue-return", params={"token": "ORD-SESS"}, follow_redirects=False)
+            assert resp.status_code == 303
+            assert resp.headers["location"] == "/me?rescue=success"
+            page = client.get("/me?rescue=success")
+            assert page.status_code == 200
+            assert 'id="paymentNotice"' in page.text
+            billed = client.get("/api/me/billing").json()
+            assert billed["is_rescue"] is True
+            assert "," in billed["rescue_until_taipei"]
 
 
 class TestMuseOnForcedProduct:

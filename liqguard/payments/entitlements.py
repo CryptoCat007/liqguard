@@ -52,6 +52,21 @@ def format_taipei_hm(dt: datetime) -> str:
     return aware(dt).astimezone(TAIPEI).strftime("%H:%M")
 
 
+_EN_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def format_taipei_expiry(dt: datetime, lang: str = "en") -> str:
+    """Rescue Mode expiry for display: 'Nov 13, 22:49' / '11/13 22:49' (Taipei)."""
+    local = aware(dt).astimezone(TAIPEI)
+    hm = local.strftime("%H:%M")
+    if str(lang).lower().startswith("zh"):
+        return f"{local.month}/{local.day} {hm}"
+    return f"{_EN_MONTHS[local.month - 1]} {local.day}, {hm}"
+
+
 class Tier(str, Enum):
     """User subscription tier."""
 
@@ -124,7 +139,8 @@ class ProStatus:
             "rescue_passes_remaining": self.rescue_passes_remaining,
             "is_rescue": self.is_rescue,
             "rescue_until": self.rescue_until.isoformat() if self.rescue_until else None,
-            "rescue_until_taipei": format_taipei_hm(self.rescue_until) if self.rescue_until else None,
+            "rescue_until_taipei": format_taipei_expiry(self.rescue_until, "en") if self.rescue_until else None,
+            "rescue_until_taipei_zh": format_taipei_expiry(self.rescue_until, "zh-Hant") if self.rescue_until else None,
             "rescue_remaining_seconds": remaining_s,
             "muse_used": self.muse_used,
             "muse_limit": self.muse_limit,

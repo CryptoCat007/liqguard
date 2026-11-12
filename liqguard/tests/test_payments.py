@@ -13,7 +13,7 @@ import pytest
 
 from liqguard.models import User
 from liqguard.payments import EntitlementService, PayPalClient, ProStatus, Tier
-from liqguard.payments.entitlements import TAIPEI, format_taipei_hm
+from liqguard.payments.entitlements import TAIPEI, format_taipei_expiry, format_taipei_hm
 from liqguard.payments.webhooks import WebhookHandler
 
 # ---------------------------------------------------------------- fixtures
@@ -290,6 +290,12 @@ class TestEntitlementService:
         status = await entitlements.get_status(uid)
         assert status.is_rescue
         assert format_taipei_hm(until) == until.astimezone(TAIPEI).strftime("%H:%M")
+        local = until.astimezone(TAIPEI)
+        en_until = format_taipei_expiry(until, "en")
+        assert local.strftime("%H:%M") in en_until and str(local.day) in en_until and "," in en_until
+        d = status.to_dict()
+        assert d["rescue_until_taipei"] == en_until
+        assert d["rescue_until_taipei_zh"] == format_taipei_expiry(until, "zh-Hant")
 
     @pytest.mark.asyncio
     async def test_rescue_mode_extends_and_expires(self, entitlements):
@@ -762,6 +768,26 @@ class TestProStatus:
         assert d["tier"] == "pro"
         assert d["is_pro"] is True
         assert d["subscription_id"] == "sub_123"
+
+
+def test_format_taipei_expiry_shows_calendar_date():
+    """HH:MM alone looks expired when Rescue Mode ends tomorrow at the same clock time."""
+    from liqguard.i18n import EN, ZH, t
+
+    dt = datetime(2026, 11, 13, 22, 49, tzinfo=TAIPEI)
+    en, zh = format_taipei_expiry(dt, "en"), format_taipei_expiry(dt, "zh-Hant")
+    assert en == "Nov 13, 22:49"
+    assert zh == "11/13 22:49"
+    assert format_taipei_hm(dt) == "22:49"
+    en_msg = t(EN, "pro.notifications.rescue_mode_active", until=en)
+    zh_msg = t(ZH, "pro.notifications.rescue_mode_active", until=zh)
+    assert "Nov 13, 22:49" in en_msg and "(Taipei)" in en_msg
+    assert "11/13 22:49" in zh_msg and "台北" in zh_msg
+    assert t(EN, "pro.rescue_mode_until", until=en) == "Rescue Mode active until Nov 13, 22:49 (Taipei)"
+    assert t(ZH, "pro.rescue_mode_until", until=zh) == "救援模式有效至 11/13 22:49（台北）"
+    assert t(EN, "web.rescue_paid", until=en).startswith("Payment received")
+    assert "Telegram" in t(EN, "web.rescue_paid", until=en)
+    assert "Telegram" in t(ZH, "web.rescue_paid", until=zh)
 
 
 # ---------------------------------------------------------------- upgrade suggestion tests

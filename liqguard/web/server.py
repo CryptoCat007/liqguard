@@ -43,6 +43,7 @@ from liqguard.core.user_settings import apply_setting, settings_dict
 from liqguard.i18n import localize, normalize, t, web_catalog
 from liqguard.models import Position, User
 from liqguard.payments import PayPalClient, PayPalError
+from liqguard.payments.entitlements import format_taipei_expiry
 from liqguard.payments.webhooks import (
     WebhookHandler,
     extract_webhook_headers,
@@ -791,7 +792,7 @@ def create_app(
             paypal=paypal,
         )
 
-        def _paid_page(request: Request, claims: Optional[SessionClaims], *, kind: str, ok: bool):
+        def _paid_page(request: Request, claims: Optional[SessionClaims], *, kind: str, ok: bool, until: str = ""):
             if claims is not None:
                 if kind == "rescue":
                     q = "rescue=success" if ok else "rescue=error"
@@ -799,7 +800,9 @@ def create_app(
                     q = "billing=success" if ok else "billing=error"
                 return RedirectResponse(f"/me?{q}", status_code=303)
             page_kind = "pro" if kind.startswith("pro") else "rescue"
-            return HTMLResponse(render_payment_received(request_language(request), kind=page_kind, ok=ok))
+            return HTMLResponse(render_payment_received(
+                request_language(request), kind=page_kind, ok=ok, until=until,
+            ))
         app.state.paypal = paypal
         app.state.entitlements = entitlements
 
@@ -984,7 +987,8 @@ def create_app(
             if telegram_id is None:
                 logger.warning("Rescue return for %s captured but not attributed", token)
                 return _paid_page(request, claims, kind="rescue", ok=False)
-            return _paid_page(request, claims, kind="rescue", ok=True)
+            until_label = format_taipei_expiry(_until, request_language(request)) if _until else ""
+            return _paid_page(request, claims, kind="rescue", ok=True, until=until_label)
 
         # ---------------------------------------------------------------- PayPal webhooks
 
